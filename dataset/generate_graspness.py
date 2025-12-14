@@ -1,7 +1,7 @@
 import numpy as np
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "6"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 from PIL import Image
 import scipy.io as scio
@@ -18,7 +18,7 @@ from graspnetAPI.utils.utils import get_obj_pose_list, transform_points
 import argparse
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset_root', default='/home/xiaoming/dataset/graspnet', help='the root of the GraspNet dataset')
+parser.add_argument('--dataset_root', default='/home/user/dataset/graspnet', help='the root of the GraspNet dataset')
 parser.add_argument('--camera_type', default='kinect', help='Camera split [realsense/kinect]')
 
 
@@ -121,4 +121,5 @@ if __name__ == '__main__':
             min_graspness = np.min(cloud_masked_graspness)
             cloud_masked_graspness = (cloud_masked_graspness - min_graspness) / (max_graspness - min_graspness)
 
-            np.save(os.path.join(save_path, str(ann_id).zfill(4) + '.npy'), cloud_masked_graspness)
+            print(cloud_masked_graspness.shape)
+            # np.save(os.path.join(save_path, str(ann_id).zfill(4) + '.npy'), cloud_masked_graspness)

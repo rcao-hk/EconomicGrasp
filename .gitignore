@@ -4,3 +4,5 @@
 /.idea
 /results
 __pycache__
+scripts
+libs/knn

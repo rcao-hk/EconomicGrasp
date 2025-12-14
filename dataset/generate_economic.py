@@ -9,7 +9,7 @@ import argparse
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset_root', default='/home/xiaoming/dataset/graspnet', help='the root of the GraspNet dataset')
+parser.add_argument('--dataset_root', default='/home/user/dataset/graspnet', help='the root of the GraspNet dataset')
 parser.add_argument('--camera_type', default='kinect', help='Camera split [realsense/kinect]')
 
 cfgs = parser.parse_args()
