@@ -14,4 +14,21 @@
 # implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
+from .backbone_2d import ConvBackbone2D, IdentityBackbone2D
+from .neck_2d import IdentityNeck2D, PyramidFusionNeck
+from .spatial_enhancer import (
+    BatchDepthProbGTGenerator,
+    DepthFusionSpatialEnhancer,
+)
 from .structure import BIP3D, BIP3DConfig
+
+__all__ = [
+    "BIP3D",
+    "BIP3DConfig",
+    "ConvBackbone2D",
+    "IdentityBackbone2D",
+    "IdentityNeck2D",
+    "PyramidFusionNeck",
+    "BatchDepthProbGTGenerator",
+    "DepthFusionSpatialEnhancer",
+]
