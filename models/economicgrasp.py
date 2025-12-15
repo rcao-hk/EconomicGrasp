@@ -124,6 +124,23 @@ class economicgrasp(nn.Module):
 
 from models.pspnet import PSPNet
 class economicgrasp_multi(nn.Module):
+    """Point-center multi-modal EconomicGrasp.
+
+    This variant keeps the original point-centric grasp head while replacing the
+    feature extractor with an image-guided pathway:
+
+    1. A PSPNet backbone extracts dense 2D features from the RGB image.
+    2. Each 3D point gathers its aligned pixel feature via ``img_idxs``
+       (precomputed during data loading) to build per-point image descriptors.
+    3. The Minkowski U-Net consumes these point-wise image features to produce
+       sparse 3D features, which flow through the existing graspable/view/GR
+       heads without structural changes.
+
+    The design remains robust to missing graspable points by padding/FPS logic
+    in the forward pass, making it suitable for rapid experimentation with
+    multi-modal cues while preserving the point-center inference interface.
+    """
+
     def __init__(self,
                  cylinder_radius=0.05,
                  seed_feat_dim=512,
