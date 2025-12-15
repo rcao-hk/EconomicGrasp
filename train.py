@@ -47,19 +47,26 @@ def my_worker_init_fn(worker_id):
 # Create Dataset and Dataloader
 # TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, camera=cfgs.camera, split='train',
 #                                 voxel_size=cfgs.voxel_size, num_points=cfgs.num_point, remove_outlier=True, augment=True)
-TRAIN_DATASET = GraspNetMultiDataset(cfgs.dataset_root, camera=cfgs.camera, split='train', voxel_size=cfgs.voxel_size, num_points=cfgs.num_point, remove_outlier=True, augment=False)
+if cfgs.multi_modal:
+    TRAIN_DATASET = GraspNetMultiDataset(cfgs.dataset_root, camera=cfgs.camera, split='train', voxel_size=cfgs.voxel_size, num_points=cfgs.num_point, remove_outlier=True, augment=False)
+else:
+    TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, camera=cfgs.camera, split='train',
+                                    voxel_size=cfgs.voxel_size, num_points=cfgs.num_point, remove_outlier=True, augment=True)
+
 TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
                               num_workers=2, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn)
 
 # Init the model
-# net = economicgrasp(seed_feat_dim=512, is_training=True)
-net = economicgrasp_multi(seed_feat_dim=512, is_training=True)
-
+if cfgs.multi_modal:
+    net = economicgrasp_multi(seed_feat_dim=512, is_training=True)
+else:
+    net = economicgrasp(seed_feat_dim=512, is_training=True)
+    
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 net.to(device)
 
 # Load the Adam optimizer
-optimizer = optim.Adam(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
+optimizer = optim.AdamW(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
 
 # Load checkpoint if there is any
 start_epoch = 0
