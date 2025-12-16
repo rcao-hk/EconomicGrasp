@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import os
+import sys
+
 import torch
 from torch.utils.data import DataLoader, Dataset
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from models.economicgrasp_multi import economicgrasp_multi_bip3d
 
