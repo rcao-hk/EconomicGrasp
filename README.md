@@ -110,6 +110,20 @@ Then we can train our model.
 CUDA_VISIBLE_DEVICES=0 python train.py --model economicgrasp --camera kinect --log_dir results/economicgrasp --max_epoch 10 --batch_size 4 --dataset_root /home/xiaoming/dataset/graspnet
 ```
 
+### Point-center multi-modal variant
+
+We additionally provide a point-center multi-modal design (`economicgrasp_multi`) that consumes both RGB images and point clouds:
+
+- **Image guidance**: a PSPNet backbone produces dense 2D features; each 3D point gathers its aligned pixel embedding via the precomputed `img_idxs` from `GraspNetMultiDataset`.
+- **Sparse fusion**: the gathered per-point image descriptors are fed to the Minkowski U-Net, keeping the downstream graspable/view/grouping/score heads unchanged.
+- **Robust sampling**: the forward pass pads or falls back to FPS when graspable points are scarce, preserving the point-center inference interface.
+
+To try the multi-modal branch, switch the dataset and model arguments:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python train.py --model economicgrasp_multi --camera kinect --log_dir results/economicgrasp_multi --max_epoch 10 --batch_size 4 --dataset_root /home/xiaoming/dataset/graspnet
+```
+
 ### Testing
 
 [EconomicGrasp-kinect](https://github.com/iSEE-Laboratory/EconomicGrasp/releases/download/v1/economicgrasp_kinect.tar)
