@@ -20,11 +20,11 @@ from .spatial_enhancer import (
     BatchDepthProbGTGenerator,
     DepthFusionSpatialEnhancer,
 )
-from .structure import BIP3D, BIP3DConfig
+# from .structure import BIP3D, BIP3DConfig
 
 __all__ = [
-    "BIP3D",
-    "BIP3DConfig",
+    # "BIP3D",
+    # "BIP3DConfig",
     "ConvBackbone2D",
     "IdentityBackbone2D",
     "IdentityNeck2D",

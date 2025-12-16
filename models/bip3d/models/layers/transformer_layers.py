@@ -24,7 +24,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from utils.build import build
+from ...utils.build import build
 
 __all__ = ["LayerScale", "MultiheadAttention", "FFN", "MLP"]
 

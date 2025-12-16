@@ -3,8 +3,8 @@ import argparse
 parser = argparse.ArgumentParser()
 
 # data relevant
-parser.add_argument('--dataset_root', required=True, help='Dataset root')
-parser.add_argument('--camera', required=True, help='Camera split [realsense/kinect]')
+parser.add_argument('--dataset_root', default='/data/robotarm/dataset/graspnet', help='Dataset root')
+parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 
 # log
 parser.add_argument('--log_dir', default='log', help='Dump dir to save model checkpoint [default: log]')
