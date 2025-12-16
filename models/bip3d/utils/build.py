@@ -20,58 +20,37 @@ from typing import Annotated, Any
 
 import torch
 from pydantic.functional_validators import PlainValidator
-from robo_orchard_core.utils.config import ClassConfig, callable_to_string
 
 __all__ = ["build", "DelayInitDictType"]
 
 
-def build(obj: ClassConfig | dict | Any, *args) -> Any:
-    """Instantiates an object based on the provided configuration or object.
+def _import_from_string(path: str):
+    """Import a class or module from a string path.
 
-    This function serves as a flexible factory. It can build an object
-    from a `ClassConfig` instance, a dictionary specifying the object's
-    type and parameters, or simply return the object if it's of any other type.
+    The path supports two formats:
 
-    Special handling is implemented for `torch.nn.GroupNorm`, where if `*args`
-    are provided, the first argument is assumed to be `num_channels`.
-
-    Args:
-        obj: The configuration or object to build from.
-
-            - If `ClassConfig`: An instance of `ClassConfig` which contains
-              the class type and initialization parameters.
-
-            - If `dict`: A dictionary containing a 'class_type' or 'type' key
-              specifying the class to instantiate (either as a callable or
-              a string like 'module.name:ClassName' or 'module.name'),
-              and other keys as keyword arguments for the constructor.
-
-            - If any other type: The object itself is returned.
-
-        *args: Additional positional arguments to pass to the constructor
-            of the object being built.
-
-    Returns:
-        The instantiated object, or `obj` itself if no instantiation logic
-        applies to its type.
-
-    Raises:
-        KeyError: If `obj` is a dictionary and is missing both 'class_type'
-            and 'type' keys.
-        ImportError: If `obj` is a dictionary and the class string refers
-            to a module or class that cannot be imported.
-        AttributeError: If `obj` is a dictionary and the class string refers
-            to a module but the class name cannot be found within it.
+    - ``"package.module:Class"`` to fetch a class from a module.
+    - ``"package.module"`` to import a module directly.
     """
 
-    if isinstance(obj, ClassConfig):
-        if obj.class_type == torch.nn.GroupNorm:
-            return obj(num_channels=args[0])
-        else:
-            return obj()
-    elif isinstance(obj, dict):
-        cfg = copy.deepcopy(obj)
+    if ":" in path:
+        module_name, cls_name = path.split(":")
+        module = importlib.import_module(module_name)
+        return getattr(module, cls_name)
+    return importlib.import_module(path)
 
+
+def build(obj: dict | Any, *args) -> Any:
+    """Instantiate an object from a light-weight config.
+
+    This version removes the dependency on ``robo_orchard_core`` while keeping
+    the dictionary-driven factory interface used across the BIP3D modules. A
+    config dictionary may specify ``type`` or ``class_type`` (callable or
+    import path). Any remaining keys are forwarded to the constructor.
+    """
+
+    if isinstance(obj, dict):
+        cfg = copy.deepcopy(obj)
         if "class_type" in cfg:
             cls = cfg.pop("class_type")
         elif "type" in cfg:
@@ -80,15 +59,10 @@ def build(obj: ClassConfig | dict | Any, *args) -> Any:
             raise KeyError("Missing type key `class_type` or `type`")
 
         if isinstance(cls, str):
-            if ":" in cls:
-                module_name, cls_name = cls.split(":")
-                module = importlib.import_module(module_name)
-                cls = getattr(module, cls_name)
-            else:
-                cls = importlib.import_module(cls)
+            cls = _import_from_string(cls)
         if cls == torch.nn.GroupNorm and len(args) == 1:
-            return cls(num_channels=args[0], **cfg)  # type: ignore
-        return cls(*args, **cfg)  # type: ignore
+            return cls(num_channels=args[0], **cfg)  # type: ignore[arg-type]
+        return cls(*args, **cfg)  # type: ignore[arg-type]
     else:
         return obj
 
@@ -127,7 +101,7 @@ def _validate_delay_init_dict(x: dict) -> dict:
         class_type = x.pop("type")
 
     if not isinstance(class_type, str):
-        class_type = callable_to_string(class_type)
+        class_type = f"{class_type.__module__}:{class_type.__name__}"
 
     for key, value in x.items():
         if isinstance(value, dict):
