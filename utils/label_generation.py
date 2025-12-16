@@ -8,7 +8,8 @@ import os
 import sys
 import torch
 
-from libs.knn.knn_modules import knn
+# from libs.knn.knn_modules import knn
+from pytorch3d.ops.knn import knn_points
 from utils.loss_utils import (batch_viewpoint_params_to_matrix, transform_point_cloud,
                               generate_grasp_views, compute_pointwise_dists)
 from utils.arguments import cfgs
@@ -69,9 +70,15 @@ def process_grasp_labels(end_points):
             # [300 (views), 3, 3 (the rotation matrix)]
 
             # assign views after transform (the view will not exactly match)
-            grasp_views_ = grasp_views.transpose(0, 1).contiguous().unsqueeze(0)
-            grasp_views_trans_ = grasp_views_trans.transpose(0, 1).contiguous().unsqueeze(0)
-            view_inds = knn(grasp_views_trans_, grasp_views_, k=1).squeeze() - 1  # [300]
+            # grasp_views_ = grasp_views.transpose(0, 1).contiguous().unsqueeze(0)
+            # grasp_views_trans_ = grasp_views_trans.transpose(0, 1).contiguous().unsqueeze(0)
+            # view_inds = knn(grasp_views_trans_, grasp_views_, k=1).squeeze() - 1  # [300]
+            
+            grasp_views_ = grasp_views.unsqueeze(0)
+            grasp_views_trans_ = grasp_views_trans.unsqueeze(0)
+            _, view_inds, _ = knn_points(grasp_views_, grasp_views_trans_, K=1)
+            view_inds = view_inds.squeeze(-1).squeeze(0)
+            
             view_graspness_trans = torch.index_select(view_graspness, 1, view_inds)  # [object points, 300]
             grasp_views_rot_trans = torch.index_select(grasp_views_rot_trans, 0, view_inds)
             grasp_views_rot_trans = grasp_views_rot_trans.unsqueeze(0).expand(num_grasp_points, -1, -1, -1)
@@ -105,10 +112,15 @@ def process_grasp_labels(end_points):
         grasp_views_rot_merged = torch.cat(grasp_views_rot_merged, dim=0)  # [all object points, 300, 3, 3]
 
         # compute nearest neighbors
-        seed_xyz_ = seed_xyz.transpose(0, 1).contiguous().unsqueeze(0)
-        grasp_points_merged_ = grasp_points_merged.transpose(0, 1).contiguous().unsqueeze(0)
-        nn_inds = knn(grasp_points_merged_, seed_xyz_, k=1).squeeze() - 1
+        # seed_xyz_ = seed_xyz.transpose(0, 1).contiguous().unsqueeze(0)
+        # grasp_points_merged_ = grasp_points_merged.transpose(0, 1).contiguous().unsqueeze(0)
+        # nn_inds = knn(grasp_points_merged_, seed_xyz_, k=1).squeeze() - 1
 
+        seed_xyz_ = seed_xyz.unsqueeze(0)  # (1, Ns, 3)
+        grasp_points_merged_ = grasp_points_merged.unsqueeze(0)  # (1, Np', 3)
+        _, nn_inds, _ = knn_points(seed_xyz_, grasp_points_merged_, K=1) # (Ns)
+        nn_inds = nn_inds.squeeze(-1).squeeze(0)
+        
         # assign anchor points to real points
         grasp_points_merged = torch.index_select(grasp_points_merged, 0, nn_inds)
         # [1024 (scene points after sample), 3]
