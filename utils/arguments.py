@@ -3,8 +3,8 @@ import argparse
 parser = argparse.ArgumentParser()
 
 # data relevant
-parser.add_argument('--dataset_root', required=True, help='Dataset root')
-parser.add_argument('--camera', required=True, help='Camera split [realsense/kinect]')
+parser.add_argument('--dataset_root', default='/data/robotarm/dataset/graspnet', help='Dataset root')
+parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 
 # log
 parser.add_argument('--log_dir', default='log', help='Dump dir to save model checkpoint [default: log]')
@@ -46,6 +46,7 @@ parser.add_argument('--test_mode', type=str, help='Mode of the testing (seen, si
 parser.add_argument('--collision_thresh', type=float, default=0,
                     help='Collision threshold in collision detection [default: 0], if used, set to 0.01')
 parser.add_argument('--inference', action='store_true', help='Whether to inference')
+parser.add_argument('--multi_modal', action='store_true', help='Whether use multi-modal model')
 
 
 cfgs = parser.parse_args()

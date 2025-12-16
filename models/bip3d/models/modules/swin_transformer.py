@@ -28,8 +28,8 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as cp
 from torch import Tensor, nn
 
-from robo_orchard_lab.models.layers.transformer_layers import FFN
-from robo_orchard_lab.utils.build import build
+from models.layers.transformer_layers import FFN
+from utils.build import build
 
 logger = logging.getLogger(__name__)
 

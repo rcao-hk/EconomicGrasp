@@ -17,7 +17,7 @@
 import torch
 from torch import nn
 
-from .utils import deformable_format
+from .util import deformable_format
 from .models.layers.transformer_layers import FFN, MLP
 
 

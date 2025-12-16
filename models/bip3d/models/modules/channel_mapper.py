@@ -22,7 +22,7 @@ from typing import List, Optional, Tuple, Union
 
 from torch import Tensor, nn
 
-from robo_orchard_lab.utils.build import build
+from utils.build import build
 
 
 class ChannelMapper(nn.Module):
