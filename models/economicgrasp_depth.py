@@ -65,6 +65,97 @@ def _make_coords_for_me(cloud: torch.Tensor, voxel_size: float):
     return coords_list
 
 
+from dinov2_dpt import DINOv2_DPT
+class DINOv2DepthDistributionNet(nn.Module):
+    """
+    RGB -> depth-bin logits -> depth distribution (stride tokens) -> expected depth map (448x448)
+
+    输出：
+      depth_prob_pred: (B,1,Ntok,D)  Ntok=Hr*Wr, Hr=Wr=224 if stride=2
+      spatial_shape:   (Hr,Wr)
+      depth_map_pred:  (B,1,448,448) 期望深度（anchors 加权）
+      depth_logits_tok:(B,D,Hr,Wr)    token logits（做 BCE / 调试更方便）
+    """
+    def __init__(self,
+                 encoder="vitb",
+                 dpt_features=128,
+                 stride=2,
+                 min_depth=0.2,
+                 max_depth=2.0,
+                 bin_num=256,
+                 freeze_backbone=True):
+        super().__init__()
+        assert stride in [1, 2, 4], "先把 stride 控制在 {1,2,4}"
+        self.stride = int(stride)
+        self.min_depth = float(min_depth)
+        self.max_depth = float(max_depth)
+        self.bin_num = int(bin_num)
+        self.freeze_backbone_flag = bool(freeze_backbone)
+
+        # ✅ 关键：这里直接初始化 DINOv2_DPT（不再外部传入）
+        self.dpt = DINOv2_DPT(
+            encoder=encoder,
+            features=dpt_features,
+            depth_bin=self.bin_num,
+        )
+
+        anchors = torch.linspace(self.min_depth, self.max_depth, self.bin_num).view(1, self.bin_num, 1, 1)
+        self.register_buffer("depth_anchors", anchors, persistent=False)
+
+        if self.freeze_backbone_flag:
+            self._freeze_backbone()
+
+    def _freeze_backbone(self):
+        # 只冻结 dinov2 ViT backbone，DPT head 继续训练
+        for p in self.dpt.backbone.parameters():
+            p.requires_grad_(False)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if mode and self.freeze_backbone_flag:
+            self._freeze_backbone()
+        return self
+
+    def forward(self, img: torch.Tensor):
+        """
+        img: (B,3,448,448)
+        """
+        B, _, H, W = img.shape
+        assert (H, W) == (448, 448), "期望输入 448x448（与你 dataloader 的 Resize 对齐）"
+
+        # 不调用 dpt.forward（它只返回 depth），我们直接用 backbone + depth_head 拿 logits
+        patch_h, patch_w = H // 14, W // 14
+        feats = self.dpt.backbone.get_intermediate_layers(
+            img,
+            self.dpt.intermediate_layer_idx[self.dpt.encoder],
+            return_class_token=True
+        )
+        img_feat, depth_logits_448 = self.dpt.depth_head(feats, patch_h, patch_w)  # (B,D,448,448)
+
+        # stride token（你要 stride=2 -> 224x224）
+        if self.stride > 1:
+            depth_logits_tok = F.avg_pool2d(depth_logits_448, kernel_size=self.stride, stride=self.stride)
+        else:
+            depth_logits_tok = depth_logits_448
+        Hr, Wr = depth_logits_tok.shape[2], depth_logits_tok.shape[3]
+
+        # distribution
+        depth_prob_tok = depth_logits_tok.softmax(dim=1)  # (B,D,Hr,Wr)
+
+        # expected depth @ token
+        anchors = self.depth_anchors.to(depth_prob_tok.dtype)
+        depth_tok = (depth_prob_tok * anchors).sum(dim=1, keepdim=True)  # (B,1,Hr,Wr)
+
+        # upsample -> 448
+        if (Hr, Wr) != (448, 448):
+            depth_map_pred = F.interpolate(depth_tok, size=(448, 448), mode="nearest", align_corners=True)
+        else:
+            depth_map_pred = depth_tok
+
+        # (B,1,Ntok,D)
+        depth_prob_pred = depth_prob_tok.permute(0, 2, 3, 1).contiguous().view(B, 1, Hr * Wr, self.bin_num)
+
+        return depth_prob_pred, (Hr, Wr), depth_map_pred, img_feat, depth_logits_tok
 # -------------------------
 # RGB -> depth distribution (stride=2 => 224x224 tokens)
 # -------------------------
@@ -184,13 +275,22 @@ class EconomicGrasp_RGBDepthProb(nn.Module):
         self.voxel_size = float(voxel_size)
         self.num_points = int(num_points)
 
-        self.depth_net = RGBDepthDistributionNet(
-            img_feat_dim=img_feat_dim,
+        # self.depth_net = RGBDepthDistributionNet(
+        #     img_feat_dim=img_feat_dim,
+        #     stride=depth_stride,
+        #     min_depth=min_depth,
+        #     max_depth=max_depth,
+        #     bin_num=bin_num,
+        #     psp_backend="resnet34"
+        # )
+        self.depth_net = DINOv2DepthDistributionNet(
+            encoder="vitb",
+            dpt_features=img_feat_dim,
             stride=depth_stride,
             min_depth=min_depth,
             max_depth=max_depth,
             bin_num=bin_num,
-            psp_backend="resnet34"
+            freeze_backbone=True,   # ✅ 训练时冻结 ViT backbone
         )
 
         self.grasp_net = EconomicGrasp3D(
@@ -206,10 +306,13 @@ class EconomicGrasp_RGBDepthProb(nn.Module):
         img_idxs = end_points["img_idxs"]  # (B,20000) flatten idx in 448*448
 
         # ---- 1) RGB -> depth distribution + depth map (448) ----
-        depth_prob_pred, spatial_shape, depth_map_pred = self.depth_net(img)
-        end_points["depth_prob_pred"] = depth_prob_pred          # (B,1,Ntok,D)
-        end_points["depth_spatial_shape"] = spatial_shape        # (Hr,Wr)
-        end_points["depth_map_pred"] = depth_map_pred            # (B,1,448,448)
+        depth_prob_pred, spatial_shape, depth_map_pred, img_feat, depth_logits_tok = self.depth_net(img)
+
+        end_points["depth_prob_pred"] = depth_prob_pred      # (B,1,Ntok,D)  Ntok=224*224
+        end_points["depth_spatial_shape"] = spatial_shape    # (224,224)
+        end_points["depth_map_pred"] = depth_map_pred        # (B,1,448,448)
+        end_points["img_feat_dpt"] = img_feat                # (B,C,?,?) 供你以后可视化/扩展
+        end_points["depth_logits_tok"] = depth_logits_tok     # (B,D,224,224) 训练 BCE 用更方便
 
         # ---- 2) backproject ONLY at sampled pixels (aligned to labels) ----
         # cloud: (B,20000,3)
