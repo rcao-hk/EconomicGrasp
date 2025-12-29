@@ -14,7 +14,10 @@ from utils.arguments import cfgs
 
 # Local Libraries
 from models.economicgrasp import economicgrasp, economicgrasp_multi
-from models.loss_economicgrasp import get_loss as get_loss_economicgrasp
+# from models.economicgrasp_2d import EconomicGrasp_ImageCenter
+# from models.loss_economicgrasp import get_loss as get_loss_economicgrasp
+from models.economicgrasp_depth import EconomicGrasp_RGBDepthProb
+from models.loss_economicgrasp_depth import get_loss as get_loss_economicgrasp
 from dataset.graspnet_dataset import GraspNetDataset, GraspNetMultiDataset, collate_fn
 
 # ----------- GLOBAL CONFIG ------------
@@ -58,7 +61,12 @@ TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle
 
 # Init the model
 if cfgs.multi_modal:
-    net = economicgrasp_multi(seed_feat_dim=512, is_training=True)
+    # net = economicgrasp_multi(seed_feat_dim=512, is_training=True)
+    net = EconomicGrasp_RGBDepthProb(img_feat_dim=256,
+                 depth_stride=2,     # <-- your expectation: 224x224 tokens
+                 min_depth=0.2,
+                 max_depth=1.0,
+                 bin_num=256, is_training=True)
 else:
     net = economicgrasp(seed_feat_dim=512, is_training=True)
     

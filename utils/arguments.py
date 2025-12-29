@@ -30,6 +30,7 @@ parser.add_argument('--angle_loss_weight', type=float, default=1, help='Loss wei
 parser.add_argument('--depth_loss_weight', type=float, default=1, help='Loss weight of the depth term')
 parser.add_argument('--score_loss_weight', type=float, default=1, help='Loss weight of the score term')
 parser.add_argument('--width_loss_weight', type=float, default=10, help='Loss weight of the width term')
+parser.add_argument('--depth_prob_loss_weight', type=float, default=1, help='Loss weight of the depth distribution term')
 
 # training setting
 parser.add_argument('--checkpoint_path', default=None, help='Model checkpoint path [default: None]')
