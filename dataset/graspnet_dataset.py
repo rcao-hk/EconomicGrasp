@@ -271,7 +271,8 @@ class GraspNetDataset(Dataset):
 from torchvision import transforms
 class GraspNetMultiDataset(Dataset):
     def __init__(self, root, camera='kinect', split='train', num_points=20000, voxel_size=0.005, remove_outlier=False, remove_invisible=True,
-                 augment=False, load_label=True):
+                 augment=False, load_label=True, use_gt_depth=False,
+                 min_depth=0.2, max_depth=1.0, bin_num=256):
         self.root = root
         self.split = split
         self.voxel_size = voxel_size
@@ -281,6 +282,7 @@ class GraspNetMultiDataset(Dataset):
         self.camera = camera
         self.augment = augment
         self.load_label = load_label
+        self.use_gt_depth = use_gt_depth
         self.collision_labels = {}
 
         if split == 'train':
@@ -304,9 +306,9 @@ class GraspNetMultiDataset(Dataset):
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
 
-        self.depth_prob_min = 0.2
-        self.depth_prob_max = 2.0
-        self.depth_prob_bins = 256
+        self.depth_prob_min = min_depth
+        self.depth_prob_max = max_depth
+        self.depth_prob_bins = bin_num
         self.depth_prob_strides = [2]   # 需要更省就改成 [4]
         self.depth_prob_valid_threshold = -1       # <0 表示不做阈值裁剪；loss 里用 weight 即可
         self.gt_factor_depth = None                # None -> 默认用 meta['factor_depth']；也可以强制 1000.0
@@ -319,7 +321,7 @@ class GraspNetMultiDataset(Dataset):
         self.scenename = []
         self.frameid = []
         self.graspnesspath = []
-
+        self.gtgraspnesspath = []
         self.grasp_labels = {}
 
         for x in tqdm(self.sceneIds, desc='Loading the scene data and its labels...'):
@@ -330,6 +332,7 @@ class GraspNetMultiDataset(Dataset):
                 self.labelpath.append(os.path.join(root, 'scenes', x, camera, 'label', str(img_num).zfill(4) + '.png'))
                 self.metapath.append(os.path.join(root, 'scenes', x, camera, 'meta', str(img_num).zfill(4) + '.mat'))
                 self.graspnesspath.append(os.path.join(root, 'graspness', x, camera, str(img_num).zfill(4) + '.npy'))
+                self.gtgraspnesspath.append(os.path.join(root, 'virtual_graspness', x, camera, str(img_num).zfill(4) + '.npy'))
                 self.scenename.append(x.strip())
                 self.frameid.append(img_num)
 
@@ -581,6 +584,9 @@ class GraspNetMultiDataset(Dataset):
         except Exception as e:
             print(repr(e)); print(scene)
 
+        if self.use_gt_depth:
+            depth = gt_depth
+
         camera = CameraInfo(1280.0, 720.0, intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], factor_depth)
         cloud = create_point_cloud_from_depth_image(depth, camera, organized=True)
 
@@ -650,7 +656,7 @@ class GraspNetMultiDataset(Dataset):
         scene = self.scenename[index]
         gt_depth = np.array(Image.open(self.gtdepthpath[index]))
         graspness = np.load(self.graspnesspath[index])  # 注意：这通常对应“某个mask”的有效点序列
-
+        gt_graspness = np.load(self.gtgraspnesspath[index])
         try:
             obj_idxs = meta['cls_indexes'].flatten().astype(np.int32)
             poses = meta['poses']
@@ -658,6 +664,10 @@ class GraspNetMultiDataset(Dataset):
             factor_depth = meta['factor_depth']
         except Exception as e:
             print(repr(e)); print(scene)
+
+        if self.use_gt_depth:
+            depth = gt_depth
+            graspness = gt_graspness
 
         camera = CameraInfo(1280.0, 720.0, intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], factor_depth)
         cloud = create_point_cloud_from_depth_image(depth, camera, organized=True)

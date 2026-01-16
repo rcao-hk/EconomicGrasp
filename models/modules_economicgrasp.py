@@ -42,18 +42,32 @@ class ViewNet(nn.Module):
 
         if self.is_training:
             # normalize view graspness score to 0~1
-            view_score_ = view_score.clone().detach()
-            view_score_max, _ = torch.max(view_score_, dim=2)
-            view_score_min, _ = torch.min(view_score_, dim=2)
-            view_score_max = view_score_max.unsqueeze(-1).expand(-1, -1, self.num_view)
-            view_score_min = view_score_min.unsqueeze(-1).expand(-1, -1, self.num_view)
-            view_score_ = (view_score_ - view_score_min) / (view_score_max - view_score_min + 1e-8)
+            # view_score_ = view_score.clone().detach()
+            # view_score_max, _ = torch.max(view_score_, dim=2)
+            # view_score_min, _ = torch.min(view_score_, dim=2)
+            # view_score_max = view_score_max.unsqueeze(-1).expand(-1, -1, self.num_view)
+            # view_score_min = view_score_min.unsqueeze(-1).expand(-1, -1, self.num_view)
+            # view_score_ = (view_score_ - view_score_min) / (view_score_max - view_score_min + 1e-8)
 
-            top_view_inds = []
-            for i in range(B):
-                top_view_inds_batch = torch.multinomial(view_score_[i], 1, replacement=False)
-                top_view_inds.append(top_view_inds_batch)
-            top_view_inds = torch.stack(top_view_inds, dim=0).squeeze(-1) # [B, 1024]
+            # top_view_inds = []
+            # for i in range(B):
+            #     top_view_inds_batch = torch.multinomial(view_score_[i], 1, replacement=False)
+            #     top_view_inds.append(top_view_inds_batch)
+            # top_view_inds = torch.stack(top_view_inds, dim=0).squeeze(-1) # [B, 1024]
+            w = view_score.detach().float()
+            w = torch.nan_to_num(w, nan=0.0, posinf=0.0, neginf=0.0)
+
+            wmin = w.amin(dim=2, keepdim=True)
+            wmax = w.amax(dim=2, keepdim=True)
+            den = (wmax - wmin).clamp_min(1e-6)
+            w = (w - wmin) / den          # [0,1]
+            # 再归一化成分布 + zero_row->uniform
+            row_sum = w.sum(dim=2, keepdim=True)
+            zero_row = row_sum.squeeze(-1) <= 1e-12
+            w = w / row_sum.clamp_min(1e-12)
+            if zero_row.any():
+                w[zero_row] = 1.0 / float(self.num_view)
+            top_view_inds = torch.multinomial(w.view(-1, self.num_view), 1, replacement=True).view(B, num_seed)
         else:
             _, top_view_inds = torch.max(view_score, dim=2) # [B, 1024]
 

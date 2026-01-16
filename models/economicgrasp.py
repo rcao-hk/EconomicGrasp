@@ -72,29 +72,92 @@ class economicgrasp(nn.Module):
         graspable_mask = objectness_mask & graspness_mask
 
         # Generate the downsample point (1024 per scene) using the furthest point sampling
+        # seed_features_graspable = []
+        # seed_xyz_graspable = []
+        # graspable_num_batch = 0.
+        # for i in range(B):
+        #     cur_mask = graspable_mask[i]
+        #     graspable_num_batch += cur_mask.sum()
+        #     cur_feat = seed_features_flipped[i][cur_mask]
+        #     cur_seed_xyz = seed_xyz[i][cur_mask]
+
+        #     cur_seed_xyz = cur_seed_xyz.unsqueeze(0)
+        #     fps_idxs = furthest_point_sample(cur_seed_xyz, self.M_points)
+        #     cur_seed_xyz_flipped = cur_seed_xyz.transpose(1, 2).contiguous()
+        #     cur_seed_xyz = gather_operation(cur_seed_xyz_flipped, fps_idxs).transpose(1, 2).squeeze(0).contiguous()
+        #     cur_feat_flipped = cur_feat.unsqueeze(0).transpose(1, 2).contiguous()
+        #     cur_feat = gather_operation(cur_feat_flipped, fps_idxs).squeeze(0).contiguous()
+
+        #     seed_features_graspable.append(cur_feat)
+        #     seed_xyz_graspable.append(cur_seed_xyz)
+        # seed_xyz_graspable = torch.stack(seed_xyz_graspable, 0)
+        # # [B (batch size), 512 (feature dim), 1024 (points after sample)]
+        # seed_features_graspable = torch.stack(seed_features_graspable)
+        # end_points['xyz_graspable'] = seed_xyz_graspable
+        # end_points['D: Graspable Points'] = graspable_num_batch / B
+
+        # -------- FPS downsample (robust, always return (C,M) and (M,3)) --------
         seed_features_graspable = []
         seed_xyz_graspable = []
         graspable_num_batch = 0.
+
         for i in range(B):
-            cur_mask = graspable_mask[i]
-            graspable_num_batch += cur_mask.sum()
-            cur_feat = seed_features_flipped[i][cur_mask]
-            cur_seed_xyz = seed_xyz[i][cur_mask]
+            cur_mask = graspable_mask[i]  # (N,)
+            cur_idx = torch.nonzero(cur_mask, as_tuple=False).squeeze(1)  # (Ng,)
+            graspable_num_batch += cur_idx.numel()
 
-            cur_seed_xyz = cur_seed_xyz.unsqueeze(0)
-            fps_idxs = furthest_point_sample(cur_seed_xyz, self.M_points)
-            cur_seed_xyz_flipped = cur_seed_xyz.transpose(1, 2).contiguous()
-            cur_seed_xyz = gather_operation(cur_seed_xyz_flipped, fps_idxs).transpose(1, 2).squeeze(0).contiguous()
-            cur_feat_flipped = cur_feat.unsqueeze(0).transpose(1, 2).contiguous()
-            cur_feat = gather_operation(cur_feat_flipped, fps_idxs).squeeze(0).contiguous()
+            # ========== Case 1: Ng == 0 -> random sample from all points ==========
+            if cur_idx.numel() == 0:
+                ridx = torch.randint(0, point_num, (self.M_points,), device=seed_xyz.device)
 
-            seed_features_graspable.append(cur_feat)
+                cur_seed_xyz = seed_xyz[i].index_select(0, ridx).contiguous()              # (M, 3)
+                cur_feat_mc  = seed_features_flipped[i].index_select(0, ridx).contiguous()# (M, C)
+                cur_feat     = cur_feat_mc.transpose(0, 1).contiguous()                   # ✅ (C, M)
+
+                seed_xyz_graspable.append(cur_seed_xyz)
+                seed_features_graspable.append(cur_feat)
+                continue
+
+            # ========== Case 2: 0 < Ng < M -> pad with replacement (no FPS/gather) ==========
+            if cur_idx.numel() < self.M_points:
+                rep = torch.randint(0, cur_idx.numel(), (self.M_points,), device=seed_xyz.device)
+                ridx = cur_idx[rep]  # (M,)
+
+                cur_seed_xyz = seed_xyz[i].index_select(0, ridx).contiguous()              # (M, 3)
+                cur_feat_mc  = seed_features_flipped[i].index_select(0, ridx).contiguous()# (M, C)
+                cur_feat     = cur_feat_mc.transpose(0, 1).contiguous()                   # ✅ (C, M)
+
+                seed_xyz_graspable.append(cur_seed_xyz)
+                seed_features_graspable.append(cur_feat)
+                continue
+
+            # ========== Case 3: Ng >= M -> FPS + gather_operation ==========
+            xyz_in = seed_xyz[i].index_select(0, cur_idx).unsqueeze(0).contiguous()        # (1, Ng, 3)
+            fps_idxs = furthest_point_sample(xyz_in, self.M_points)                        # (1, M)
+            fps_idxs = fps_idxs.to(device=xyz_in.device, dtype=torch.int32).contiguous()   # ✅ must be int32
+
+            # (optional) debug safety check
+            # N = xyz_in.size(1)
+            # if int(fps_idxs.max()) >= N or int(fps_idxs.min()) < 0:
+            #     raise RuntimeError(f"FPS idx out of range: [{fps_idxs.min().item()}, {fps_idxs.max().item()}], N={N}")
+
+            cur_seed_xyz = gather_operation(xyz_in.transpose(1, 2).contiguous(), fps_idxs) \
+                            .transpose(1, 2).squeeze(0).contiguous()                      # (M, 3)
+
+            feat_in = seed_features_flipped[i].index_select(0, cur_idx).contiguous()       # (Ng, C)
+            cur_feat = gather_operation(feat_in.unsqueeze(0).transpose(1, 2).contiguous(), fps_idxs).squeeze(0).contiguous()                                          # ✅ (C, M)
+
             seed_xyz_graspable.append(cur_seed_xyz)
-        seed_xyz_graspable = torch.stack(seed_xyz_graspable, 0)
-        # [B (batch size), 512 (feature dim), 1024 (points after sample)]
-        seed_features_graspable = torch.stack(seed_features_graspable)
-        end_points['xyz_graspable'] = seed_xyz_graspable
-        end_points['D: Graspable Points'] = graspable_num_batch / B
+            seed_features_graspable.append(cur_feat)
+
+        seed_xyz_graspable = torch.stack(seed_xyz_graspable, 0)            # (B, M, 3)
+        seed_features_graspable = torch.stack(seed_features_graspable, 0)  # ✅ (B, C, M)
+
+        end_points['xyz_graspable'] = seed_xyz_graspable.contiguous()
+        end_points['D: Graspable Points'] = (
+            torch.as_tensor(graspable_num_batch, device=seed_xyz.device, dtype=torch.float32)
+            / float(B)
+        ).detach().reshape(())
 
         # Select the view for each point
         end_points, res_feat = self.view(seed_features_graspable, end_points)

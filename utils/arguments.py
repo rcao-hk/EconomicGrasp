@@ -30,7 +30,7 @@ parser.add_argument('--angle_loss_weight', type=float, default=1, help='Loss wei
 parser.add_argument('--depth_loss_weight', type=float, default=1, help='Loss weight of the depth term')
 parser.add_argument('--score_loss_weight', type=float, default=1, help='Loss weight of the score term')
 parser.add_argument('--width_loss_weight', type=float, default=10, help='Loss weight of the width term')
-parser.add_argument('--depth_prob_loss_weight', type=float, default=1, help='Loss weight of the depth distribution term')
+parser.add_argument('--depth_prob_loss_weight', type=float, default=10, help='Loss weight of the depth distribution term')
 
 # training setting
 parser.add_argument('--checkpoint_path', default=None, help='Model checkpoint path [default: None]')
@@ -48,6 +48,12 @@ parser.add_argument('--collision_thresh', type=float, default=0,
                     help='Collision threshold in collision detection [default: 0], if used, set to 0.01')
 parser.add_argument('--inference', action='store_true', help='Whether to inference')
 parser.add_argument('--multi_modal', action='store_true', help='Whether use multi-modal model')
-
+parser.add_argument('--pin_memory', action='store_true', help='Whether use pin memory in dataloader')
+parser.add_argument('--use_gt_depth', action='store_true', help='Whether use gt depth for label matching')
+parser.add_argument('--min_depth', type=float, default=0.2, help='Minimum depth for depth probability')
+parser.add_argument('--max_depth', type=float, default=1.0, help='Maximum depth for depth probability')
+parser.add_argument('--bin_num', type=int, default=256, help='Number of bins for depth probability')
+parser.add_argument('--eval_start_epoch', type=int, default=0, help='Epoch to start evaluation [default: 0]')
+parser.add_argument('--ckpt_save_interval', type=int, default=5, help='Number for save checkpoint[default: 5]')
 
 cfgs = parser.parse_args()

@@ -10,8 +10,6 @@ from utils.collision_detector import ModelFreeCollisionDetector
 from utils.arguments import cfgs
 
 from dataset.graspnet_dataset import GraspNetDataset, GraspNetMultiDataset, collate_fn
-from models.economicgrasp import economicgrasp, economicgrasp_multi, pred_decode
-
 
 # ------------ GLOBAL CONFIG ------------
 if not os.path.exists(cfgs.save_dir):
@@ -40,17 +38,29 @@ TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=F
 
 # Init the model
 if cfgs.multi_modal:
-    net = economicgrasp_multi(seed_feat_dim=512, is_training=False)
+    from models.economicgrasp_depth import EconomicGrasp_RGBDepthProb, pred_decode
+    net = EconomicGrasp_RGBDepthProb(img_feat_dim=256,
+                 depth_stride=2,     # <-- your expectation: 224x224 tokens
+                 min_depth=0.2,
+                 max_depth=1.0,
+                 bin_num=256, is_training=False)
+    # from models.economicgrasp import economicgrasp_multi, pred_decode
+    # net = economicgrasp_multi(seed_feat_dim=512, is_training=False)
 else:
+    from models.economicgrasp import economicgrasp, pred_decode
     net = economicgrasp(seed_feat_dim=512, is_training=False)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 net.to(device)
 
 # Load checkpoint
 checkpoint = torch.load(cfgs.checkpoint_path)
-net.load_state_dict(checkpoint['model_state_dict'])
-start_epoch = checkpoint['epoch']
-print("-> loaded checkpoint %s (epoch: %d)" % (cfgs.checkpoint_path, start_epoch))
+try:
+    net.load_state_dict(checkpoint['model_state_dict'])
+except:
+    net.load_state_dict(checkpoint)
+
+# start_epoch = checkpoint['epoch']
+print("-> loaded checkpoint %s" % (cfgs.checkpoint_path))
 
 
 # ------ Testing ------------

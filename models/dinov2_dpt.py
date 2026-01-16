@@ -1,6 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.transforms import Compose
+
+from .dinov2 import DINOv2
 import torch.nn as nn
 
 
@@ -179,12 +182,11 @@ class ConvBlock(nn.Module):
 class DPTHead(nn.Module):
     def __init__(
         self, 
-        in_channels,
-        out_dim,
+        in_channels, 
         features=256, 
         use_bn=False, 
         out_channels=[256, 512, 1024, 1024], 
-        use_clstoken=False,
+        use_clstoken=False
     ):
         super(DPTHead, self).__init__()
         
@@ -251,8 +253,8 @@ class DPTHead(nn.Module):
         self.scratch.output_conv2 = nn.Sequential(
             nn.Conv2d(head_features_1 // 2, head_features_2, kernel_size=3, stride=1, padding=1),
             nn.ReLU(True),
-            nn.Conv2d(head_features_2, out_dim, kernel_size=1, stride=1, padding=0),
-            # nn.Sigmoid()
+            nn.Conv2d(head_features_2, 1, kernel_size=1, stride=1, padding=0),
+            nn.Sigmoid()
         )
     
     def forward(self, out_features, patch_h, patch_w):
@@ -291,17 +293,17 @@ class DPTHead(nn.Module):
         return path_1, out
 
 
-class DINOv2_DPT(nn.Module):
+class DA2(nn.Module):
     def __init__(
         self, 
-        encoder='vitb', 
-        features=128,
-        depth_bin=256,
-        out_channels=[128, 256, 512, 1024], 
+        encoder='vitl', 
+        features=256, 
+        out_channels=[256, 512, 1024, 1024], 
         use_bn=False, 
         use_clstoken=False,
+        max_depth=2.0
     ):
-        super(DINOv2_DPT, self).__init__()
+        super(DA2, self).__init__()
         
         self.intermediate_layer_idx = {
             'vits': [2, 5, 8, 11],
@@ -309,53 +311,19 @@ class DINOv2_DPT(nn.Module):
             'vitl': [4, 11, 17, 23], 
             'vitg': [9, 19, 29, 39]
         }
-
-        self.encoder = encoder
-        self.backbone = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
         
-        self.depth_head = DPTHead(self.backbone.embed_dim, depth_bin, features, use_bn, out_channels=out_channels, use_clstoken=use_clstoken)
+        self.max_depth = max_depth
+        
+        self.encoder = encoder
+        self.pretrained = DINOv2(model_name=encoder)
+        
+        self.depth_head = DPTHead(self.pretrained.embed_dim, features, use_bn, out_channels=out_channels, use_clstoken=use_clstoken)
     
     def forward(self, x):
         patch_h, patch_w = x.shape[-2] // 14, x.shape[-1] // 14
         
-        features = self.backbone.get_intermediate_layers(x, self.intermediate_layer_idx[self.encoder], return_class_token=True)
+        features = self.pretrained.get_intermediate_layers(x, self.intermediate_layer_idx[self.encoder], return_class_token=True)
         
-        img_feat, depth = self.depth_head(features, patch_h, patch_w)
+        depth = self.depth_head(features, patch_h, patch_w) * self.max_depth
         
-        return depth.squeeze(1)
-
-
-def main():
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--B", type=int, default=2)
-    parser.add_argument("--H", type=int, default=448)  # 需能被14整除
-    parser.add_argument("--W", type=int, default=448)  # 需能被14整除
-    parser.add_argument("--encoder", type=str, default="vitb", choices=["vits", "vitb", "vitl", "vitg"])
-    parser.add_argument("--max_depth", type=float, default=20.0)
-    parser.add_argument("--cpu", action="store_true")
-    parser.add_argument("--dummy_backbone", action="store_true", help="离线测试：不走torch.hub，使用DummyDINOv2")
-    args = parser.parse_args()
-
-    assert args.H % 14 == 0 and args.W % 14 == 0, "H/W 必须能被 14 整除（ViT patch=14）"
-
-    device = torch.device("cpu" if args.cpu or not torch.cuda.is_available() else "cuda")
-
-    # ---- 构建模型 ----
-    model = DINOv2_DPT(encoder=args.encoder, max_depth=args.max_depth).to(device)
-    model.eval()
-
-    x = torch.randn(args.B, 3, args.H, args.W, device=device)
-
-    with torch.no_grad():
-        y = model(x)
-
-    print(f"device: {device}")
-    print(f"input  shape: {tuple(x.shape)}")
-    print(f"output shape: {tuple(y.shape)}")
-    print(f"output dtype: {y.dtype}")
-    print(f"output min/max: {y.min().item():.4f} / {y.max().item():.4f}")
-
-
-if __name__ == "__main__":
-    main()
+        return depth

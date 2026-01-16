@@ -159,9 +159,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset_root', default='/home/user/dataset/graspnet')
     parser.add_argument('--camera_type', default='realsense', help='Camera split [realsense/kinect]')
-    parser.add_argument('--virtual_dataset_root', default='/data/jhpan/dataset/graspnet/virtual_scenes')
+    parser.add_argument('--virtual_dataset_root', default='/home/user/dataset/graspnet/virtual_scenes')
     parser.add_argument('--depth_type', default='real', help='Depth type [virtual/real]')
-    parser.add_argument('--proc', type=int, default=20, help='number of processes to use')
+    parser.add_argument('--proc', type=int, default=10, help='number of processes to use')
     cfgs = parser.parse_args()
     
-    parallel_generate(list(range(130)), cfgs=cfgs, proc = cfgs.proc)
+    parallel_generate(list(range(9)), cfgs=cfgs, proc = cfgs.proc)
