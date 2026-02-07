@@ -24,11 +24,11 @@ def my_worker_init_fn(worker_id):
 
 # Create dataset and dataloader
 if cfgs.multi_modal:
-    TEST_DATASET = GraspNetMultiDataset(cfgs.dataset_root, split='test_{}'.format(cfgs.test_mode),
+    TEST_DATASET = GraspNetMultiDataset(cfgs.dataset_root, split='{}'.format(cfgs.test_mode),
                                     camera=cfgs.camera, num_points=cfgs.num_point, remove_outlier=True, augment=False,
                                     load_label=False)
 else:
-    TEST_DATASET = GraspNetDataset(cfgs.dataset_root, split='test_{}'.format(cfgs.test_mode),
+    TEST_DATASET = GraspNetDataset(cfgs.dataset_root, split='{}'.format(cfgs.test_mode),
                                     camera=cfgs.camera, num_points=cfgs.num_point, remove_outlier=True, augment=False,
                                     load_label=False)
 
@@ -41,9 +41,9 @@ if cfgs.multi_modal:
     from models.economicgrasp_depth import EconomicGrasp_RGBDepthProb, pred_decode
     net = EconomicGrasp_RGBDepthProb(img_feat_dim=256,
                  depth_stride=2,     # <-- your expectation: 224x224 tokens
-                 min_depth=0.2,
-                 max_depth=1.0,
-                 bin_num=256, is_training=False)
+                 min_depth=cfgs.min_depth,
+                 max_depth=cfgs.max_depth,
+                 bin_num=cfgs.bin_num, is_training=False)
     # from models.economicgrasp import economicgrasp_multi, pred_decode
     # net = economicgrasp_multi(seed_feat_dim=512, is_training=False)
 else:

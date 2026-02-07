@@ -186,6 +186,7 @@ class DPTHead(nn.Module):
         features=256, 
         use_bn=False, 
         out_channels=[256, 512, 1024, 1024], 
+        out_dim=1,
         use_clstoken=False
     ):
         super(DPTHead, self).__init__()
@@ -253,8 +254,8 @@ class DPTHead(nn.Module):
         self.scratch.output_conv2 = nn.Sequential(
             nn.Conv2d(head_features_1 // 2, head_features_2, kernel_size=3, stride=1, padding=1),
             nn.ReLU(True),
-            nn.Conv2d(head_features_2, 1, kernel_size=1, stride=1, padding=0),
-            nn.Sigmoid()
+            nn.Conv2d(head_features_2, out_dim, kernel_size=1, stride=1, padding=0),
+            # nn.Sigmoid()
         )
     
     def forward(self, out_features, patch_h, patch_w):
@@ -301,6 +302,7 @@ class DA2(nn.Module):
         out_channels=[256, 512, 1024, 1024], 
         use_bn=False, 
         use_clstoken=False,
+        out_dim=1,
         max_depth=2.0
     ):
         super(DA2, self).__init__()
@@ -317,7 +319,7 @@ class DA2(nn.Module):
         self.encoder = encoder
         self.pretrained = DINOv2(model_name=encoder)
         
-        self.depth_head = DPTHead(self.pretrained.embed_dim, features, use_bn, out_channels=out_channels, use_clstoken=use_clstoken)
+        self.depth_head = DPTHead(self.pretrained.embed_dim, features, use_bn, out_channels=out_channels, out_dim=out_dim, use_clstoken=use_clstoken)
     
     def forward(self, x):
         patch_h, patch_w = x.shape[-2] // 14, x.shape[-1] // 14
