@@ -365,8 +365,8 @@ class DINOv2DepthRegressionNet(nn.Module):
         img_feat, depth_logits_448 = self.depthnet.depth_head(feats, patch_h, patch_w)   # (B,1,448,448)
 
         # ✅ 把输出约束到 [min_depth, max_depth]，避免爆炸 / 无意义尺度
-        depth_448 = torch.sigmoid(depth_logits_448)
-        depth_448 = depth_logits_448 * self.max_depth
+        depth_448 = F.sigmoid(depth_logits_448) * self.max_depth
+        # depth_448 = depth_448 * self.max_depth
 
         # token 级别
         if self.stride > 1:
@@ -423,21 +423,21 @@ class EconomicGrasp_RGBDepthProb(nn.Module):
         #     bin_num=bin_num,
         #     psp_backend="resnet34"
         # )
-        self.depth_net = DINOv2DepthDistributionNet(
-            encoder="vitb",
-            stride=depth_stride,
-            min_depth=min_depth,
-            max_depth=max_depth,
-            bin_num=bin_num,
-            freeze_backbone=True,   # ✅ 训练时冻结 ViT backbone
-        )
-        # self.depth_net = DINOv2DepthRegressionNet(
+        # self.depth_net = DINOv2DepthDistributionNet(
         #     encoder="vitb",
-        #     stride=depth_stride,     # 2 -> 224x224 token debug
+        #     stride=depth_stride,
         #     min_depth=min_depth,
         #     max_depth=max_depth,
-        #     freeze_backbone=True
+        #     bin_num=bin_num,
+        #     freeze_backbone=True,   # ✅ 训练时冻结 ViT backbone
         # )
+        self.depth_net = DINOv2DepthRegressionNet(
+            encoder="vitb",
+            stride=depth_stride,     # 2 -> 224x224 token debug
+            min_depth=min_depth,
+            max_depth=max_depth,
+            freeze_backbone=True
+        )
 
         self.grasp_net = EconomicGrasp3D(
             cylinder_radius=cylinder_radius,
@@ -446,8 +446,8 @@ class EconomicGrasp_RGBDepthProb(nn.Module):
             voxel_size=voxel_size
         )
 
-        self.vis_dir = 'vis'  # e.g. "vis_cloud"
-        self.vis_every = 500
+        self.vis_dir = os.path.join('vis', 'reg')  # e.g. "vis_cloud"
+        self.vis_every = 100
         self._vis_iter = 0
         if self.vis_dir is not None:
             os.makedirs(self.vis_dir, exist_ok=True)
@@ -506,30 +506,30 @@ class EconomicGrasp_RGBDepthProb(nn.Module):
         K = end_points["K"]              # (B,3,3)
         img_idxs = end_points["img_idxs"]  # (B,20000) flatten idx in 448*448
 
-        # depth_map_pred, depth_tok, img_feat = self.depth_net(img)
-        # end_points["depth_map_pred"] = depth_map_pred      # (B,1,448,448)
-        # end_points["depth_tok_pred"] = depth_tok           # (B,1,224,224) debug 用
-        # end_points["img_feat_dpt"] = img_feat
+        depth_map_pred, depth_tok, img_feat = self.depth_net(img)
+        end_points["depth_map_pred"] = depth_map_pred      # (B,1,448,448)
+        end_points["depth_tok_pred"] = depth_tok           # (B,1,224,224) debug 用
+        end_points["img_feat_dpt"] = img_feat
 
         # -------- depth classification (whole-image, patch-level loss) --------
-        depth_map_pred, depth_tok, img_feat, depth_prob_448, depth_logits_448 = self.depth_net(img, return_prob=True)
+        # depth_map_pred, depth_tok, img_feat, depth_prob_448, depth_logits_448 = self.depth_net(img, return_prob=True)
 
-        end_points["depth_map_pred"] = depth_map_pred      # (B,1,448,448)  E[z] for backprojection
-        end_points["depth_tok_pred"] = depth_tok           # (B,1,224,224)  debug
-        end_points["img_feat_dpt"]   = img_feat            # (B,C,448,448)
+        # end_points["depth_map_pred"] = depth_map_pred      # (B,1,448,448)  E[z] for backprojection
+        # end_points["depth_tok_pred"] = depth_tok           # (B,1,224,224)  debug
+        # end_points["img_feat_dpt"]   = img_feat            # (B,C,448,448)
 
         # ---- build token/patch distribution prediction for loss (no img_idxs) ----
         # depth_prob_gt is (B,1,Nfeat,256) where Nfeat=224*224 (2x2 patches)
-        B, D, H, W = depth_prob_448.shape
+        # B, D, H, W = depth_prob_448.shape
 
-        # pool per-pixel prob -> per-2x2-patch prob : (B,256,224,224)
-        prob_tok = F.avg_pool2d(depth_prob_448, kernel_size=2, stride=2)
+        # # pool per-pixel prob -> per-2x2-patch prob : (B,256,224,224)
+        # prob_tok = F.avg_pool2d(depth_prob_448, kernel_size=2, stride=2)
 
-        # reshape to (B,1,Nfeat,D)
-        prob_tok = prob_tok.permute(0, 2, 3, 1).reshape(B, -1, D).unsqueeze(1).contiguous()  # (B,1,224*224,256)
+        # # reshape to (B,1,Nfeat,D)
+        # prob_tok = prob_tok.permute(0, 2, 3, 1).reshape(B, -1, D).unsqueeze(1).contiguous()  # (B,1,224*224,256)
 
-        eps = 1e-6
-        end_points["depth_prob_logits"] = prob_tok.clamp_min(eps).log()  # (B,1,Nfeat,256)
+        # eps = 1e-6
+        # end_points["depth_prob_logits"] = prob_tok.clamp_min(eps).log()  # (B,1,Nfeat,256)
 
         # if hasattr(self.depth_net, "depth_anchors"):
         #     end_points["depth_anchors_1d"] = self.depth_net.depth_anchors.view(-1).detach()

@@ -178,6 +178,13 @@ def process_grasp_labels(end_points):
         batch_grasp_scores.append(top_grasp_scores)
         batch_grasp_widths.append(top_grasp_widths)
         batch_valid_mask.append(valid_mask)
+        
+        # print("[dbg] seed_xyz z:", seed_xyz[:,2].min().item(), seed_xyz[:,2].median().item(), seed_xyz[:,2].max().item())
+        # print("[dbg] grasp_xyz z:", grasp_points_merged[:,2].min().item(), grasp_points_merged[:,2].median().item(), grasp_points_merged[:,2].max().item())
+
+        # print("[dbg] seed mean:", seed_xyz.mean(0))
+        # print("[dbg] grasp mean:", grasp_points_merged.mean(0))
+        # print("[dbg] mean delta:", (seed_xyz.mean(0) - grasp_points_merged.mean(0)))
 
     batch_grasp_points = torch.stack(batch_grasp_points, 0)
     # [B (batch size), 1024 (scene points after sample), 3]

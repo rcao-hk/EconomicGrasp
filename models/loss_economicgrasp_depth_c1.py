@@ -28,14 +28,14 @@ def get_loss(end_points):
         cfgs.score_loss_weight      * score_loss      +
         cfgs.width_loss_weight      * width_loss )
     
-    depth_prob_loss = cfgs.depth_prob_loss_weight * depth_reg_loss
-    loss = obj_loss + grasp_loss + depth_prob_loss
+    depth_reg_loss = cfgs.depth_prob_loss_weight * depth_reg_loss
+    loss = obj_loss + grasp_loss + depth_reg_loss
 
     # depth_prob_loss = cfgs.depth_prob_loss_weight * depth_prob_loss
     # loss = obj_loss + grasp_loss + depth_prob_loss
     end_points['A: Objectness Loss'] = objectness_loss
     end_points['A: Grasp Loss'] = grasp_loss
-    end_points['A: DepthReg Loss'] = depth_prob_loss
+    end_points['A: DepthReg Loss'] = depth_reg_loss
     end_points['A: Overall Loss'] = loss
     return loss, end_points
 
@@ -74,7 +74,7 @@ def compute_depth_reg_loss(
 
     pred = end_points["depth_map_pred"]
     gt   = end_points["gt_depth_m"]
-
+    
     if pred.dim() == 3:  # (B,H,W) -> (B,1,H,W)
         pred = pred.unsqueeze(1)
     if gt.dim() == 3:
