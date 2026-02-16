@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from models.modules_economicgrasp import GraspableNet, ViewNet, Cylinder_Grouping_Global_Interaction, Grasp_Head_Local_Interaction
 from libs.pointnet2.pointnet2_utils import furthest_point_sample, gather_operation
 from utils.arguments import cfgs
-from utils.label_generation import process_grasp_labels
+from utils.label_generation import process_grasp_labels, batch_viewpoint_params_to_matrix
 import numpy as np
 import os
 import open3d as o3d
@@ -52,8 +52,9 @@ class economicgrasp_c1(nn.Module):
         img_feat_dim=None,          # None: fuse 用 LazyLinear 自动适配 depth_net 的 Cf
         is_training=True,
         pe_dim=64,
-        depth_min=0.2,
-        depth_max=1.0,
+        depth_stride=2,
+        min_depth=0.2,
+        max_depth=1.0,
     ):
         super().__init__()
         self.is_training = bool(is_training)
@@ -64,14 +65,14 @@ class economicgrasp_c1(nn.Module):
         self.M_points  = cfgs.m_point
         self.num_view  = cfgs.num_view
 
-        self.depth_min = float(depth_min)
-        self.depth_max = float(depth_max)
+        self.min_depth = float(min_depth)
+        self.max_depth = float(max_depth)
 
         self.depth_net = DINOv2DepthRegressionNet(
             encoder="vitb",
-            stride=2,
-            min_depth=self.depth_min,
-            max_depth=self.depth_max,
+            stride=depth_stride,
+            min_depth=self.min_depth,
+            max_depth=self.max_depth,
             freeze_backbone=True
         )
 
@@ -115,7 +116,7 @@ class economicgrasp_c1(nn.Module):
 
         # self._init_weights(skip_modules=(self.depth_net,))
         
-        self.vis_dir = os.path.join('vis', 'c1')  # e.g. "vis_cloud"
+        self.vis_dir = os.path.join('vis', 'c1_detach')  # e.g. "vis_cloud"
         self.vis_every = 1000
         self._vis_iter = 0
         if self.vis_dir is not None:
@@ -214,11 +215,12 @@ class economicgrasp_c1(nn.Module):
         z = gather_depth_by_img_idxs(depth_map_pred, img_idxs)  # (B,N,1)
         z = torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(1e-6)
 
-        u, v = img_idxs_to_uv(img_idxs, W)  # (B,N,1)
-        xyz = backproject_uvz(u, v, z, K)   # (B,N,3)
-
+        # stop-grad to depth via geometry path
+        z_sg = z.detach()
+        u, v = img_idxs_to_uv(img_idxs, W) # (B,N,1)
+        xyz = backproject_uvz(u, v, z_sg, K)   # xyz is now disconnected from depth_map_pred
         end_points["point_clouds"] = xyz
-
+        
         # -------- vis: save pred xyz vs gt xyz (same img_idxs) --------
         if self.vis_dir is not None:
             do_vis = (self._vis_iter % self.vis_every == 0)
@@ -329,3 +331,40 @@ class economicgrasp_c1(nn.Module):
         end_points = self.grasp_head(group_features, end_points)
 
         return end_points
+
+
+def pred_decode(end_points):
+    batch_size = len(end_points['point_clouds'])
+    grasp_preds = []
+    for i in range(batch_size):
+        grasp_center = end_points['xyz_graspable'][i].float()
+
+        # composite score estimation
+        grasp_score_prob = end_points['grasp_score_pred'][i].float()
+        score = torch.tensor([0, 0.2, 0.4, 0.6, 0.8, 1]).view(-1, 1).expand(-1, grasp_score_prob.shape[1]).to(grasp_score_prob)
+        score = torch.sum(score * grasp_score_prob, dim=0)
+        grasp_score = score.view(-1, 1)
+
+        grasp_angle_pred = end_points['grasp_angle_pred'][i].float()
+        grasp_angle, grasp_angle_indxs = torch.max(grasp_angle_pred.squeeze(0), 0)
+        grasp_angle = grasp_angle_indxs * np.pi / 12
+
+        grasp_depth_pred = end_points['grasp_depth_pred'][i].float()
+        grasp_depth, grasp_depth_indxs = torch.max(grasp_depth_pred.squeeze(0), 0)
+        grasp_depth = (grasp_depth_indxs + 1) * 0.01
+        grasp_depth = grasp_depth.view(-1, 1)
+
+        grasp_width = 1.2 * end_points['grasp_width_pred'][i] / 10.
+        grasp_width = torch.clamp(grasp_width, min=0., max=cfgs.grasp_max_width)
+        grasp_width = grasp_width.view(-1, 1)
+
+        approaching = -end_points['grasp_top_view_xyz'][i].float()
+        grasp_rot = batch_viewpoint_params_to_matrix(approaching, grasp_angle)
+        grasp_rot = grasp_rot.view(cfgs.m_point, 9)
+
+        # merge preds
+        grasp_height = 0.02 * torch.ones_like(grasp_score)
+        obj_ids = -1 * torch.ones_like(grasp_score)
+        grasp_preds.append(
+            torch.cat([grasp_score, grasp_width, grasp_height, grasp_depth, grasp_rot, grasp_center, obj_ids], axis=-1))
+    return grasp_preds

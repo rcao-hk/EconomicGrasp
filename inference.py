@@ -38,12 +38,18 @@ TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=F
 
 # Init the model
 if cfgs.multi_modal:
-    from models.economicgrasp_depth import EconomicGrasp_RGBDepthProb, pred_decode
-    net = EconomicGrasp_RGBDepthProb(img_feat_dim=256,
-                 depth_stride=2,     # <-- your expectation: 224x224 tokens
-                 min_depth=cfgs.min_depth,
-                 max_depth=cfgs.max_depth,
-                 bin_num=cfgs.bin_num, is_training=False)
+    # from models.economicgrasp_depth import EconomicGrasp_RGBDepthProb, pred_decode
+    # net = EconomicGrasp_RGBDepthProb(img_feat_dim=256,
+    #              depth_stride=2,     # <-- your expectation: 224x224 tokens
+    #              min_depth=cfgs.min_depth,
+    #              max_depth=cfgs.max_depth,
+    #              bin_num=cfgs.bin_num, is_training=False)
+
+    from models.economicgrasp_depth_c1 import economicgrasp_c1, pred_decode
+    net = economicgrasp_c1(depth_stride=2,
+                           min_depth=cfgs.min_depth,
+                           max_depth=cfgs.max_depth,
+                           is_training=False)
     # from models.economicgrasp import economicgrasp_multi, pred_decode
     # net = economicgrasp_multi(seed_feat_dim=512, is_training=False)
 else:

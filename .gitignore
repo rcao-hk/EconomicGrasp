@@ -6,3 +6,6 @@
 __pycache__
 scripts
 libs/knn
+*.ply
+experiment
+*.pth

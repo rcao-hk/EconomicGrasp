@@ -58,7 +58,10 @@ TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle
 TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
                               num_workers=2, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
 # Init the model
-net = economicgrasp_c1(is_training=True)
+net = economicgrasp_c1(depth_stride=2,     # <-- your expectation: 224x224 tokens
+                 min_depth=cfgs.min_depth,
+                 max_depth=cfgs.max_depth,
+                 is_training=True)
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 net.to(device)

@@ -24,7 +24,7 @@ from .models.layers.transformer_layers import FFN, MLP
 class BatchDepthProbGTGenerator(nn.Module):
     """Generate depth prob gt for spatial enhancer.
 
-    To generate the ground truth required for thespatial enhancer,
+    To generate the ground truth required for the spatial enhancer,
     the GT should have a shape of [bs, num_view, num_feature, num_depth],
     where num_feature represents the total number of feature vectors in the
     multi-stride feature maps. Each image feature corresponds to a patch

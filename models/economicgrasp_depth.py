@@ -518,8 +518,8 @@ class EconomicGrasp_RGBDepthProb(nn.Module):
         # end_points["depth_tok_pred"] = depth_tok           # (B,1,224,224)  debug
         # end_points["img_feat_dpt"]   = img_feat            # (B,C,448,448)
 
-        # ---- build token/patch distribution prediction for loss (no img_idxs) ----
-        # depth_prob_gt is (B,1,Nfeat,256) where Nfeat=224*224 (2x2 patches)
+        # # ---- build token/patch distribution prediction for loss (no img_idxs) ----
+        # # depth_prob_gt is (B,1,Nfeat,256) where Nfeat=224*224 (2x2 patches)
         # B, D, H, W = depth_prob_448.shape
 
         # # pool per-pixel prob -> per-2x2-patch prob : (B,256,224,224)
@@ -530,6 +530,7 @@ class EconomicGrasp_RGBDepthProb(nn.Module):
 
         # eps = 1e-6
         # end_points["depth_prob_logits"] = prob_tok.clamp_min(eps).log()  # (B,1,Nfeat,256)
+
 
         # if hasattr(self.depth_net, "depth_anchors"):
         #     end_points["depth_anchors_1d"] = self.depth_net.depth_anchors.view(-1).detach()
