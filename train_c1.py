@@ -17,9 +17,9 @@ from torch.utils.tensorboard import SummaryWriter
 from utils.arguments import cfgs
 
 # Local Libraries
-from models.economicgrasp_depth_c1 import economicgrasp_c1
+from models.economicgrasp_depth_c1 import economicgrasp_c1, economicgrasp_c2
 # from models.loss_economicgrasp import get_loss as get_loss_economicgrasp
-from models.loss_economicgrasp_depth import get_loss as get_loss_economicgrasp
+from models.loss_economicgrasp_depth_c1 import get_loss as get_loss_economicgrasp
 from dataset.graspnet_dataset import GraspNetMultiDataset, collate_fn
 
 # ----------- GLOBAL CONFIG ------------
@@ -54,13 +54,18 @@ TRAIN_DATASET = GraspNetMultiDataset(cfgs.dataset_root, camera=cfgs.camera, spli
 TEST_DATASET = GraspNetMultiDataset(cfgs.dataset_root, camera=cfgs.camera, split='test_seen', num_points=cfgs.num_point, remove_outlier=True, augment=False, voxel_size=cfgs.voxel_size, use_gt_depth=False, min_depth=cfgs.min_depth, max_depth=cfgs.max_depth, bin_num=cfgs.bin_num)
 
 TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
-                              num_workers=2, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
+                              num_workers=cfgs.num_workers, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
 TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
-                              num_workers=2, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
+                              num_workers=cfgs.num_workers, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
 # Init the model
-net = economicgrasp_c1(depth_stride=2,     # <-- your expectation: 224x224 tokens
+# net = economicgrasp_c1(depth_stride=2,     # <-- your expectation: 224x224 tokens
+#                  min_depth=cfgs.min_depth,
+#                  max_depth=cfgs.max_depth,
+#                  is_training=True)
+net = economicgrasp_c2(depth_stride=2,     # <-- your expectation: 224x224 tokens
                  min_depth=cfgs.min_depth,
                  max_depth=cfgs.max_depth,
+                 bin_num=cfgs.bin_num,
                  is_training=True)
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")

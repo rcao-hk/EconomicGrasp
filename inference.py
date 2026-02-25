@@ -45,11 +45,17 @@ if cfgs.multi_modal:
     #              max_depth=cfgs.max_depth,
     #              bin_num=cfgs.bin_num, is_training=False)
 
-    from models.economicgrasp_depth_c1 import economicgrasp_c1, pred_decode
-    net = economicgrasp_c1(depth_stride=2,
-                           min_depth=cfgs.min_depth,
-                           max_depth=cfgs.max_depth,
-                           is_training=False)
+    # from models.economicgrasp_depth_c1 import economicgrasp_c1, pred_decode
+    # net = economicgrasp_c1(depth_stride=2,
+    #                        min_depth=cfgs.min_depth,
+    #                        max_depth=cfgs.max_depth,
+    #                        is_training=False)
+    from models.economicgrasp_depth_c1 import economicgrasp_c2, pred_decode
+    net = economicgrasp_c2(depth_stride=2,     # <-- your expectation: 224x224 tokens
+                 min_depth=cfgs.min_depth,
+                 max_depth=cfgs.max_depth,
+                 bin_num=cfgs.bin_num,
+                 is_training=False)
     # from models.economicgrasp import economicgrasp_multi, pred_decode
     # net = economicgrasp_multi(seed_feat_dim=512, is_training=False)
 else:
@@ -60,10 +66,20 @@ net.to(device)
 
 # Load checkpoint
 checkpoint = torch.load(cfgs.checkpoint_path)
-try:
-    net.load_state_dict(checkpoint['model_state_dict'])
-except:
-    net.load_state_dict(checkpoint)
+# try:
+#     net.load_state_dict(checkpoint['model_state_dict'])
+# except:
+#     net.load_state_dict(checkpoint)
+state = checkpoint.get("state_dict", checkpoint.get("model_state_dict", checkpoint))
+w2 = state["enhancer.fusion_fc2.weight"]
+embed_dims = w2.shape[0]
+ff_dim = w2.shape[1]
+
+# --- 关键：load 前先 build，让参数“存在” ---
+net.enhancer.ff_dim = int(ff_dim)                  # 确保一致
+net.enhancer._build(int(embed_dims), device=device)
+# --- 现在再 load，就不会 unexpected 了 ---
+net.load_state_dict(state, strict=True)
 
 # start_epoch = checkpoint['epoch']
 print("-> loaded checkpoint %s" % (cfgs.checkpoint_path))

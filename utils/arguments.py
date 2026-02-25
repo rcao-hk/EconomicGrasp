@@ -49,6 +49,7 @@ parser.add_argument('--collision_thresh', type=float, default=0,
 parser.add_argument('--inference', action='store_true', help='Whether to inference')
 parser.add_argument('--multi_modal', action='store_true', help='Whether use multi-modal model')
 parser.add_argument('--pin_memory', action='store_true', help='Whether use pin memory in dataloader')
+parser.add_argument('--num_workers', type=int, default=2)
 parser.add_argument('--use_gt_depth', action='store_true', help='Whether use gt depth for label matching')
 parser.add_argument('--min_depth', type=float, default=0.2, help='Minimum depth for depth probability')
 parser.add_argument('--max_depth', type=float, default=1.0, help='Maximum depth for depth probability')

@@ -6,9 +6,9 @@ from utils.arguments import cfgs
 
 def get_loss(end_points):
     # ---------- NEW: depth distribution BCE loss ----------
-    # depth_prob_loss, end_points = compute_depth_prob_loss(end_points)
+    depth_prob_loss, end_points = compute_depth_prob_loss(end_points)
     # depth_exp_l1_loss, end_points = compute_depth_exp_l1_loss(end_points)
-    depth_reg_loss, end_points = compute_depth_reg_loss(end_points)
+    # depth_reg_loss, end_points = compute_depth_reg_loss(end_points)
 
     # ---------- EcoGrasp original losses ----------
     objectness_loss, end_points = compute_objectness_loss(end_points)
@@ -28,14 +28,14 @@ def get_loss(end_points):
         cfgs.score_loss_weight      * score_loss      +
         cfgs.width_loss_weight      * width_loss )
     
-    depth_reg_loss = cfgs.depth_prob_loss_weight * depth_reg_loss
-    loss = obj_loss + grasp_loss + depth_reg_loss
+    # depth_reg_loss = cfgs.depth_prob_loss_weight * depth_reg_loss
+    # loss = obj_loss + grasp_loss + depth_reg_loss
 
-    # depth_prob_loss = cfgs.depth_prob_loss_weight * depth_prob_loss
-    # loss = obj_loss + grasp_loss + depth_prob_loss
+    depth_prob_loss = cfgs.depth_prob_loss_weight * depth_prob_loss
+    loss = obj_loss + grasp_loss + depth_prob_loss
     end_points['A: Objectness Loss'] = objectness_loss
     end_points['A: Grasp Loss'] = grasp_loss
-    end_points['A: DepthReg Loss'] = depth_reg_loss
+    end_points['A: DepthReg Loss'] = depth_prob_loss
     end_points['A: Overall Loss'] = loss
     return loss, end_points
 
@@ -110,65 +110,29 @@ def compute_depth_reg_loss(
 
 
 def compute_depth_prob_loss(end_points, eps: float = 1e-6):
-    """
-    Soft-label CE (recommended for your change-B):
-
-    Required keys:
-      - depth_prob_pred: (B,1,N,D) probability after softmax, in (0,1)
-        OR optionally depth_prob_logits: (B,1,N,D) logits (preferred if you have it)
-      - depth_prob_gt:   (B,1,N,D) OR [gt, weight], where weight: (B,1,N)
-
-    Output:
-      - end_points['B: DepthProb Loss']
-      - end_points['D: DepthProb Sum']  (monitor)
-    """
-    if ('depth_prob_pred' not in end_points and 'depth_prob_logits' not in end_points) or ('depth_prob_gt' not in end_points):
-        # allow running without depth head
-        dev = None
-        for v in end_points.values():
-            if torch.is_tensor(v):
-                dev = v.device
-                break
-        if dev is None:
-            dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if ("depth_prob_pred" not in end_points) or ("depth_prob_gt" not in end_points):
+        dev = next((v.device for v in end_points.values() if torch.is_tensor(v)),
+                   torch.device("cuda" if torch.cuda.is_available() else "cpu"))
         loss = torch.zeros((), device=dev)
-        end_points['B: DepthProb Loss'] = loss
+        end_points["B: DepthProb Loss"] = loss
         return loss, end_points
 
-    gt_pack = end_points['depth_prob_gt']
-    if isinstance(gt_pack, (list, tuple)):
-        gt, weight = gt_pack
-    else:
-        gt, weight = gt_pack, None
+    gt_pack = end_points["depth_prob_gt"]
+    gt = gt_pack[0] if isinstance(gt_pack, (list, tuple)) else gt_pack  # drop weight
 
-    # ---- get log-prob ----
-    if 'depth_prob_logits' in end_points:
-        logits = end_points['depth_prob_logits']  # (B,1,N,D)
-        logp = F.log_softmax(logits, dim=-1)
-        pred = logp.exp()
-    else:
-        pred = end_points['depth_prob_pred']      # (B,1,N,D)
-        pred = pred.clamp(min=eps, max=1.0)       # avoid log(0)
-        logp = pred.log()
+    pred = end_points["depth_prob_pred"]  # (B,1,N,D)
+    pred = torch.nan_to_num(pred, nan=0.0, posinf=0.0, neginf=0.0).clamp(min=eps, max=1.0 - eps)
+    gt   = torch.nan_to_num(gt.to(pred), nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
 
-    # ---- safety normalize gt to a proper distribution ----
-    gt = gt.to(dtype=logp.dtype, device=logp.device)
-    gt_sum = gt.sum(dim=-1, keepdim=True).clamp_min(eps)
-    gt = gt / gt_sum
+    loss_map = F.binary_cross_entropy(pred, gt, reduction="none").mean(dim=-1)  # (B,1,N)
 
-    # ---- soft cross entropy: sum over D, NOT mean ----
-    loss_map = -(gt * logp).sum(dim=-1)          # (B,1,N)
+    valid = (gt.sum(dim=-1) > 0)  # (B,1,N)
+    loss = loss_map[valid].mean() if valid.any() else torch.zeros((), device=pred.device, dtype=pred.dtype)
 
-    if weight is not None:
-        weight = weight.to(device=loss_map.device, dtype=loss_map.dtype)
-        loss_map = loss_map * weight
-
-    loss = loss_map.mean()
-    end_points['B: DepthProb Loss'] = loss
-
+    end_points["B: DepthProb Loss"] = loss
     with torch.no_grad():
-        end_points['D: DepthProb Sum'] = pred.sum(dim=-1).mean()
-
+        end_points["D: DepthProb Sum"] = pred.sum(dim=-1).mean()
+        end_points["D: DepthProb Valid Ratio"] = valid.float().mean()
     return loss, end_points
 
 
