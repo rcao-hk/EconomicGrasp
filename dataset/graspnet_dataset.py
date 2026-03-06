@@ -401,104 +401,6 @@ class GraspNetMultiDataset(Dataset):
         K[1, 2] *= sy  # cy
         return K
 
-    # def build_depth_prob_gt(self, depth_m_resized: np.ndarray):
-    #     """
-    #     depth_m_resized: (Hr,Wr) float32 meters, aligned with resized RGB (448x448)
-
-    #     Returns:
-    #       depth_prob_gt: (1, Nfeat, D) float32
-    #       depth_prob_w:  (1, Nfeat) float32   (valid_ratio per patch, in [0,1])
-    #     """
-    #     Hr, Wr = self.resize_shape
-    #     D = int(self.depth_prob_bins)
-    #     min_d = float(self.depth_prob_min)
-    #     max_d = float(self.depth_prob_max)
-
-    #     depth = depth_m_resized.astype(np.float32)
-    #     if depth.shape != (Hr, Wr):
-    #         raise ValueError(f"depth_m_resized shape {depth.shape} != resize_shape {(Hr,Wr)}")
-
-    #     # valid mask: >0 (and optionally < max_d)
-    #     valid = depth > 0
-    #     # 若你希望把 >max_d 的也当 invalid，可以打开：
-    #     # valid = np.logical_and(valid, depth < max_d)
-
-    #     # clip to [min_d, max_d] for interpolation (same spirit as BIP3D)
-    #     depth_clip = np.clip(depth, min_d, max_d)
-
-    #     # map depth to continuous bin coordinate t in [0, D-1]
-    #     denom = (max_d - min_d) if (max_d > min_d) else 1.0
-    #     t = (depth_clip - min_d) / denom * (D - 1)
-
-    #     i0 = np.floor(t).astype(np.int64)
-    #     i0 = np.clip(i0, 0, D - 1)
-    #     i1 = np.clip(i0 + 1, 0, D - 1)
-
-    #     w1 = (t - i0.astype(np.float32)).astype(np.float32)
-    #     w0 = (1.0 - w1).astype(np.float32)
-
-    #     # invalid -> no supervision (weight=0), avoid scatter OOB
-    #     inv = ~valid
-    #     i0[inv] = 0
-    #     i1[inv] = 0
-    #     w0[inv] = 0.0
-    #     w1[inv] = 0.0
-
-    #     ys, xs = np.indices((Hr, Wr))
-    #     pid_flat_cache = {}  # stride -> pid_flat
-
-    #     flat_i0 = i0.reshape(-1)
-    #     flat_i1 = i1.reshape(-1)
-    #     flat_w0 = w0.reshape(-1)
-    #     flat_w1 = w1.reshape(-1)
-    #     flat_valid = valid.reshape(-1).astype(np.float32)
-
-    #     probs_all = []
-    #     weights_all = []
-
-    #     for s in self.depth_prob_strides:
-    #         if Hr % s != 0 or Wr % s != 0:
-    #             raise ValueError(f"resize_shape {(Hr,Wr)} must be divisible by stride {s}")
-
-    #         Hs, Ws = Hr // s, Wr // s
-    #         n_patch = Hs * Ws
-
-    #         if s in pid_flat_cache:
-    #             pid_flat = pid_flat_cache[s]
-    #         else:
-    #             pid = (ys // s) * Ws + (xs // s)     # (Hr,Wr)
-    #             pid_flat = pid.reshape(-1).astype(np.int64)
-    #             pid_flat_cache[s] = pid_flat
-
-    #         # patch distribution: (n_patch, D)
-    #         prob = np.zeros((n_patch, D), dtype=np.float32)
-
-    #         # accumulate two-bin weights into patch bins
-    #         np.add.at(prob, (pid_flat, flat_i0), flat_w0)
-    #         np.add.at(prob, (pid_flat, flat_i1), flat_w1)
-
-    #         # average over pixels in patch (so it's a distribution over the patch)
-    #         prob /= float(s * s)
-
-    #         # valid_ratio per patch (for loss weight)
-    #         vcnt = np.bincount(pid_flat, weights=flat_valid, minlength=n_patch).astype(np.float32)
-    #         vratio = vcnt / float(s * s)
-
-    #         # optional thresholding (same semantics as BIP3D: <threshold -> invalid)
-    #         if self.depth_prob_valid_threshold >= 0:
-    #             keep = vratio >= float(self.depth_prob_valid_threshold)
-    #             prob[~keep] = 0.0
-    #             vratio[~keep] = 0.0
-
-    #         probs_all.append(prob)
-    #         weights_all.append(vratio)
-
-    #     depth_prob_gt = np.concatenate(probs_all, axis=0)   # (Nfeat, D)
-    #     depth_prob_w  = np.concatenate(weights_all, axis=0) # (Nfeat,)
-
-    #     # add view dim=1 for compatibility: (1, Nfeat, D) / (1, Nfeat)
-    #     return depth_prob_gt[None].astype(np.float32), depth_prob_w[None].astype(np.float32)
-
     def build_depth_prob_gt(self, depth_m_resized: np.ndarray):
         """
         depth_m_resized: (448,448) float32 meters (aligned with resized RGB)
@@ -649,29 +551,45 @@ class GraspNetMultiDataset(Dataset):
         return ret_dict
 
     def get_data_label(self, index):
+        # -----------------------------
+        # 0) load raw data
+        # -----------------------------
         color = np.array(Image.open(self.colorpath[index]), dtype=np.float32) / 255.0
         depth = np.array(Image.open(self.depthpath[index]))
         seg = np.array(Image.open(self.labelpath[index]))
         meta = scio.loadmat(self.metapath[index])
         scene = self.scenename[index]
         gt_depth = np.array(Image.open(self.gtdepthpath[index]))
-        graspness = np.load(self.graspnesspath[index])  # 注意：这通常对应“某个mask”的有效点序列
+
+        graspness = np.load(self.graspnesspath[index])
         gt_graspness = np.load(self.gtgraspnesspath[index])
+
         try:
             obj_idxs = meta['cls_indexes'].flatten().astype(np.int32)
             poses = meta['poses']
             intrinsic = meta['intrinsic_matrix']
             factor_depth = meta['factor_depth']
         except Exception as e:
-            print(repr(e)); print(scene)
+            print(repr(e))
+            print(scene)
+            raise
 
+        # optionally replace with GT depth/graspness
         if self.use_gt_depth:
             depth = gt_depth
             graspness = gt_graspness
 
-        camera = CameraInfo(1280.0, 720.0, intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], factor_depth)
+        camera = CameraInfo(
+            1280.0, 720.0,
+            intrinsic[0][0], intrinsic[1][1],
+            intrinsic[0][2], intrinsic[1][2],
+            factor_depth
+        )
         cloud = create_point_cloud_from_depth_image(depth, camera, organized=True)
 
+        # -----------------------------
+        # 1) build mask
+        # -----------------------------
         depth_mask = (depth > 0)
         if self.remove_outlier:
             camera_poses = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'camera_poses.npy'))
@@ -682,20 +600,105 @@ class GraspNetMultiDataset(Dataset):
         else:
             mask = depth_mask
 
+        # -----------------------------
+        # 2) GT depth meters resized to 448 (for depth_prob_gt)
+        # -----------------------------
         fd = float(self.gt_factor_depth) if (self.gt_factor_depth is not None) else float(factor_depth)
         gt_depth_m = gt_depth.astype(np.float32) / fd
 
-        Hr, Wr = self.resize_shape
+        Hr, Wr = self.resize_shape  # expected (448,448)
         gt_depth_m_resized = cv2.resize(gt_depth_m, (Wr, Hr), interpolation=cv2.INTER_NEAREST).astype(np.float32)
 
         depth_prob_gt, depth_prob_w = self.build_depth_prob_gt(gt_depth_m_resized)
-        # resize depth and intrinsics to 448x448
+        # resize intrinsics to 448x448
         K_resized = self.resize_intrinsics(intrinsic, (depth.shape[0], depth.shape[1]))
 
+        # -----------------------------
+        # 3) mask & sample (point-level arrays)
+        #    returns:
+        #      H, W          : original depth shape (used for mapping indices)
+        #      valid_flat    : (Nmasked,) original H*W flat idx for each masked point
+        #      cloud_masked  : (Nmasked,3)
+        #      seg_masked    : (Nmasked,)
+        # -----------------------------
         H, W, valid_flat, cloud_masked, seg_masked = self._mask_and_sample(depth, seg, cloud, mask)
         color_masked = color[mask]
 
-        # sample
+        # -----------------------------
+        # 4) Build token-level (224x224) labels from masked sequences
+        # -----------------------------
+        # map ALL masked pixels to resized 448 grid (may have collisions)
+        resized_valid_all = self.get_resized_idxs(valid_flat, (H, W))  # (Nmasked,)
+        resized_valid_all = np.asarray(resized_valid_all, dtype=np.int64).reshape(-1)
+
+        # objectness for masked pixels (binary)
+        obj_masked = seg_masked.copy()
+        obj_masked[obj_masked > 1] = 1
+        obj_masked = np.asarray(obj_masked, dtype=np.int64).reshape(-1)
+
+        # graspness for masked pixels (float)  —— 关键：保证是一维 (Nmasked,)
+        grasp_masked = np.asarray(graspness, dtype=np.float32)
+        if grasp_masked.ndim == 2 and grasp_masked.shape[1] == 1:
+            grasp_masked = grasp_masked[:, 0]
+        elif grasp_masked.ndim == 2 and grasp_masked.shape[0] == 1:
+            grasp_masked = grasp_masked[0, :]
+        elif grasp_masked.ndim != 1:
+            # 如果真出现 (N,k)，先取第一列（更严格的话可以 raise）
+            grasp_masked = grasp_masked.reshape(grasp_masked.shape[0], -1)[:, 0]
+        grasp_masked = grasp_masked.reshape(-1)
+
+        # sanity check: three arrays must align
+        Nmasked = resized_valid_all.shape[0]
+        if not (obj_masked.shape[0] == Nmasked and grasp_masked.shape[0] == Nmasked):
+            raise ValueError(
+                f"Masked arrays length mismatch: resized_valid_all={Nmasked}, "
+                f"obj_masked={obj_masked.shape}, grasp_masked={grasp_masked.shape}. "
+                f"Check that graspness npy aligns with cloud_masked/seg_masked order."
+            )
+
+        # allocate resized maps (flatten)
+        obj_flat = np.zeros((Hr * Wr,), dtype=np.int64)
+        gsum = np.zeros((Hr * Wr,), dtype=np.float32)
+        gcnt = np.zeros((Hr * Wr,), dtype=np.float32)
+
+        # collisions: objectness uses max; graspness uses mean (sum/count)
+        np.maximum.at(obj_flat, resized_valid_all, obj_masked)
+        np.add.at(gsum, resized_valid_all, grasp_masked)   # <-- now shapes match
+        np.add.at(gcnt, resized_valid_all, 1.0)
+
+        grasp_flat = gsum / np.maximum(gcnt, 1.0)
+        valid_flat_resized = (gcnt > 0).astype(np.float32)
+
+        obj_map_448 = obj_flat.reshape(Hr, Wr)
+        grasp_map_448 = grasp_flat.reshape(Hr, Wr)
+        valid_map_448 = valid_flat_resized.reshape(Hr, Wr)
+
+        # aggregate 2x2 -> token (224x224)
+        s_tok = 2
+        Ht, Wt = Hr // s_tok, Wr // s_tok
+
+        obj_blk = obj_map_448.reshape(Ht, s_tok, Wt, s_tok)
+        grasp_blk = grasp_map_448.reshape(Ht, s_tok, Wt, s_tok)
+        valid_blk = valid_map_448.reshape(Ht, s_tok, Wt, s_tok)
+
+        valid_cnt = valid_blk.sum(axis=(1, 3)).astype(np.float32)  # (Ht,Wt)
+
+        obj_tok = obj_blk.max(axis=(1, 3)).astype(np.int64)        # OR within 2x2
+
+        grasp_sum = (grasp_blk * valid_blk).sum(axis=(1, 3)).astype(np.float32)
+        grasp_tok = grasp_sum / np.maximum(valid_cnt, 1.0)
+        grasp_tok[valid_cnt < 1.0] = 0.0
+
+        # invalid tokens: ignore in CE
+        obj_tok[valid_cnt < 1.0] = -1
+
+        objectness_label_tok = obj_tok.reshape(-1).astype(np.int64)      # (Ntok,)
+        graspness_label_tok  = grasp_tok.reshape(-1).astype(np.float32)  # (Ntok,)
+        token_valid_mask     = (valid_cnt.reshape(-1) >= 1.0)            # (Ntok,) bool
+        
+        # -----------------------------
+        # 5) Sample point cloud (point-level, unchanged)
+        # -----------------------------
         if len(cloud_masked) >= self.num_points:
             idxs = np.random.choice(len(cloud_masked), self.num_points, replace=False)
         else:
@@ -707,8 +710,7 @@ class GraspNetMultiDataset(Dataset):
         color_sampled = color_masked[idxs]
         seg_sampled = seg_masked[idxs]
 
-        # graspness 对齐：默认按 “cloud_masked 的顺序” 直接取（跟你原实现一致）
-        graspness_sampled = graspness[idxs]
+        graspness_sampled = graspness[idxs].astype(np.float32)
 
         objectness_label = seg_sampled.copy()
         segmentation_label = objectness_label.copy()
@@ -716,10 +718,12 @@ class GraspNetMultiDataset(Dataset):
 
         # multi-modal: full image + idxs
         pix_flat = valid_flat[idxs]
-        resized_idxs = self.get_resized_idxs(pix_flat, (H, W))
+        resized_idxs = self.get_resized_idxs(pix_flat, (H, W))  # (num_points,) in [0, 448*448)
         img = self.img_transforms(color)
 
-        # load economic grasp labels
+        # -----------------------------
+        # 6) Load economic grasp labels (object-level lists)
+        # -----------------------------
         grasp_labels = np.load(self.grasp_labels[scene])
         points = grasp_labels['points']
         rotations = grasp_labels['rotations'].astype(np.int32)
@@ -752,18 +756,28 @@ class GraspNetMultiDataset(Dataset):
         if self.augment:
             cloud_sampled, object_poses_list = self.augment_data(cloud_sampled, object_poses_list)
 
+        # -----------------------------
+        # 7) return dict
+        # -----------------------------
         ret_dict = {
+            # point-level
             'point_clouds': cloud_sampled.astype(np.float32),
             'cloud_colors': color_sampled.astype(np.float32),
             'coordinates_for_voxel': (cloud_sampled.astype(np.float32) / self.voxel_size),
 
             'img': img,
-            'img_idxs': resized_idxs.astype(np.int64),
+            'img_idxs': resized_idxs.astype(np.int64),  # sampled pixels in resized 448 grid
 
             'graspness_label': graspness_sampled.astype(np.float32),
             'objectness_label': objectness_label.astype(np.int64),
             'segmentation_label': segmentation_label.astype(np.int64),
 
+            # token-level (224x224 -> flatten)
+            'objectness_label_tok': objectness_label_tok,   # (224*224,) int64, -1 for invalid
+            'graspness_label_tok': graspness_label_tok,     # (224*224,) float32
+            'token_valid_mask': token_valid_mask.astype(np.bool_),  # (224*224,) bool
+
+            # economic grasp labels
             'object_poses_list': object_poses_list,
             'grasp_points_list': grasp_points_list,
             'grasp_rotations_list': grasp_rotations_list,
@@ -772,14 +786,137 @@ class GraspNetMultiDataset(Dataset):
             'grasp_scores_list': grasp_scores_list,
             'view_graspness_list': view_graspness_list,
             'top_view_index_list': top_view_index_list,
-            'sampled_masked_idxs': idxs.astype(np.int64),  # (num_points,) index into cloud_masked/graspness/seg_masked
-            'pix_flat': pix_flat.astype(np.int64),         # (num_points,) original H*W flat index (optional, debug)
-            'K': K_resized,                       # (3,3) float32
-            'gt_depth_m': gt_depth_m_resized,          # (448,448) float32 meters
-            'depth_prob_gt': depth_prob_gt,            # (1, Nfeat, 256)
-            'depth_prob_weight': depth_prob_w,         # (1, Nfeat)
+
+            # debug / bookkeeping
+            'sampled_masked_idxs': idxs.astype(np.int64),
+            'pix_flat': pix_flat.astype(np.int64),
+
+            # camera / depth supervision
+            'K': K_resized.astype(np.float32),                 # (3,3)
+            'gt_depth_m': gt_depth_m_resized.astype(np.float32),  # (448,448) meters
+            'depth_prob_gt': depth_prob_gt.astype(np.float32),    # (1, Nfeat, 256)
+            'depth_prob_weight': depth_prob_w.astype(np.float32), # (1, Nfeat)
         }
         return ret_dict
+
+
+class GraspNetTransDataset(GraspNetMultiDataset):
+    def __init__(
+        self,
+        graspnet_root,
+        rgb_root,
+        camera='realsense',
+        split='train',
+        num_points=20000,
+        voxel_size=0.005,
+        remove_outlier=False,
+        remove_invisible=True,
+        augment=False,
+        load_label=True,
+        use_gt_depth=True,
+        min_depth=0.2,
+        max_depth=1.0,
+        bin_num=256,
+    ):
+        self.root = graspnet_root
+        self.rgb_root = rgb_root
+        self.split = split
+        self.voxel_size = voxel_size
+        self.num_points = num_points
+        self.remove_outlier = remove_outlier
+        self.remove_invisible = remove_invisible
+        self.camera = camera
+        self.augment = augment
+        self.load_label = load_label
+        self.use_gt_depth = use_gt_depth
+        self.collision_labels = {}
+
+        # split -> scene integer ids (same as GraspNet)
+        if split == 'train':
+            scene_ids = list(range(100))
+        elif split == 'test':
+            scene_ids = list(range(100, 190))
+        elif split == 'test_seen':
+            scene_ids = list(range(100, 130))
+        elif split == 'test_similar':
+            scene_ids = list(range(130, 160))
+        elif split == 'test_novel':
+            scene_ids = list(range(160, 190))
+        else:
+            raise ValueError(f"Unknown split={split}")
+
+        # GraspNet uses: scene_0000 (4 digits)
+        self.sceneIds = [f"scene_{sid:04d}" for sid in scene_ids]
+        # Trans RGB uses: 00000 (5 digits)
+        self.rgbSceneIds = [f"{sid:05d}" for sid in scene_ids]
+
+        # ---- multi-modal same as yours ----
+        self.resize_shape = (448, 448)
+        self.img_transforms = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Resize(self.resize_shape),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        self.depth_prob_min = min_depth
+        self.depth_prob_max = max_depth
+        self.depth_prob_bins = bin_num
+        self.depth_prob_strides = [2]
+        self.depth_prob_valid_threshold = -1
+        self.gt_factor_depth = None
+
+        # ---- paths ----
+        self.colorpath = []
+        self.depthpath = []
+        self.gtdepthpath = []
+        self.labelpath = []
+        self.metapath = []
+        self.scenename = []
+        self.frameid = []
+        self.graspnesspath = []
+        self.gtgraspnesspath = []
+        self.grasp_labels = {}
+
+        for g_scene, r_scene in tqdm(
+            list(zip(self.sceneIds, self.rgbSceneIds)),
+            desc='Loading Trans scene data...'
+        ):
+            for img_num in range(256):
+                fid = str(img_num).zfill(4)
+
+                # RGB: dataset_root/scenes/xxxxx/xxxx_color.png   (xxxxx is 5 digits)
+                self.colorpath.append(os.path.join(
+                    self.rgb_root, 'scenes', r_scene, f'{fid}_color.png'
+                ))
+
+                # virtual GT depth/label: graspnet_root/virtual_scene/scene_xxxx/realsense/xxxx_depth.png
+                vbase = os.path.join(self.root, 'virtual_scenes', g_scene, camera)
+                vdepth = os.path.join(vbase, f'{fid}_depth.png')
+
+                # 这里 depth 输入也用 virtual depth（与你的描述一致）
+                self.depthpath.append(vdepth)
+                self.gtdepthpath.append(vdepth)
+
+                # meta: original graspnet structure
+                self.metapath.append(os.path.join(
+                    self.root, 'scenes', g_scene, camera, 'meta', f'{fid}.mat'
+                ))
+                self.labelpath.append(os.path.join(
+                    self.root, 'scenes', g_scene, camera, 'label', f'{fid}.png'
+                ))
+                
+                # graspness: graspnet_root/virtual_graspness/scene_xxxx/realsense/xxxx.npy
+                gpath = os.path.join(self.root, 'virtual_graspness', g_scene, camera, f'{fid}.npy')
+                self.graspnesspath.append(gpath)
+                self.gtgraspnesspath.append(gpath)
+
+                # IMPORTANT: keep scenename as GraspNet scene_xxxx (used by parent methods to find camera_poses, labels, etc.)
+                self.scenename.append(g_scene)
+                self.frameid.append(img_num)
+
+            if self.load_label:
+                self.grasp_labels[g_scene] = os.path.join(
+                    self.root, 'economic_grasp_label_300views', f'{g_scene}_labels.npz'
+                )
 
 
 # def collate_fn(batch):

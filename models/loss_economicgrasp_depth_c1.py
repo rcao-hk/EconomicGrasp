@@ -6,9 +6,9 @@ from utils.arguments import cfgs
 
 def get_loss(end_points):
     # ---------- NEW: depth distribution BCE loss ----------
-    depth_prob_loss, end_points = compute_depth_prob_loss(end_points)
+    # depth_prob_loss, end_points = compute_depth_prob_loss(end_points)
     # depth_exp_l1_loss, end_points = compute_depth_exp_l1_loss(end_points)
-    # depth_reg_loss, end_points = compute_depth_reg_loss(end_points)
+    depth_reg_loss, end_points = compute_depth_reg_loss(end_points)
 
     # ---------- EcoGrasp original losses ----------
     objectness_loss, end_points = compute_objectness_loss(end_points)
@@ -28,15 +28,92 @@ def get_loss(end_points):
         cfgs.score_loss_weight      * score_loss      +
         cfgs.width_loss_weight      * width_loss )
     
-    # depth_reg_loss = cfgs.depth_prob_loss_weight * depth_reg_loss
-    # loss = obj_loss + grasp_loss + depth_reg_loss
+    depth_reg_loss = cfgs.depth_prob_loss_weight * depth_reg_loss
+    loss = obj_loss + grasp_loss + depth_reg_loss
+
+    # depth_prob_loss = cfgs.depth_prob_loss_weight * depth_prob_loss
+    # loss = obj_loss + grasp_loss + depth_prob_loss
+    
+    end_points['A: Objectness Loss'] = objectness_loss
+    end_points['A: Grasp Loss'] = grasp_loss
+    end_points['A: DepthReg Loss'] = depth_reg_loss
+    end_points['A: Overall Loss'] = loss
+    return loss, end_points
+
+
+def get_loss_c2_1(end_points):
+    depth_prob_loss, end_points = compute_depth_prob_loss(end_points)
+
+    # choose token-level or point-level supervision
+    objectness_loss, end_points = compute_objectness_loss_tok(end_points)
+    graspness_loss, end_points  = compute_graspness_loss_tok(end_points)
+
+    # EcoGrasp head losses (on selected M seeds)
+    view_loss, end_points  = compute_view_graspness_loss(end_points)
+    angle_loss, end_points = compute_angle_loss(end_points)
+    depth_loss, end_points = compute_depth_loss(end_points)
+    score_loss, end_points = compute_score_loss_cls(end_points)
+    width_loss, end_points = compute_width_loss(end_points)
+
+    obj_loss = cfgs.objectness_loss_weight * objectness_loss
+    grasp_loss = (
+        cfgs.graspness_loss_weight * graspness_loss +
+        cfgs.view_loss_weight      * view_loss +
+        cfgs.angle_loss_weight     * angle_loss +
+        cfgs.depth_loss_weight     * depth_loss +
+        cfgs.score_loss_weight     * score_loss +
+        cfgs.width_loss_weight     * width_loss
+    )
 
     depth_prob_loss = cfgs.depth_prob_loss_weight * depth_prob_loss
     loss = obj_loss + grasp_loss + depth_prob_loss
+
     end_points['A: Objectness Loss'] = objectness_loss
     end_points['A: Grasp Loss'] = grasp_loss
     end_points['A: DepthReg Loss'] = depth_prob_loss
     end_points['A: Overall Loss'] = loss
+    return loss, end_points
+
+
+def compute_objectness_loss_tok(end_points):
+    # objectness_score: (B,2,Ntok)
+    # objectness_label_tok: (B,Ntok) with -1 for invalid
+    score = end_points["objectness_score"]
+    label = end_points["objectness_label_tok"].long()
+
+    criterion = nn.CrossEntropyLoss(ignore_index=-1, reduction="mean")
+    loss = criterion(score, label)
+    end_points["B: Objectness Loss"] = loss
+
+    with torch.no_grad():
+        valid = (label != -1)
+        if valid.any():
+            pred = torch.argmax(score, 1)
+            end_points["D: Objectness Acc"] = (pred[valid] == label[valid]).float().mean()
+        else:
+            end_points["D: Objectness Acc"] = torch.zeros((), device=score.device)
+    return loss, end_points
+
+
+def compute_graspness_loss_tok(end_points):
+    pred = end_points["graspness_score"].squeeze(1)  # (B,Ntok)
+    gt   = end_points["graspness_label_tok"]         # (B,Ntok) or (B,Ntok,1)
+    if gt.dim() == 3:
+        gt = gt.squeeze(-1)
+
+    obj = end_points["objectness_label_tok"].long()  # (B,Ntok), -1 invalid
+    valid_tok = (obj != -1)
+    obj_tok = (obj == 1)
+
+    mask = valid_tok & obj_tok
+    if "token_valid_mask" in end_points:
+        mask = mask & end_points["token_valid_mask"].bool()
+
+    criterion = nn.SmoothL1Loss(reduction="none")
+    loss_map = criterion(pred, gt.to(pred))
+
+    loss = loss_map[mask].mean() if mask.any() else 0.0 * pred.sum()
+    end_points["B: Graspness Loss"] = loss
     return loss, end_points
 
 

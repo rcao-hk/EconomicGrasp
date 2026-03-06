@@ -9,7 +9,7 @@ from graspnetAPI import GraspGroup, GraspNetEval
 from utils.collision_detector import ModelFreeCollisionDetector
 from utils.arguments import cfgs
 
-from dataset.graspnet_dataset import GraspNetDataset, GraspNetMultiDataset, collate_fn
+from dataset.graspnet_dataset import GraspNetTransDataset, collate_fn
 
 # ------------ GLOBAL CONFIG ------------
 if not os.path.exists(cfgs.save_dir):
@@ -23,13 +23,7 @@ def my_worker_init_fn(worker_id):
 
 
 # Create dataset and dataloader
-if cfgs.multi_modal:
-    TEST_DATASET = GraspNetMultiDataset(cfgs.dataset_root, split='{}'.format(cfgs.test_mode),
-                                    camera=cfgs.camera, num_points=cfgs.num_point, remove_outlier=True, augment=False,
-                                    load_label=False)
-else:
-    TEST_DATASET = GraspNetDataset(cfgs.dataset_root, split='{}'.format(cfgs.test_mode),
-                                    camera=cfgs.camera, num_points=cfgs.num_point, remove_outlier=True, augment=False,
+TEST_DATASET = GraspNetTransDataset(cfgs.dataset_root, '/data/robotarm/dataset/GN-Trans', split='{}'.format(cfgs.test_mode), camera=cfgs.camera, num_points=cfgs.num_point, remove_outlier=True, augment=False,
                                     load_label=False)
 
 SCENE_LIST = TEST_DATASET.scene_list()
@@ -37,37 +31,34 @@ TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=F
                              num_workers=2, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn)
 
 # Init the model
-if cfgs.multi_modal:
-    # from models.economicgrasp_depth import EconomicGrasp_RGBDepthProb, pred_decode
-    # net = EconomicGrasp_RGBDepthProb(img_feat_dim=256,
-    #              depth_stride=2,     # <-- your expectation: 224x224 tokens
-    #              min_depth=cfgs.min_depth,
-    #              max_depth=cfgs.max_depth,
-    #              bin_num=cfgs.bin_num, is_training=False)
+# from models.economicgrasp_depth import EconomicGrasp_RGBDepthProb, pred_decode
+# net = EconomicGrasp_RGBDepthProb(img_feat_dim=256,
+#              depth_stride=2,     # <-- your expectation: 224x224 tokens
+#              min_depth=cfgs.min_depth,
+#              max_depth=cfgs.max_depth,
+#              bin_num=cfgs.bin_num, is_training=False)
 
-    # from models.economicgrasp_depth_c1 import economicgrasp_c1, pred_decode
-    # net = economicgrasp_c1(depth_stride=2,
-    #                        min_depth=cfgs.min_depth,
-    #                        max_depth=cfgs.max_depth,
-    #                        is_training=False)
-    # from models.economicgrasp_depth_c1 import economicgrasp_c2, pred_decode
-    # net = economicgrasp_c2(depth_stride=2,     # <-- your expectation: 224x224 tokens
-    #              min_depth=cfgs.min_depth,
-    #              max_depth=cfgs.max_depth,
-    #              bin_num=cfgs.bin_num,
-    #              is_training=False)
-    from models.economicgrasp_depth_c1 import economicgrasp_c2_1
-    from models.economicgrasp_depth_c1 import pred_decode_c2_1 as pred_decode
-    net = economicgrasp_c2_1(depth_stride=2,     # <-- your expectation: 224x224 tokens
-                 min_depth=cfgs.min_depth,
-                 max_depth=cfgs.max_depth,
-                 bin_num=cfgs.bin_num,
-                 is_training=False)
-    # from models.economicgrasp import economicgrasp_multi, pred_decode
-    # net = economicgrasp_multi(seed_feat_dim=512, is_training=False)
-else:
-    from models.economicgrasp import economicgrasp, pred_decode
-    net = economicgrasp(seed_feat_dim=512, is_training=False)
+from models.economicgrasp_depth_c1 import economicgrasp_c1, pred_decode
+net = economicgrasp_c1(depth_stride=2,
+                       min_depth=cfgs.min_depth,
+                       max_depth=cfgs.max_depth,
+                       is_training=False)
+# from models.economicgrasp_depth_c1 import economicgrasp_c2, pred_decode
+# net = economicgrasp_c2(depth_stride=2,     # <-- your expectation: 224x224 tokens
+#              min_depth=cfgs.min_depth,
+#              max_depth=cfgs.max_depth,
+#              bin_num=cfgs.bin_num,
+#              is_training=False)
+# from models.economicgrasp_depth_c1 import economicgrasp_c2_1
+# from models.economicgrasp_depth_c1 import pred_decode_c2_1 as pred_decode
+# net = economicgrasp_c2_1(depth_stride=2,     # <-- your expectation: 224x224 tokens
+#                 min_depth=cfgs.min_depth,
+#                 max_depth=cfgs.max_depth,
+#                 bin_num=cfgs.bin_num,
+#                 is_training=False)
+# from models.economicgrasp import economicgrasp_multi, pred_decode
+# net = economicgrasp_multi(seed_feat_dim=512, is_training=False)
+
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 net.to(device)
 

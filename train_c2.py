@@ -17,10 +17,10 @@ from torch.utils.tensorboard import SummaryWriter
 from utils.arguments import cfgs
 
 # Local Libraries
-from models.economicgrasp_depth_c1 import economicgrasp_c1, economicgrasp_c2
+from models.economicgrasp_depth_c1 import economicgrasp_c1, economicgrasp_c2_1
 # from models.loss_economicgrasp import get_loss as get_loss_economicgrasp
-from models.loss_economicgrasp_depth_c1 import get_loss as get_loss_economicgrasp
-from dataset.graspnet_dataset import GraspNetMultiDataset, GraspNetTransDataset, collate_fn
+from models.loss_economicgrasp_depth_c1 import get_loss_c2_1 as get_loss_economicgrasp
+from dataset.graspnet_dataset import GraspNetMultiDataset, collate_fn
 
 # ----------- GLOBAL CONFIG ------------
 
@@ -48,30 +48,25 @@ def my_worker_init_fn(worker_id):
     np.random.seed(np.random.get_state()[1][0] + worker_id)
     pass
 
-print(cfgs)
+
 # Create Dataset and Dataloader
-# TRAIN_DATASET = GraspNetMultiDataset(cfgs.dataset_root, camera=cfgs.camera, split='train', voxel_size=cfgs.voxel_size, num_points=cfgs.num_point, remove_outlier=True, augment=False, use_gt_depth=cfgs.use_gt_depth, min_depth=cfgs.min_depth, max_depth=cfgs.max_depth, bin_num=cfgs.bin_num)
-# TEST_DATASET = GraspNetMultiDataset(cfgs.dataset_root, camera=cfgs.camera, split='test_seen', num_points=cfgs.num_point, remove_outlier=True, augment=False, voxel_size=cfgs.voxel_size, use_gt_depth=False, min_depth=cfgs.min_depth, max_depth=cfgs.max_depth, bin_num=cfgs.bin_num)
-
-TRAIN_DATASET = GraspNetTransDataset(cfgs.dataset_root, '/data/robotarm/dataset/GN-Trans', camera=cfgs.camera, split='train', voxel_size=cfgs.voxel_size, num_points=cfgs.num_point, remove_outlier=True, augment=False, use_gt_depth=cfgs.use_gt_depth, min_depth=cfgs.min_depth, max_depth=cfgs.max_depth, bin_num=cfgs.bin_num)
-
-TEST_DATASET = GraspNetTransDataset(cfgs.dataset_root, '/data/robotarm/dataset/GN-Trans', camera=cfgs.camera, split='test_seen', voxel_size=cfgs.voxel_size, num_points=cfgs.num_point, remove_outlier=True, augment=False, use_gt_depth=cfgs.use_gt_depth, min_depth=cfgs.min_depth, max_depth=cfgs.max_depth, bin_num=cfgs.bin_num)
+TRAIN_DATASET = GraspNetMultiDataset(cfgs.dataset_root, camera=cfgs.camera, split='train', voxel_size=cfgs.voxel_size, num_points=cfgs.num_point, remove_outlier=True, augment=False, use_gt_depth=cfgs.use_gt_depth, min_depth=cfgs.min_depth, max_depth=cfgs.max_depth, bin_num=cfgs.bin_num)
+TEST_DATASET = GraspNetMultiDataset(cfgs.dataset_root, camera=cfgs.camera, split='test_seen', num_points=cfgs.num_point, remove_outlier=True, augment=False, voxel_size=cfgs.voxel_size, use_gt_depth=False, min_depth=cfgs.min_depth, max_depth=cfgs.max_depth, bin_num=cfgs.bin_num)
 
 TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
                               num_workers=cfgs.num_workers, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
 TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
                               num_workers=cfgs.num_workers, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
 # Init the model
-net = economicgrasp_c1(depth_stride=2,     # <-- your expectation: 224x224 tokens
-                 min_depth=cfgs.min_depth,
-                 max_depth=cfgs.max_depth,
-                 is_training=True,
-                 vis_dir=os.path.join('vis', 'gn_trans_c1'))
-# net = economicgrasp_c2(depth_stride=2,     # <-- your expectation: 224x224 tokens
-                #  min_depth=cfgs.min_depth,
-                #  max_depth=cfgs.max_depth,
-                #  bin_num=cfgs.bin_num,
-                #  is_training=True)
+# net = economicgrasp_c1(depth_stride=2,     # <-- your expectation: 224x224 tokens
+#                  min_depth=cfgs.min_depth,
+#                  max_depth=cfgs.max_depth,
+#                  is_training=True)
+net = economicgrasp_c2_1(depth_stride=2,     # <-- your expectation: 224x224 tokens
+                        min_depth=cfgs.min_depth,
+                        max_depth=cfgs.max_depth,
+                        bin_num=cfgs.bin_num,
+                        is_training=True)
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 net.to(device)
