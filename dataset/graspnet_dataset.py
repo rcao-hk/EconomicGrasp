@@ -361,6 +361,15 @@ class GraspNetMultiDataset(Dataset):
         else:
             return self.get_data(index)
 
+    def _crop_box_from_mask(self, mask):
+        H, W = mask.shape
+        ys, xs = np.where(mask)
+        if ys.size == 0:
+            return 0, 0, W, H
+        x0, x1 = xs.min(), xs.max() + 1
+        y0, y1 = ys.min(), ys.max() + 1
+        return int(x0), int(y0), int(x1), int(y1)
+    
     def get_resized_idxs(self, flat_idxs, orig_hw):
         """flat_idxs in original (H*W) -> flat idx in resized (Hr*Wr)."""
         orig_h, orig_w = orig_hw
@@ -386,6 +395,27 @@ class GraspNetMultiDataset(Dataset):
         new_x = np.clip(new_x, 0, Wr - 1)
         return (new_y * Wr + new_x).astype(np.int64)
 
+    def get_resized_idxs_from_flat_crop(self, pix_flat, orig_hw, crop_box, out_hw=(448,448)):
+        H, W = orig_hw
+        outH, outW = out_hw
+        x0, y0, x1, y1 = crop_box
+        cw, ch = (x1 - x0), (y1 - y0)
+
+        ys, xs = np.unravel_index(pix_flat, (H, W))
+        xs = xs.astype(np.float32) - float(x0)
+        ys = ys.astype(np.float32) - float(y0)
+
+        # clamp into crop
+        xs = np.clip(xs, 0, cw - 1e-6)
+        ys = np.clip(ys, 0, ch - 1e-6)
+
+        # scale to 448 (use floor to match your model gather)
+        xf = np.floor(xs * (outW / float(cw))).astype(np.int64)
+        yf = np.floor(ys * (outH / float(ch))).astype(np.int64)
+        xf = np.clip(xf, 0, outW - 1)
+        yf = np.clip(yf, 0, outH - 1)
+        return (yf * outW + xf).astype(np.int64)
+    
     def resize_intrinsics(self, K, orig_hw):
         """Scale intrinsics K from orig_hw to self.resize_shape (Hr,Wr)."""
         orig_h, orig_w = orig_hw
@@ -399,6 +429,25 @@ class GraspNetMultiDataset(Dataset):
         K[1, 1] *= sy  # fy
         K[0, 2] *= sx  # cx
         K[1, 2] *= sy  # cy
+        return K
+
+    def resize_intrinsics_with_crop(self, intrinsic, crop_box, out_hw=(448,448)):
+        x0, y0, x1, y1 = crop_box
+        outH, outW = out_hw
+        cw = float(x1 - x0)
+        ch = float(y1 - y0)
+
+        sx = outW / cw
+        sy = outH / ch
+
+        K = intrinsic.astype(np.float32).copy()
+        K[0, 2] -= float(x0)
+        K[1, 2] -= float(y0)
+
+        K[0, 0] *= sx
+        K[1, 1] *= sy
+        K[0, 2] *= sx
+        K[1, 2] *= sy
         return K
 
     def build_depth_prob_gt(self, depth_m_resized: np.ndarray):
@@ -522,16 +571,23 @@ class GraspNetMultiDataset(Dataset):
 
         # multi-modal: full image input + point->pixel idxs
         pix_flat = valid_flat[idxs]                            # original H*W flatten index
-        resized_idxs = self.get_resized_idxs(pix_flat, (H, W)) # resized (448*448) flatten index
-        img = self.img_transforms(color)                       # (3,448,448)
+        # resized_idxs = self.get_resized_idxs(pix_flat, (H, W)) # resized (448*448) flatten index
+        # img = self.img_transforms(color)                       # (3,448,448)
+
+        crop_box = self._crop_box_from_mask(mask)
+        x0, y0, x1, y1 = crop_box
+        color_crop = color[y0:y1, x0:x1].copy()
+        img = self.img_transforms(color_crop)
+        resized_idxs = self.get_resized_idxs_from_flat_crop(pix_flat, (H, W), crop_box, out_hw=self.resize_shape)
         
         # ---- GT depth (virtual) -> meters -> resize to 448x448 ----
         # 注意：gt_depth 可能是 uint16 (mm / factor_depth)
         fd = float(self.gt_factor_depth) if (self.gt_factor_depth is not None) else float(factor_depth)
         gt_depth_m = gt_depth.astype(np.float32) / fd
-        K_resized = self.resize_intrinsics(intrinsic, (depth.shape[0], depth.shape[1]))
+        K_resized = self.resize_intrinsics_with_crop(intrinsic, crop_box, out_hw=self.resize_shape)
         
         Hr, Wr = self.resize_shape
+        gt_depth_m = gt_depth_m[y0:y1, x0:x1]
         gt_depth_m_resized = cv2.resize(gt_depth_m, (Wr, Hr), interpolation=cv2.INTER_NEAREST).astype(np.float32)
 
         depth_prob_gt, depth_prob_w = self.build_depth_prob_gt(gt_depth_m_resized)
@@ -554,12 +610,12 @@ class GraspNetMultiDataset(Dataset):
         # -----------------------------
         # 0) load raw data
         # -----------------------------
-        color = np.array(Image.open(self.colorpath[index]), dtype=np.float32) / 255.0
-        depth = np.array(Image.open(self.depthpath[index]))
-        seg = np.array(Image.open(self.labelpath[index]))
+        color = np.array(Image.open(self.colorpath[index]), dtype=np.float32) / 255.0   # (H,W,3)
+        depth = np.array(Image.open(self.depthpath[index]))                              # (H,W)
+        seg = np.array(Image.open(self.labelpath[index]))                                # (H,W)
         meta = scio.loadmat(self.metapath[index])
         scene = self.scenename[index]
-        gt_depth = np.array(Image.open(self.gtdepthpath[index]))
+        gt_depth = np.array(Image.open(self.gtdepthpath[index]))                         # (H,W)
 
         graspness = np.load(self.graspnesspath[index])
         gt_graspness = np.load(self.gtgraspnesspath[index])
@@ -574,10 +630,20 @@ class GraspNetMultiDataset(Dataset):
             print(scene)
             raise
 
-        # optionally replace with GT depth/graspness
+        # optionally replace with GT depth / graspness
         if self.use_gt_depth:
             depth = gt_depth
             graspness = gt_graspness
+
+        # normalize graspness to 1D masked-sequence style
+        graspness = np.asarray(graspness, dtype=np.float32)
+        if graspness.ndim == 2 and graspness.shape[1] == 1:
+            graspness = graspness[:, 0]
+        elif graspness.ndim == 2 and graspness.shape[0] == 1:
+            graspness = graspness[0, :]
+        elif graspness.ndim != 1:
+            graspness = graspness.reshape(graspness.shape[0], -1)[:, 0]
+        graspness = graspness.reshape(-1)
 
         camera = CameraInfo(
             1280.0, 720.0,
@@ -600,35 +666,59 @@ class GraspNetMultiDataset(Dataset):
         else:
             mask = depth_mask
 
+        H, W = depth.shape
+        Hr, Wr = self.resize_shape  # expected (448,448)
+
         # -----------------------------
-        # 2) GT depth meters resized to 448 (for depth_prob_gt)
+        # 2) crop box + crop-aware RGB / GT-depth / K
         # -----------------------------
+        crop_box = self._crop_box_from_mask(mask)
+        x0, y0, x1, y1 = crop_box
+
+        # RGB crop -> img
+        color_crop = color[y0:y1, x0:x1].copy()
+        img = self.img_transforms(color_crop)
+
+        # GT depth meters: crop -> resize
         fd = float(self.gt_factor_depth) if (self.gt_factor_depth is not None) else float(factor_depth)
         gt_depth_m = gt_depth.astype(np.float32) / fd
+        gt_depth_crop = gt_depth_m[y0:y1, x0:x1].copy()
+        gt_depth_m_resized = cv2.resize(
+            gt_depth_crop, (Wr, Hr), interpolation=cv2.INTER_NEAREST
+        ).astype(np.float32)
 
-        Hr, Wr = self.resize_shape  # expected (448,448)
-        gt_depth_m_resized = cv2.resize(gt_depth_m, (Wr, Hr), interpolation=cv2.INTER_NEAREST).astype(np.float32)
+        # crop-aware intrinsics
+        K_resized = self.resize_intrinsics_with_crop(intrinsic, crop_box, out_hw=self.resize_shape)
 
+        # optional: keep depth_prob_gt for cls-based models; regression model can ignore it
         depth_prob_gt, depth_prob_w = self.build_depth_prob_gt(gt_depth_m_resized)
-        # resize intrinsics to 448x448
-        K_resized = self.resize_intrinsics(intrinsic, (depth.shape[0], depth.shape[1]))
 
         # -----------------------------
-        # 3) mask & sample (point-level arrays)
+        # 3) mask & sample masked sequences
         #    returns:
-        #      H, W          : original depth shape (used for mapping indices)
-        #      valid_flat    : (Nmasked,) original H*W flat idx for each masked point
-        #      cloud_masked  : (Nmasked,3)
-        #      seg_masked    : (Nmasked,)
+        #      H, W
+        #      valid_flat   : (Nmasked,) full-image flat idx of masked points
+        #      cloud_masked : (Nmasked,3)
+        #      seg_masked   : (Nmasked,)
         # -----------------------------
         H, W, valid_flat, cloud_masked, seg_masked = self._mask_and_sample(depth, seg, cloud, mask)
         color_masked = color[mask]
 
+        # sanity: graspness must align with masked sequence
+        if graspness.shape[0] != valid_flat.shape[0]:
+            raise ValueError(
+                f"graspness length mismatch: graspness={graspness.shape}, "
+                f"masked_points={valid_flat.shape}. "
+                f"Expected graspness npy to align with mask sequence."
+            )
+
         # -----------------------------
-        # 4) Build token-level (224x224) labels from masked sequences
+        # 4) Build token-level labels under crop-resize coordinates
         # -----------------------------
-        # map ALL masked pixels to resized 448 grid (may have collisions)
-        resized_valid_all = self.get_resized_idxs(valid_flat, (H, W))  # (Nmasked,)
+        # map ALL masked pixels into cropped+resized 448 grid
+        resized_valid_all = self.get_resized_idxs_from_flat_crop(
+            valid_flat, (H, W), crop_box, out_hw=self.resize_shape
+        )
         resized_valid_all = np.asarray(resized_valid_all, dtype=np.int64).reshape(-1)
 
         # objectness for masked pixels (binary)
@@ -636,18 +726,10 @@ class GraspNetMultiDataset(Dataset):
         obj_masked[obj_masked > 1] = 1
         obj_masked = np.asarray(obj_masked, dtype=np.int64).reshape(-1)
 
-        # graspness for masked pixels (float)  —— 关键：保证是一维 (Nmasked,)
-        grasp_masked = np.asarray(graspness, dtype=np.float32)
-        if grasp_masked.ndim == 2 and grasp_masked.shape[1] == 1:
-            grasp_masked = grasp_masked[:, 0]
-        elif grasp_masked.ndim == 2 and grasp_masked.shape[0] == 1:
-            grasp_masked = grasp_masked[0, :]
-        elif grasp_masked.ndim != 1:
-            # 如果真出现 (N,k)，先取第一列（更严格的话可以 raise）
-            grasp_masked = grasp_masked.reshape(grasp_masked.shape[0], -1)[:, 0]
-        grasp_masked = grasp_masked.reshape(-1)
+        # graspness for masked pixels (already aligned 1D)
+        grasp_masked = graspness.astype(np.float32).reshape(-1)
 
-        # sanity check: three arrays must align
+        # sanity check
         Nmasked = resized_valid_all.shape[0]
         if not (obj_masked.shape[0] == Nmasked and grasp_masked.shape[0] == Nmasked):
             raise ValueError(
@@ -656,14 +738,14 @@ class GraspNetMultiDataset(Dataset):
                 f"Check that graspness npy aligns with cloud_masked/seg_masked order."
             )
 
-        # allocate resized maps (flatten)
+        # scatter to 448x448 crop-resized plane
         obj_flat = np.zeros((Hr * Wr,), dtype=np.int64)
         gsum = np.zeros((Hr * Wr,), dtype=np.float32)
         gcnt = np.zeros((Hr * Wr,), dtype=np.float32)
 
-        # collisions: objectness uses max; graspness uses mean (sum/count)
+        # collisions: objectness uses max; graspness uses mean
         np.maximum.at(obj_flat, resized_valid_all, obj_masked)
-        np.add.at(gsum, resized_valid_all, grasp_masked)   # <-- now shapes match
+        np.add.at(gsum, resized_valid_all, grasp_masked)
         np.add.at(gcnt, resized_valid_all, 1.0)
 
         grasp_flat = gsum / np.maximum(gcnt, 1.0)
@@ -681,9 +763,8 @@ class GraspNetMultiDataset(Dataset):
         grasp_blk = grasp_map_448.reshape(Ht, s_tok, Wt, s_tok)
         valid_blk = valid_map_448.reshape(Ht, s_tok, Wt, s_tok)
 
-        valid_cnt = valid_blk.sum(axis=(1, 3)).astype(np.float32)  # (Ht,Wt)
-
-        obj_tok = obj_blk.max(axis=(1, 3)).astype(np.int64)        # OR within 2x2
+        valid_cnt = valid_blk.sum(axis=(1, 3)).astype(np.float32)   # (Ht,Wt)
+        obj_tok = obj_blk.max(axis=(1, 3)).astype(np.int64)
 
         grasp_sum = (grasp_blk * valid_blk).sum(axis=(1, 3)).astype(np.float32)
         grasp_tok = grasp_sum / np.maximum(valid_cnt, 1.0)
@@ -694,10 +775,10 @@ class GraspNetMultiDataset(Dataset):
 
         objectness_label_tok = obj_tok.reshape(-1).astype(np.int64)      # (Ntok,)
         graspness_label_tok  = grasp_tok.reshape(-1).astype(np.float32)  # (Ntok,)
-        token_valid_mask     = (valid_cnt.reshape(-1) >= 1.0)            # (Ntok,) bool
-        
+        token_valid_mask     = (valid_cnt.reshape(-1) >= 1.0)            # (Ntok,)
+
         # -----------------------------
-        # 5) Sample point cloud (point-level, unchanged)
+        # 5) Sample point cloud (point-level)
         # -----------------------------
         if len(cloud_masked) >= self.num_points:
             idxs = np.random.choice(len(cloud_masked), self.num_points, replace=False)
@@ -709,17 +790,17 @@ class GraspNetMultiDataset(Dataset):
         cloud_sampled = cloud_masked[idxs]
         color_sampled = color_masked[idxs]
         seg_sampled = seg_masked[idxs]
-
-        graspness_sampled = graspness[idxs].astype(np.float32)
+        graspness_sampled = grasp_masked[idxs].astype(np.float32)
 
         objectness_label = seg_sampled.copy()
         segmentation_label = objectness_label.copy()
         objectness_label[objectness_label > 1] = 1
 
-        # multi-modal: full image + idxs
+        # sampled pixels -> crop-resized img_idxs
         pix_flat = valid_flat[idxs]
-        resized_idxs = self.get_resized_idxs(pix_flat, (H, W))  # (num_points,) in [0, 448*448)
-        img = self.img_transforms(color)
+        resized_idxs = self.get_resized_idxs_from_flat_crop(
+            pix_flat, (H, W), crop_box, out_hw=self.resize_shape
+        )
 
         # -----------------------------
         # 6) Load economic grasp labels (object-level lists)
@@ -766,16 +847,16 @@ class GraspNetMultiDataset(Dataset):
             'coordinates_for_voxel': (cloud_sampled.astype(np.float32) / self.voxel_size),
 
             'img': img,
-            'img_idxs': resized_idxs.astype(np.int64),  # sampled pixels in resized 448 grid
+            'img_idxs': resized_idxs.astype(np.int64),  # sampled pixels in cropped+resized 448 grid
 
             'graspness_label': graspness_sampled.astype(np.float32),
             'objectness_label': objectness_label.astype(np.int64),
             'segmentation_label': segmentation_label.astype(np.int64),
 
-            # token-level (224x224 -> flatten)
-            'objectness_label_tok': objectness_label_tok,   # (224*224,) int64, -1 for invalid
-            'graspness_label_tok': graspness_label_tok,     # (224*224,) float32
-            'token_valid_mask': token_valid_mask.astype(np.bool_),  # (224*224,) bool
+            # token-level
+            'objectness_label_tok': objectness_label_tok,
+            'graspness_label_tok': graspness_label_tok,
+            'token_valid_mask': token_valid_mask.astype(np.bool_),
 
             # economic grasp labels
             'object_poses_list': object_poses_list,
@@ -790,12 +871,13 @@ class GraspNetMultiDataset(Dataset):
             # debug / bookkeeping
             'sampled_masked_idxs': idxs.astype(np.int64),
             'pix_flat': pix_flat.astype(np.int64),
+            'crop_box': np.asarray(crop_box, dtype=np.int64),
 
             # camera / depth supervision
-            'K': K_resized.astype(np.float32),                 # (3,3)
-            'gt_depth_m': gt_depth_m_resized.astype(np.float32),  # (448,448) meters
-            'depth_prob_gt': depth_prob_gt.astype(np.float32),    # (1, Nfeat, 256)
-            'depth_prob_weight': depth_prob_w.astype(np.float32), # (1, Nfeat)
+            'K': K_resized.astype(np.float32),
+            'gt_depth_m': gt_depth_m_resized.astype(np.float32),
+            'depth_prob_gt': depth_prob_gt.astype(np.float32),
+            'depth_prob_weight': depth_prob_w.astype(np.float32),
         }
         return ret_dict
 
