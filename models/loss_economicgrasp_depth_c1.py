@@ -75,6 +75,40 @@ def get_loss_c2_1(end_points):
     return loss, end_points
 
 
+def get_loss_c2_2(end_points):
+    depth_reg_loss, end_points = compute_depth_reg_loss(end_points)
+
+    # choose token-level or point-level supervision
+    objectness_loss, end_points = compute_objectness_loss_tok(end_points)
+    graspness_loss, end_points  = compute_graspness_loss_tok(end_points)
+
+    # EcoGrasp head losses (on selected M seeds)
+    view_loss, end_points  = compute_view_graspness_loss(end_points)
+    angle_loss, end_points = compute_angle_loss(end_points)
+    depth_loss, end_points = compute_depth_loss(end_points)
+    score_loss, end_points = compute_score_loss_cls(end_points)
+    width_loss, end_points = compute_width_loss(end_points)
+
+    obj_loss = cfgs.objectness_loss_weight * objectness_loss
+    grasp_loss = (
+        cfgs.graspness_loss_weight * graspness_loss +
+        cfgs.view_loss_weight      * view_loss +
+        cfgs.angle_loss_weight     * angle_loss +
+        cfgs.depth_loss_weight     * depth_loss +
+        cfgs.score_loss_weight     * score_loss +
+        cfgs.width_loss_weight     * width_loss
+    )
+
+    depth_reg_loss = cfgs.depth_prob_loss_weight * depth_reg_loss
+    loss = obj_loss + grasp_loss + depth_reg_loss
+
+    end_points['A: Objectness Loss'] = objectness_loss
+    end_points['A: Grasp Loss'] = grasp_loss
+    end_points['A: DepthReg Loss'] = depth_reg_loss
+    end_points['A: Overall Loss'] = loss
+    return loss, end_points
+
+
 def compute_objectness_loss_tok(end_points):
     # objectness_score: (B,2,Ntok)
     # objectness_label_tok: (B,Ntok) with -1 for invalid
@@ -179,6 +213,8 @@ def compute_depth_reg_loss(
             end_points["D: z_gt_std(valid)"] = gt_valid.std()
             end_points["D: z_pred_mean(valid)"] = pred_valid.mean()
             end_points["D: z_gt_mean(valid)"] = gt_valid.mean()
+            abs_err = (pred - gt).abs()
+            end_points["D: Depth MAE"] = abs_err[valid].mean() if valid.any() else torch.zeros((), device=pred.device)
         else:
             end_points["D: z_pred_std(valid)"] = torch.zeros((), device=pred.device)
             end_points["D: z_gt_std(valid)"] = torch.zeros((), device=pred.device)

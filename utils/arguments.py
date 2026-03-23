@@ -57,4 +57,12 @@ parser.add_argument('--bin_num', type=int, default=256, help='Number of bins for
 parser.add_argument('--eval_start_epoch', type=int, default=0, help='Epoch to start evaluation [default: 0]')
 parser.add_argument('--ckpt_save_interval', type=int, default=5, help='Number for save checkpoint[default: 5]')
 
+parser.add_argument("--sample_interval", type=float, default=1.0,
+                    help="Fraction of dataset to evaluate. 1.0=all, 0.1=10% evenly sampled.")
+parser.add_argument("--c1_ckpt", type=str,)
+parser.add_argument("--c23_ckpt", type=str)
+parser.add_argument("--save_root", type=str)
+parser.add_argument("--object_only", action="store_true",
+                    help="If set, compute depth metrics only on object foreground area from objectness_label_tok.")
+parser.add_argument("--oracle_mode", type=str,)
 cfgs = parser.parse_args()

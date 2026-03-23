@@ -385,6 +385,7 @@ class DINOv2DepthRegressionNet(nn.Module):
 
         # ✅ 把输出约束到 [min_depth, max_depth]，避免爆炸 / 无意义尺度
         depth_448 = F.sigmoid(depth_logits_448) * self.max_depth
+        # depth_448 = self.min_depth + torch.sigmoid(depth_logits_448) * (self.max_depth - self.min_depth)
         # depth_448 = depth_448 * self.max_depth
 
         # token 级别

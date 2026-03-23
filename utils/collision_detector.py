@@ -2,6 +2,7 @@ import os
 import sys
 import numpy as np
 import open3d as o3d
+import torch
 
 
 class ModelFreeCollisionDetector():
@@ -128,3 +129,76 @@ class ModelFreeCollisionDetector():
             shifting_iou = shifting_mask.sum(axis=1) / (shifting_volume + 1e-6)
             ret_value.append([global_iou, left_iou, right_iou, bottom_iou, shifting_iou])
         return ret_value
+
+
+class ModelFreeCollisionDetectorTorch():
+    def __init__(self, scene_points, voxel_size=0.005):
+        self.finger_width = 0.01
+        self.finger_length = 0.06
+        self.voxel_size = voxel_size
+        # Create point cloud using Open3D and downsample
+        scene_cloud = o3d.geometry.PointCloud()
+        scene_cloud.points = o3d.utility.Vector3dVector(scene_points)
+        scene_cloud = scene_cloud.voxel_down_sample(voxel_size)
+        # Convert to PyTorch tensor and move to GPU
+        self.scene_points = torch.tensor(np.array(scene_cloud.points), dtype=torch.float32, device='cuda')
+
+    def detect(self, grasp_group, approach_dist=0.03, collision_thresh=0.05, return_empty_grasp=False,
+               empty_thresh=0.01, return_ious=False):
+        # Convert numpy arrays to torch tensors and move to GPU
+        T = torch.tensor(grasp_group.translations, dtype=torch.float32, device='cuda')
+        R = torch.tensor(grasp_group.rotation_matrices, dtype=torch.float32, device='cuda')
+        heights = torch.tensor(grasp_group.heights[:, None], dtype=torch.float32, device='cuda')
+        depths = torch.tensor(grasp_group.depths[:, None], dtype=torch.float32, device='cuda')
+        widths = torch.tensor(grasp_group.widths[:, None], dtype=torch.float32, device='cuda')
+
+        targets = self.scene_points[None, :, :] - T[:, None, :]
+        targets_rotated = torch.matmul(targets, R)
+
+        ## Create masks for collision detection
+        mask1 = ((targets_rotated[:, :, 2] > -heights / 2) & (targets_rotated[:, :, 2] < heights / 2))
+        mask2 = ((targets_rotated[:, :, 0] > depths - self.finger_length) & (targets_rotated[:, :, 0] < depths))
+        mask3 = (targets_rotated[:, :, 1] > -(widths / 2 + self.finger_width))
+        mask4 = (targets_rotated[:, :, 1] < -widths / 2)
+        mask5 = (targets_rotated[:, :, 1] < (widths / 2 + self.finger_width))
+        mask6 = (targets_rotated[:, :, 1] > widths / 2)
+        mask7 = ((targets_rotated[:, :, 0] <= depths - self.finger_length) & (
+                    targets_rotated[:, :, 0] > depths - self.finger_length - self.finger_width))
+        mask8 = ((targets_rotated[:, :, 0] <= depths - self.finger_length - self.finger_width) & (
+                    targets_rotated[:, :, 0] > depths - self.finger_length - self.finger_width - approach_dist))
+
+        ## Combine masks to determine collisions
+        left_mask = mask1 & mask2 & mask3 & mask4
+        right_mask = mask1 & mask2 & mask5 & mask6
+        bottom_mask = mask1 & mask3 & mask5 & mask7
+        shifting_mask = mask1 & mask3 & mask5 & mask8
+        global_mask = left_mask | right_mask | bottom_mask | shifting_mask
+
+        # Calculate collision IOUs
+        left_right_volume = (heights * self.finger_length * self.finger_width / (self.voxel_size ** 3)).flatten()
+        bottom_volume = (
+                    heights * (widths + 2 * self.finger_width) * self.finger_width / (self.voxel_size ** 3)).flatten()
+        shifting_volume = (
+                    heights * (widths + 2 * self.finger_width) * approach_dist / (self.voxel_size ** 3)).flatten()
+        volume = left_right_volume * 2 + bottom_volume + shifting_volume
+
+        global_iou = global_mask.sum(dim=1) / (volume + 1e-6)
+        collision_mask = (global_iou > collision_thresh)
+
+        if not (return_empty_grasp or return_ious):
+            return collision_mask
+
+        ret_value = [collision_mask, ]
+        if return_empty_grasp:
+            inner_mask = mask1 & mask2 & (~mask4) & (~mask6)
+            inner_volume = (heights * self.finger_length * widths / (self.voxel_size ** 3)).flatten()
+            empty_mask = (inner_mask.sum(dim=-1) / inner_volume < empty_thresh)
+            ret_value.append(empty_mask)
+        if return_ious:
+            left_iou = left_mask.sum(dim=1) / (left_right_volume + 1e-6)
+            right_iou = right_mask.sum(dim=1) / (left_right_volume + 1e-6)
+            bottom_iou = bottom_mask.sum(dim=1) / (bottom_volume + 1e-6)
+            shifting_iou = shifting_mask.sum(dim=1) / (shifting_volume + 1e-6)
+            ret_value.append([global_iou, left_iou, right_iou, bottom_iou, shifting_iou])
+        return ret_value
+    

@@ -17,9 +17,10 @@ from torch.utils.tensorboard import SummaryWriter
 from utils.arguments import cfgs
 
 # Local Libraries
-from models.economicgrasp_depth_c1 import economicgrasp_c1, economicgrasp_c2_1
-# from models.loss_economicgrasp import get_loss as get_loss_economicgrasp
-from models.loss_economicgrasp_depth_c1 import get_loss_c2_1 as get_loss_economicgrasp
+from models.economicgrasp_depth_c1 import economicgrasp_c1, economicgrasp_c2_1, economicgrasp_c2_2, economicgrasp_c2_3, economicgrasp_c2_4
+# from models.loss_economicgrasp_depth_c1 import get_loss as get_loss_economicgrasp
+# from models.loss_economicgrasp_depth_c1 import get_loss_c2_1 as get_loss_economicgrasp
+from models.loss_economicgrasp_depth_c1 import get_loss_c2_2 as get_loss_economicgrasp
 from dataset.graspnet_dataset import GraspNetMultiDataset, collate_fn
 
 # ----------- GLOBAL CONFIG ------------
@@ -62,12 +63,23 @@ TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=F
 #                  min_depth=cfgs.min_depth,
 #                  max_depth=cfgs.max_depth,
 #                  is_training=True)
-net = economicgrasp_c2_1(depth_stride=2,     # <-- your expectation: 224x224 tokens
-                        min_depth=cfgs.min_depth,
+# net = economicgrasp_c2_1(depth_stride=2,     # <-- your expectation: 224x224 tokens
+#                         min_depth=cfgs.min_depth,
+#                         max_depth=cfgs.max_depth,
+#                         bin_num=cfgs.bin_num,
+#                         is_training=True)
+# net = economicgrasp_c2_2(depth_stride=2,     # <-- your expectation: 224x224 tokens
+#                         min_depth=cfgs.min_depth,
+#                         max_depth=cfgs.max_depth,
+#                         is_training=True)
+net = economicgrasp_c2_3(min_depth=cfgs.min_depth,
                         max_depth=cfgs.max_depth,
-                        bin_num=cfgs.bin_num,
-                        is_training=True)
-
+                        is_training=True,
+                        vis_dir=os.path.join('vis', 'c2.3_new'),
+                        vis_every=1000)
+# net = economicgrasp_c2_4(min_depth=cfgs.min_depth,
+#                         max_depth=cfgs.max_depth,
+#                         is_training=True)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 net.to(device)
 

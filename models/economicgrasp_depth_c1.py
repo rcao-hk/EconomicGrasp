@@ -58,7 +58,8 @@ class economicgrasp_c1(nn.Module):
         depth_stride=2,
         min_depth=0.2,
         max_depth=1.0,
-        vis_dir='c1'
+        vis_dir='c1',
+        vis_every=1000
     ):
         super().__init__()
         self.is_training = bool(is_training)
@@ -121,7 +122,7 @@ class economicgrasp_c1(nn.Module):
         # self._init_weights(skip_modules=(self.depth_net,))
         
         self.vis_dir = vis_dir  # e.g. "vis_cloud"
-        self.vis_every = 100
+        self.vis_every = vis_every
         self._vis_iter = 0
         if self.vis_dir is not None:
             os.makedirs(self.vis_dir, exist_ok=True)
@@ -169,7 +170,85 @@ class economicgrasp_c1(nn.Module):
         out_path = os.path.join(self.vis_dir, f"pred_gt_xyz_{tag}_iter{self._vis_iter:06d}.ply")
         o3d.io.write_point_cloud(out_path, pcd, write_ascii=False)
     
-    
+    def _to_vis_bgr(self, img_chw: torch.Tensor):
+        """
+        img_chw: (3,H,W), torch tensor
+        return: uint8 BGR image for cv2
+        """
+        import cv2
+        img = img_chw.detach().cpu().float().permute(1, 2, 0).numpy()  # HWC
+
+        # heuristic de-normalization
+        # if image looks normalized by ImageNet stats
+        if img.min() < -0.05 or img.max() > 1.05:
+            mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+            std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+            img = img * std + mean
+
+        img = np.clip(img, 0.0, 1.0)
+        img = (img * 255.0).round().astype(np.uint8)
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        return img
+
+    def _save_overlay_selected(
+        self,
+        img: torch.Tensor,                    # (B,3,H,W)
+        all_graspable_img_idxs: list,        # len=B, each (Ng,)
+        selected_img_idxs: list,             # len=B, each (M,)
+        end_points: dict,
+        prefix: str = "overlay_selected",
+    ):
+        """
+        可视化:
+        green  = all graspable points before FPS
+        red    = final selected M points after fallback/repeat/FPS
+        """
+        import cv2
+        if self.vis_dir is None:
+            return
+
+        os.makedirs(self.vis_dir, exist_ok=True)
+        B, _, H, W = img.shape
+
+        for b in range(B):
+            canvas = self._to_vis_bgr(img[b])
+            overlay = canvas.copy()
+
+            # ---- all graspable: green small points ----
+            if all_graspable_img_idxs[b] is not None and all_graspable_img_idxs[b].numel() > 0:
+                idx_all = all_graspable_img_idxs[b].detach().cpu().long().numpy()
+                u_all = idx_all % W
+                v_all = idx_all // W
+                valid = (u_all >= 0) & (u_all < W) & (v_all >= 0) & (v_all < H)
+                u_all, v_all = u_all[valid], v_all[valid]
+
+                for uu, vv in zip(u_all, v_all):
+                    cv2.circle(overlay, (int(uu), int(vv)), 1, (0, 255, 0), -1)
+
+            # blend graspable overlay
+            canvas = cv2.addWeighted(overlay, 0.45, canvas, 0.55, 0)
+
+            # ---- selected M points: red larger points ----
+            if selected_img_idxs[b] is not None and selected_img_idxs[b].numel() > 0:
+                idx_sel = selected_img_idxs[b].detach().cpu().long().numpy()
+                u_sel = idx_sel % W
+                v_sel = idx_sel // W
+                valid = (u_sel >= 0) & (u_sel < W) & (v_sel >= 0) & (v_sel < H)
+                u_sel, v_sel = u_sel[valid], v_sel[valid]
+
+                for k, (uu, vv) in enumerate(zip(u_sel, v_sel)):
+                    cv2.circle(canvas, (int(uu), int(vv)), 3, (0, 0, 255), -1)
+                    # 如果你想标编号，取消下面这行注释
+                    # cv2.putText(canvas, str(k), (int(uu)+2, int(vv)-2),
+                    #             cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255,255,255), 1, cv2.LINE_AA)
+
+            save_path = os.path.join(
+                self.vis_dir,
+                f"{prefix}_iter{self._vis_iter:06d}",
+            )
+            os.makedirs(save_path, exist_ok=True) 
+            cv2.imwrite(os.path.join(save_path, "overlay_selected.png"), canvas)
+        
     def _init_weights(self, skip_modules=()):
         for module in self.modules():
             if any(module is m for m in skip_modules):
@@ -224,30 +303,28 @@ class economicgrasp_c1(nn.Module):
         u, v = img_idxs_to_uv(img_idxs, W) # (B,N,1)
         xyz = backproject_uvz(u, v, z_sg, K)   # xyz is now disconnected from depth_map_pred
         end_points["point_clouds"] = xyz
-        
-        # -------- vis: save pred xyz vs gt xyz (same img_idxs) --------
+
         if self.vis_dir is not None:
             do_vis = (self._vis_iter % self.vis_every == 0)
             do_vis = do_vis or bool(end_points.get("force_vis", False))
-
-            if do_vis and ("gt_depth_m" in end_points):
-                gt_depth = end_points["gt_depth_m"]
-                if gt_depth.dim() == 3:
-                    gt_depth = gt_depth.unsqueeze(1)          # (B,1,H,W)
-                elif gt_depth.dim() == 4:
-                    pass                                      # already (B,1,H,W) or (B,C,H,W)
-                else:
-                    gt_depth = None
-
-                if gt_depth is not None:
-                    # 用同一套 (u,v) 和 img_idxs 对齐采样
-                    z_gt = gather_depth_by_img_idxs(gt_depth, img_idxs)           # (B,N,1)
-                    z_gt = torch.nan_to_num(z_gt, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(1e-6)
-                    xyz_gt = backproject_uvz(u, v, z_gt, K)                       # (B,N,3)
-                    self._save_pred_gt_cloud_ply(xyz, xyz_gt, end_points)
-
-            self._vis_iter += 1
             
+        # -------- vis: save pred xyz vs gt xyz (same img_idxs) --------
+        if do_vis and ("gt_depth_m" in end_points):
+            gt_depth = end_points["gt_depth_m"]
+            if gt_depth.dim() == 3:
+                gt_depth = gt_depth.unsqueeze(1)          # (B,1,H,W)
+            elif gt_depth.dim() == 4:
+                pass                                      # already (B,1,H,W) or (B,C,H,W)
+            else:
+                gt_depth = None
+
+            if gt_depth is not None:
+                # 用同一套 (u,v) 和 img_idxs 对齐采样
+                z_gt = gather_depth_by_img_idxs(gt_depth, img_idxs)           # (B,N,1)
+                z_gt = torch.nan_to_num(z_gt, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(1e-6)
+                xyz_gt = backproject_uvz(u, v, z_gt, K)                       # (B,N,3)
+                self._save_pred_gt_cloud_ply(xyz, xyz_gt, end_points)
+
         # -------- 4) geometry PE + fuse -> seed_features --------
         invz = (1.0 / xyz[..., 2:3]).clamp_max(1e6)
         pe = self.pe_mlp(torch.cat([xyz, invz], dim=-1))                 # (B,N,pe_dim)
@@ -275,11 +352,22 @@ class economicgrasp_c1(nn.Module):
         seed_xyz_graspable = []
         graspable_num_batch = 0.0
 
+        # for visualization / debugging
+        all_graspable_img_idxs = []         # len=B, each (Ng,)
+        selected_img_idxs_graspable = []    # len=B, each (M,)
+
         for i in range(B):
             cur_mask = graspable_mask[i]
             cur_idx = torch.nonzero(cur_mask, as_tuple=False).squeeze(1)
             graspable_num_batch += cur_idx.numel()
 
+            if do_vis:
+                if cur_idx.numel() > 0:
+                    cur_all_img_idxs = img_idxs[i].index_select(0, cur_idx).contiguous()
+                else:
+                    cur_all_img_idxs = torch.empty((0,), dtype=img_idxs.dtype, device=img_idxs.device)
+                all_graspable_img_idxs.append(cur_all_img_idxs.detach().cpu())
+                
             if cur_idx.numel() == 0:
                 ridx = torch.randint(0, point_num, (self.M_points,), device=seed_xyz.device)
                 cur_seed_xyz = seed_xyz[i].index_select(0, ridx).contiguous()
@@ -287,6 +375,9 @@ class economicgrasp_c1(nn.Module):
                 cur_feat     = cur_feat_mc.transpose(0, 1).contiguous()
                 seed_xyz_graspable.append(cur_seed_xyz)
                 seed_features_graspable.append(cur_feat)
+                if do_vis:
+                    cur_sel_img_idxs = img_idxs[i].index_select(0, ridx).contiguous()
+                    selected_img_idxs_graspable.append(cur_sel_img_idxs.detach().cpu())
                 continue
 
             if cur_idx.numel() < self.M_points:
@@ -297,6 +388,9 @@ class economicgrasp_c1(nn.Module):
                 cur_feat     = cur_feat_mc.transpose(0, 1).contiguous()
                 seed_xyz_graspable.append(cur_seed_xyz)
                 seed_features_graspable.append(cur_feat)
+                if do_vis:
+                    cur_sel_img_idxs = img_idxs[i].index_select(0, ridx).contiguous()
+                    selected_img_idxs_graspable.append(cur_sel_img_idxs.detach().cpu())
                 continue
 
             xyz_in = seed_xyz[i].index_select(0, cur_idx).unsqueeze(0).contiguous()  # (1,Ng,3)
@@ -312,6 +406,13 @@ class economicgrasp_c1(nn.Module):
             seed_xyz_graspable.append(cur_seed_xyz)
             seed_features_graspable.append(cur_feat)
 
+            if do_vis:
+                # fps_idxs is index inside cur_idx, convert back to original point index
+                fps_idxs_long = fps_idxs.squeeze(0).long()      # (M,)
+                ridx = cur_idx.index_select(0, fps_idxs_long)   # (M,)
+                cur_sel_img_idxs = img_idxs[i].index_select(0, ridx).contiguous()
+                selected_img_idxs_graspable.append(cur_sel_img_idxs.detach().cpu())
+                
         seed_xyz_graspable = torch.stack(seed_xyz_graspable, 0).contiguous()            # (B,M,3)
         seed_features_graspable = torch.stack(seed_features_graspable, 0).contiguous()  # (B,512,M)
 
@@ -319,6 +420,19 @@ class economicgrasp_c1(nn.Module):
         end_points["D: Graspable Points"] = (
             torch.as_tensor(graspable_num_batch, device=seed_xyz.device, dtype=torch.float32) / float(B)
         ).detach().reshape(())
+
+        if do_vis and len(selected_img_idxs_graspable) == B:
+            end_points["selected_img_idxs_graspable"] = torch.stack(
+                [x.to(img_idxs.device) for x in selected_img_idxs_graspable], dim=0
+            )  # (B,M)
+
+            self._save_overlay_selected(
+                img=img,
+                all_graspable_img_idxs=all_graspable_img_idxs,
+                selected_img_idxs=selected_img_idxs_graspable,
+                end_points=end_points,
+                prefix="c1dbg"
+            )
 
         # -------- 7) view selection --------
         end_points, res_feat = self.view(seed_features_graspable, end_points)
@@ -334,6 +448,9 @@ class economicgrasp_c1(nn.Module):
         group_features = self.cy_group(seed_xyz_graspable, seed_features_graspable, grasp_top_views_rot)
         end_points = self.grasp_head(group_features, end_points)
 
+        if self.vis_dir is not None:
+            self._vis_iter += 1
+            
         return end_points
 
 
@@ -1432,6 +1549,1557 @@ class economicgrasp_c2_1(nn.Module):
         return end_points
 
 
+class RegressionSpatialEnhancer(nn.Module):
+    """
+    Regression-based spatial enhancer.
+    Input:
+      feat_tok : (B,C,Ht,Wt)
+      depth_tok: (B,1,Ht,Wt)  continuous metric depth
+      K        : (B,3,3)      intrinsics for 448x448
+    Output:
+      feat_tok_enh: (B,C,Ht,Wt)
+    """
+    def __init__(
+        self,
+        tok_feat_dim=128,
+        feature_3d_dim=32,
+        use_inv_depth=True,
+        use_depth_grad=True,
+        eps=1e-6,
+    ):
+        super().__init__()
+        self.use_inv_depth = bool(use_inv_depth)
+        self.use_depth_grad = bool(use_depth_grad)
+        self.eps = float(eps)
+
+        geo_in_dim = 3  # x,y,z
+        if self.use_inv_depth:
+            geo_in_dim += 1
+        if self.use_depth_grad:
+            geo_in_dim += 2
+
+        self.geo_proj = nn.Sequential(
+            nn.Conv2d(geo_in_dim, feature_3d_dim, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(feature_3d_dim, feature_3d_dim, kernel_size=1),
+            nn.ReLU(inplace=True),
+        )
+
+        self.fuse = nn.Sequential(
+            nn.Conv2d(tok_feat_dim + feature_3d_dim, tok_feat_dim, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(tok_feat_dim, tok_feat_dim, kernel_size=1),
+        )
+
+        self.gate = nn.Sequential(
+            nn.Conv2d(tok_feat_dim + feature_3d_dim, tok_feat_dim, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+    @staticmethod
+    def _make_token_uv_grid(Ht, Wt, stride, device, dtype):
+        tu = torch.arange(Wt, device=device, dtype=dtype)
+        tv = torch.arange(Ht, device=device, dtype=dtype)
+        u = (tu + 0.5) * stride - 0.5
+        v = (tv + 0.5) * stride - 0.5
+        vv, uu = torch.meshgrid(v, u, indexing="ij")
+        return uu[None, None], vv[None, None]   # (1,1,Ht,Wt), (1,1,Ht,Wt)
+
+    def forward(self, feat_tok, depth_tok, K, stride=2):
+        """
+        feat_tok : (B,C,Ht,Wt)
+        depth_tok: (B,1,Ht,Wt)
+        K       : (B,3,3)
+        """
+        B, C, Ht, Wt = feat_tok.shape
+        device, dtype = feat_tok.device, feat_tok.dtype
+
+        z = torch.nan_to_num(depth_tok, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(self.eps)  # (B,1,Ht,Wt)
+
+        uu, vv = self._make_token_uv_grid(Ht, Wt, stride, device, dtype)
+        uu = uu.expand(B, -1, -1, -1)  # (B,1,Ht,Wt)
+        vv = vv.expand(B, -1, -1, -1)
+
+        fx = K[:, 0, 0].view(B, 1, 1, 1).to(dtype)
+        fy = K[:, 1, 1].view(B, 1, 1, 1).to(dtype)
+        cx = K[:, 0, 2].view(B, 1, 1, 1).to(dtype)
+        cy = K[:, 1, 2].view(B, 1, 1, 1).to(dtype)
+
+        x = (uu - cx) / fx * z
+        y = (vv - cy) / fy * z
+
+        geo_list = [x, y, z]
+
+        if self.use_inv_depth:
+            inv_z = 1.0 / z.clamp_min(self.eps)
+            geo_list.append(inv_z)
+
+        if self.use_depth_grad:
+            dzdx = torch.zeros_like(z)
+            dzdy = torch.zeros_like(z)
+            dzdx[:, :, :, 1:-1] = 0.5 * (z[:, :, :, 2:] - z[:, :, :, :-2])
+            dzdy[:, :, 1:-1, :] = 0.5 * (z[:, :, 2:, :] - z[:, :, :-2, :])
+            geo_list.extend([dzdx, dzdy])
+
+        geo = torch.cat(geo_list, dim=1)  # (B,Cg,Ht,Wt)
+        geo_feat = self.geo_proj(geo)
+
+        fuse_in = torch.cat([feat_tok, geo_feat], dim=1)
+        delta = self.fuse(fuse_in)
+        gate = self.gate(fuse_in)
+
+        feat_tok_enh = feat_tok + gate * delta
+        return feat_tok_enh
+
+
+class economicgrasp_c2_2(nn.Module):
+    """
+    RGB-only regression version of c2_1:
+      - depth regression supervision at full-map level
+      - regression-based spatial enhancer: (feat_tok, depth_tok, K) -> feat_tok_enh
+      - token-grid seeds + graspable/objectness on all tokens
+      - FPS + coverage-aware token selection
+      - reuse original ViewNet / process_grasp_labels / Cylinder grouping / Grasp head
+    """
+    def __init__(
+        self,
+        cylinder_radius=0.05,
+        seed_feat_dim=512,
+        is_training=True,
+        depth_stride=2,
+        min_depth=0.2,
+        max_depth=1.0,
+        tok_feat_dim=128,
+        feature_3d_dim=32,
+        use_inv_depth=False,
+        use_depth_grad=False,
+        use_gt_xyz_for_train=False,
+        topk_use_objectness=True,
+    ):
+        super().__init__()
+        self.is_training = bool(is_training)
+        self.use_gt_xyz_for_train = bool(use_gt_xyz_for_train)
+        self.topk_use_objectness = bool(topk_use_objectness)
+
+        self.seed_feature_dim = int(seed_feat_dim)
+        self.num_depth = cfgs.num_depth
+        self.num_angle = cfgs.num_angle
+        self.M_points  = cfgs.m_point
+        self.num_view  = cfgs.num_view
+
+        self.min_depth = float(min_depth)
+        self.max_depth = float(max_depth)
+        self.converage_ratio = 0.3
+        self.depth_stride = int(depth_stride)
+
+        # ------------------------------------------------------------------
+        # depth regression net
+        # 这里直接替换成你 C1 里已经在用的 regression depth net 即可
+        # 期望接口:
+        #   depth_map_pred_448, img_feat = self.depth_net(img, return_feat=True)
+        # 其中:
+        #   depth_map_pred_448: (B,1,448,448)
+        #   img_feat          : (B,C,448,448), C=tok_feat_dim
+        # ------------------------------------------------------------------
+        self.depth_net = DINOv2DepthRegressionNet(
+            encoder="vitb",
+            stride=depth_stride,
+            min_depth=self.min_depth,
+            max_depth=self.max_depth,
+            freeze_backbone=True,
+        )
+
+        # regression-based spatial enhancer
+        self.enhancer = RegressionSpatialEnhancer(
+            tok_feat_dim=tok_feat_dim,
+            feature_3d_dim=feature_3d_dim,
+            use_inv_depth=use_inv_depth,
+            use_depth_grad=use_depth_grad,
+        )
+
+        # token feature -> seed feature
+        self.seed_proj = nn.Sequential(
+            nn.Conv2d(tok_feat_dim, self.seed_feature_dim, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(self.seed_feature_dim, self.seed_feature_dim, kernel_size=1),
+        )
+
+        # reuse original heads
+        self.graspable = GraspableNet(seed_feature_dim=self.seed_feature_dim)
+        self.view = ViewNet(self.num_view, seed_feature_dim=self.seed_feature_dim, is_training=self.is_training)
+        self.cy_group = Cylinder_Grouping_Global_Interaction(
+            nsample=16, cylinder_radius=cylinder_radius, seed_feature_dim=self.seed_feature_dim
+        )
+        self.grasp_head = Grasp_Head_Local_Interaction(num_angle=self.num_angle, num_depth=self.num_depth)
+
+        # vis/debug
+        self.vis_dir = os.path.join('vis', 'c2_2')
+        self.vis_every = 200
+        self._vis_iter = 0
+        self.vis_token_every = 200
+        self.vis_token_maxB = 1
+        self.debug_print_every = 50
+        self.debug_first_only = False
+        self._debug_has_done = False
+        if self.vis_dir is not None:
+            os.makedirs(self.vis_dir, exist_ok=True)
+
+    @staticmethod
+    def _make_token_uv_grid(Ht, Wt, s, device, dtype):
+        tu = torch.arange(Wt, device=device, dtype=dtype)
+        tv = torch.arange(Ht, device=device, dtype=dtype)
+        u = (tu + 0.5) * s - 0.5
+        v = (tv + 0.5) * s - 0.5
+        vv, uu = torch.meshgrid(v, u, indexing="ij")
+        uv = torch.stack([uu, vv], dim=-1).reshape(-1, 2)
+        return uv
+
+    @staticmethod
+    def _backproject_uvz(uv_b_n2, z_b_n1, K_b_33):
+        fx = K_b_33[:, 0, 0].unsqueeze(1)
+        fy = K_b_33[:, 1, 1].unsqueeze(1)
+        cx = K_b_33[:, 0, 2].unsqueeze(1)
+        cy = K_b_33[:, 1, 2].unsqueeze(1)
+        u = uv_b_n2[..., 0]
+        v = uv_b_n2[..., 1]
+        z = z_b_n1.squeeze(-1)
+        x = (u - cx) / fx * z
+        y = (v - cy) / fy * z
+        return torch.stack([x, y, z], dim=-1)
+
+    @staticmethod
+    def _fps_indices(xyz: torch.Tensor, M: int, start: torch.Tensor = None):
+        device = xyz.device
+        K = xyz.shape[0]
+        if K == 0:
+            return torch.zeros((M,), device=device, dtype=torch.long)
+
+        M = min(M, K)
+        centroids = torch.empty((M,), device=device, dtype=torch.long)
+        dist = torch.full((K,), 1e10, device=device, dtype=xyz.dtype)
+
+        if start is None:
+            farthest = torch.randint(0, K, (1,), device=device, dtype=torch.long)
+        else:
+            farthest = start.view(1).to(device=device, dtype=torch.long).clamp_(0, K - 1)
+
+        for i in range(M):
+            centroids[i] = farthest[0]
+            centroid = xyz[farthest]
+            d = ((xyz - centroid) ** 2).sum(dim=-1)
+            dist = torch.minimum(dist, d)
+            farthest = torch.argmax(dist).view(1)
+        return centroids
+
+    @torch.no_grad()
+    def _save_pred_gt_cloud_ply(self, cloud_pred: torch.Tensor, cloud_gt: torch.Tensor, end_points: dict):
+        if o3d is None or self.vis_dir is None:
+            return
+        p = cloud_pred[0].detach().float().cpu().numpy()
+        g = cloud_gt[0].detach().float().cpu().numpy()
+
+        def _valid(x):
+            m = np.isfinite(x).all(axis=1)
+            m &= (x[:, 2] > 0)
+            return x[m]
+
+        p = _valid(p); g = _valid(g)
+        if p.shape[0] == 0 or g.shape[0] == 0:
+            return
+
+        p_col = np.zeros((p.shape[0], 3), dtype=np.float32); p_col[:, 0] = 1.0
+        g_col = np.zeros((g.shape[0], 3), dtype=np.float32); g_col[:, 2] = 1.0
+        pts = np.concatenate([p, g], axis=0)
+        cols = np.concatenate([p_col, g_col], axis=0)
+
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pts.astype(np.float64))
+        pcd.colors = o3d.utility.Vector3dVector(cols.astype(np.float64))
+
+        tag = end_points.get("vis_tag", None)
+        if tag is None:
+            scene = end_points.get("scene", "scene")
+            frame = end_points.get("frame", "frame")
+            tag = f"{scene}_{frame}"
+
+        out_path = os.path.join(self.vis_dir, f"tok_pred_gt_xyz_{tag}_iter{self._vis_iter:06d}.ply")
+        o3d.io.write_point_cloud(out_path, pcd, write_ascii=False)
+
+    def _save_map_png(self, arr2d, out_path, vmin=None, vmax=None, cmap="Spectral", title=None):
+        if torch.is_tensor(arr2d):
+            arr2d = arr2d.detach().float().cpu().numpy()
+        plt.figure(figsize=(6,6))
+        if vmin is None: vmin = float(np.nanmin(arr2d))
+        if vmax is None: vmax = float(np.nanmax(arr2d))
+        plt.imshow(arr2d, vmin=vmin, vmax=vmax, cmap=cmap)
+        plt.axis("off")
+        if title is not None:
+            plt.title(title)
+        plt.tight_layout(pad=0)
+        plt.savefig(out_path, dpi=150)
+        plt.close()
+
+    def _save_overlay_points(self, img_448, pts_uv, out_path, radius=1, color=(0,0,255)):
+        import cv2
+        x = img_448.detach().float().cpu()
+        x = x - x.min()
+        x = x / (x.max() + 1e-6)
+        x = (x.permute(1,2,0).numpy() * 255.0).astype(np.uint8)
+        x_bgr = x[..., ::-1].copy()
+
+        pts = pts_uv.detach().cpu().numpy()
+        H, W = x_bgr.shape[:2]
+        for (u,v) in pts:
+            uu = int(round(float(u))); vv = int(round(float(v)))
+            if 0 <= uu < W and 0 <= vv < H:
+                cv2.circle(x_bgr, (uu,vv), radius, color, thickness=-1)
+        cv2.imwrite(out_path, x_bgr)
+
+    def forward(self, end_points: dict):
+        img = end_points["img"]   # (B,3,448,448)
+        K   = end_points["K"]     # (B,3,3)
+
+        B, _, H, W = img.shape
+        assert (H, W) == (448, 448)
+        s = self.depth_stride
+        Ht, Wt = H // s, W // s
+        Ntok = Ht * Wt
+        M = int(self.M_points)
+
+        # ---------- 1) depth regression ----------
+        depth_map_pred_448, depth_tok_dbg, img_feat = self.depth_net(img)
+        # depth_map_pred_448: (B,1,448,448)
+        # depth_tok_dbg     : (B,1,224,224) 仅用于 debug
+        # img_feat          : (B,128,448,448)
+
+        depth_map_pred = torch.nan_to_num(
+            depth_map_pred_448, nan=0.0, posinf=0.0, neginf=0.0
+        ).clamp(min=self.min_depth, max=self.max_depth)
+
+        end_points["img_feat_dpt"] = img_feat
+        end_points["depth_map_pred"] = depth_map_pred
+        end_points["depth_tok_dbg"] = depth_tok_dbg
+
+        # 用 avg_pool 得 token depth，和 feat_tok 的 pooling 一致
+        depth_tok = F.avg_pool2d(depth_map_pred, kernel_size=s, stride=s)   # (B,1,224,224)
+        end_points["depth_tok_pred"] = depth_tok
+
+        # ---------- 2) token feature + regression spatial enhancer ----------
+        if img_feat.shape[-2:] != (H, W):
+            img_feat = F.interpolate(img_feat, size=(H, W), mode="bilinear", align_corners=False)
+
+        feat_tok = F.avg_pool2d(img_feat, kernel_size=s, stride=s)  # (B,128,224,224)
+        feat_tok_enh = self.enhancer(feat_tok, depth_tok.detach(), K, stride=s)
+
+        # ------------------------------------------------------------
+        # 3) build token seeds
+        # ------------------------------------------------------------
+        seed_map = self.seed_proj(feat_tok_enh)  # (B,512,Ht,Wt)
+        seed_features_all = seed_map.view(B, self.seed_feature_dim, -1).contiguous()  # (B,512,Ntok)
+
+        end_points = self.graspable(seed_features_all, end_points)
+        objectness_score = end_points["objectness_score"]            # (B,2,Ntok)
+        graspness_score  = end_points["graspness_score"].squeeze(1) # (B,Ntok)
+        objectness_pred  = torch.argmax(objectness_score, 1)         # (B,Ntok)
+
+        if "token_valid_mask" in end_points:
+            valid_tok = end_points["token_valid_mask"].bool()
+        else:
+            valid_tok = torch.ones((B, Ntok), device=img.device, dtype=torch.bool)
+
+        # debug-friendly
+        grasp_raw = graspness_score
+        grasp_sel = grasp_raw
+        mask_obj_pred = valid_tok & (objectness_pred == 1)
+        mask_thr_pred = mask_obj_pred & (grasp_sel > cfgs.graspness_threshold)
+        mask_tok = mask_thr_pred
+
+        end_points["dbg_grasp_raw"] = grasp_raw.detach()
+        end_points["dbg_grasp_sel"] = grasp_sel.detach()
+        end_points["dbg_mask_obj"] = mask_obj_pred.detach()
+        end_points["dbg_mask_pred"] = mask_thr_pred.detach()
+        end_points["dbg_objectness_pred"] = objectness_pred.detach()
+
+        with torch.no_grad():
+            end_points["D: PredCand#(thr)"] = mask_thr_pred.float().sum(dim=1).mean()
+            end_points["D: PredObj#"] = mask_obj_pred.float().sum(dim=1).mean()
+            end_points["D: GraspRaw min"] = grasp_raw.min()
+            end_points["D: GraspRaw max"] = grasp_raw.max()
+            end_points["D: GraspSel mean"] = grasp_sel.mean()
+
+        # ------------------------------------------------------------
+        # 4) xyz for tokens (same as c2_1)
+        # ------------------------------------------------------------
+        tv = torch.arange(Ht, device=img.device, dtype=torch.long)
+        tu = torch.arange(Wt, device=img.device, dtype=torch.long)
+        tvv, tuu = torch.meshgrid(tv, tu, indexing="ij")
+
+        yc = (tvv * s + (s // 2)).clamp(0, H - 1)
+        xc = (tuu * s + (s // 2)).clamp(0, W - 1)
+        center_pix_flat = (yc * W + xc).reshape(-1)
+        center_pix_flat_b = center_pix_flat.unsqueeze(0).expand(B, -1).contiguous()
+
+        z_center_pred = gather_depth_by_img_idxs(depth_map_pred, center_pix_flat_b)
+        z_center_pred = torch.nan_to_num(z_center_pred, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(1e-6)
+
+        u_center, v_center = img_idxs_to_uv(center_pix_flat_b, W)
+        xyz_tok_pred = backproject_uvz(u_center, v_center, z_center_pred.detach(), K)
+
+        use_gt_xyz = self.is_training and self.use_gt_xyz_for_train and ("gt_depth_m" in end_points)
+        if use_gt_xyz:
+            gt_depth = end_points["gt_depth_m"]
+            if torch.is_tensor(gt_depth):
+                if gt_depth.dim() == 3:
+                    gt_depth = gt_depth.unsqueeze(1)
+                elif gt_depth.dim() == 4:
+                    gt_depth = gt_depth[:, :1]
+            else:
+                gt_depth = torch.as_tensor(gt_depth, device=img.device, dtype=torch.float32)
+                if gt_depth.dim() == 3:
+                    gt_depth = gt_depth.unsqueeze(1)
+                elif gt_depth.dim() == 4:
+                    gt_depth = gt_depth[:, :1]
+
+            z_center_gt = gather_depth_by_img_idxs(gt_depth, center_pix_flat_b)
+            z_center_gt = torch.nan_to_num(z_center_gt, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(1e-6)
+            xyz_tok_match = backproject_uvz(u_center, v_center, z_center_gt, K)
+        else:
+            xyz_tok_match = xyz_tok_pred
+
+        # ------------------------------------------------------------
+        # 5) select Top-M tokens (same FPS + coverage logic)
+        # ------------------------------------------------------------
+        seed_features_flipped = seed_features_all.transpose(1, 2).contiguous()  # (B,Ntok,512)
+
+        sel_xyz = []
+        sel_feat = []
+        sel_idx_list = []
+        graspable_num_batch = 0.0
+
+        xyz_for_fps = xyz_tok_match
+        preselect_mult = 8
+        preselect_mult_cov = 16
+        M_high = int(round(M * (1.0 - self.converage_ratio)))
+        M_cov  = M - M_high
+
+        for b in range(B):
+            idx_obj = torch.nonzero(valid_tok[b] & (objectness_pred[b] == 1), as_tuple=False).squeeze(1)
+            idx_hi = torch.nonzero(valid_tok[b] & (objectness_pred[b] == 1) &
+                                   (grasp_sel[b] > float(cfgs.graspness_threshold)),
+                                   as_tuple=False).squeeze(1)
+
+            if idx_obj.numel() == 0:
+                ridx = torch.randint(0, Ntok, (M,), device=img.device)
+                sel_idx_list.append(ridx)
+                sel_xyz.append(xyz_tok_match[b].index_select(0, ridx).contiguous())
+                sel_feat.append(seed_features_flipped[b].index_select(0, ridx).t().contiguous())
+                continue
+
+            ridx_parts = []
+
+            # quality FPS
+            if (M_high > 0) and (idx_hi.numel() > 0):
+                scores_hi = grasp_sel[b].index_select(0, idx_hi)
+                K1 = min(idx_hi.numel(), preselect_mult * M_high)
+                top = torch.topk(scores_hi, k=K1, largest=True).indices
+                cand_hi = idx_hi[top]
+
+                xyz_hi = xyz_for_fps[b].index_select(0, cand_hi)
+                start = torch.argmax(grasp_sel[b].index_select(0, cand_hi))
+                fps_local = self._fps_indices(xyz_hi, M_high, start=start)
+                sel_hi = cand_hi.index_select(0, fps_local)
+                ridx_parts.append(sel_hi)
+
+            # coverage FPS
+            if M_cov > 0:
+                idx_cov = torch.nonzero(valid_tok[b] & (objectness_pred[b] == 1),
+                                        as_tuple=False).squeeze(1)
+                if idx_cov.numel() == 0:
+                    idx_cov = idx_obj
+
+                K2 = min(idx_cov.numel(), preselect_mult_cov * M_cov)
+                if idx_cov.numel() > K2:
+                    perm = torch.randperm(idx_cov.numel(), device=img.device)[:K2]
+                    cand_cov = idx_cov[perm]
+                else:
+                    cand_cov = idx_cov
+
+                xyz_cov = xyz_for_fps[b].index_select(0, cand_cov)
+
+                if len(ridx_parts) > 0:
+                    sel0 = ridx_parts[0]
+                    center = xyz_for_fps[b].index_select(0, sel0).mean(dim=0, keepdim=True)
+                    d = ((xyz_cov - center) ** 2).sum(dim=-1)
+                    start = torch.argmax(d)
+                else:
+                    start = torch.argmax(grasp_sel[b].index_select(0, cand_cov))
+
+                fps_local = self._fps_indices(xyz_cov, M_cov, start=start)
+                sel_cov = cand_cov.index_select(0, fps_local)
+                ridx_parts.append(sel_cov)
+
+            ridx = torch.cat(ridx_parts, dim=0)
+            ridx = torch.unique(ridx, sorted=False)
+
+            if ridx.numel() < M:
+                perm = torch.randint(0, idx_obj.numel(), (M - ridx.numel(),), device=img.device)
+                ridx = torch.cat([ridx, idx_obj[perm]], dim=0)
+            elif ridx.numel() > M:
+                ridx = ridx[:M]
+
+            sel_idx_list.append(ridx)
+            sel_xyz.append(xyz_tok_match[b].index_select(0, ridx).contiguous())
+            sel_feat.append(seed_features_flipped[b].index_select(0, ridx).t().contiguous())
+
+        seed_xyz_graspable = torch.stack(sel_xyz, 0).contiguous()
+        seed_features_graspable = torch.stack(sel_feat, 0).contiguous()
+
+        end_points["token_sel_idx"] = torch.stack(sel_idx_list, dim=0).contiguous()
+        end_points["xyz_graspable"] = seed_xyz_graspable
+        end_points["D: Graspable Points"] = (
+            torch.as_tensor(graspable_num_batch, device=img.device, dtype=torch.float32) / float(B)
+        ).detach().reshape(())
+        end_points["token_sel_xyz"] = seed_xyz_graspable
+
+        # ------------------------------------------------------------
+        # 5.5) debug print / vis
+        # ------------------------------------------------------------
+        do_print = (self._vis_iter % self.debug_print_every == 0) or bool(end_points.get("force_vis", False))
+        if do_print:
+            with torch.no_grad():
+                tok_valid = end_points.get("token_valid_mask", None)
+                if tok_valid is None:
+                    tok_valid = torch.ones((B, Ntok), device=img.device, dtype=torch.bool)
+
+                pred_obj = end_points["dbg_objectness_pred"]
+                grasp_raw = end_points["dbg_grasp_raw"]
+                grasp_sel = end_points["dbg_grasp_sel"]
+                mask_obj = end_points["dbg_mask_obj"]
+                mask_thr = end_points["dbg_mask_pred"]
+
+                msg = (f"[dbg] iter={self._vis_iter} "
+                       f"valid={tok_valid.float().sum(1).mean().item():.1f} "
+                       f"obj_pred1={mask_obj.float().sum(1).mean().item():.1f} "
+                       f"cand_thr={mask_thr.float().sum(1).mean().item():.1f} "
+                       f"gr_raw[min,max]=({grasp_raw.min().item():.3f},{grasp_raw.max().item():.3f}) "
+                       f"gr_sel[p10,p50,p90]=({torch.quantile(grasp_sel,0.1).item():.3f},"
+                       f"{torch.quantile(grasp_sel,0.5).item():.3f},"
+                       f"{torch.quantile(grasp_sel,0.9).item():.3f})")
+
+                if ("objectness_label_tok" in end_points) and ("graspness_label_tok" in end_points):
+                    gt_obj = end_points["objectness_label_tok"].long()
+                    gt_gra = end_points["graspness_label_tok"].float()
+
+                    gt_valid = (gt_obj != -1) & tok_valid
+                    gt_obj1 = (gt_obj == 1) & gt_valid
+
+                    if gt_obj1.any():
+                        g = gt_gra[gt_obj1]
+                        msg += (f" | GT_gra[obj] p50={torch.quantile(g,0.5).item():.3f}"
+                                f" p90={torch.quantile(g,0.9).item():.3f}"
+                                f" mean={g.mean().item():.3f}")
+
+                    if "token_sel_idx" in end_points:
+                        sel = end_points["token_sel_idx"]
+                        gt_pos = gt_obj1 & (gt_gra > 0.2)
+                        cover = []
+                        for bb in range(B):
+                            cover.append(gt_pos[bb].gather(0, sel[bb]).float().mean())
+                        cover = torch.stack(cover).mean().item()
+                        msg += f" | sel_gtpos_ratio={cover:.3f}"
+
+                        sel_gtg = []
+                        for bb in range(B):
+                            sel_gtg.append(gt_gra[bb].gather(0, sel[bb]))
+                        sel_gtg = torch.stack(sel_gtg).mean().item()
+                        msg += f" | sel_GTg_mean={sel_gtg:.3f}"
+
+                print(msg)
+
+        do_tok_vis = (self.vis_dir is not None) and ((self._vis_iter % self.vis_token_every) == 0 or bool(end_points.get("force_vis", False)))
+        if do_tok_vis:
+            tag = end_points.get("vis_tag", f"iter{self._vis_iter:06d}")
+            out_dir = os.path.join(self.vis_dir, f"tokdbg_{tag}")
+            os.makedirs(out_dir, exist_ok=True)
+
+            b = 0
+            pred_obj = end_points["dbg_objectness_pred"][b].view(Ht, Wt).float()
+            pred_gra = end_points["dbg_grasp_sel"][b].view(Ht, Wt)
+            cand     = end_points["dbg_mask_pred"][b].float().view(Ht, Wt)
+
+            self._save_map_png(pred_obj, os.path.join(out_dir, "pred_objectness.png"),
+                               vmin=0, vmax=1, cmap="viridis", title="Pred obj")
+            self._save_map_png(pred_gra, os.path.join(out_dir, "pred_graspness.png"),
+                               vmin=0, vmax=1, cmap="Spectral", title="Pred graspness")
+            self._save_map_png(cand, os.path.join(out_dir, "pred_candidate_mask.png"),
+                               vmin=0, vmax=1, cmap="gray", title="Pred cand mask")
+
+            if ("objectness_label_tok" in end_points) and ("graspness_label_tok" in end_points):
+                gt_obj = end_points["objectness_label_tok"][b].view(Ht, Wt).float()
+                gt_gra = end_points["graspness_label_tok"][b].view(Ht, Wt).float()
+                self._save_map_png(gt_obj, os.path.join(out_dir, "gt_objectness.png"),
+                                   vmin=-1, vmax=1, cmap="viridis", title="GT obj (-1 invalid)")
+                self._save_map_png(gt_gra, os.path.join(out_dir, "gt_graspness.png"),
+                                   vmin=0, vmax=1, cmap="Spectral", title="GT graspness")
+
+            if "token_sel_idx" in end_points:
+                sel = end_points["token_sel_idx"][b]
+                sel_mask = torch.zeros((Ntok,), device=img.device)
+                sel_mask[sel] = 1.0
+                self._save_map_png(sel_mask.view(Ht, Wt), os.path.join(out_dir, "selected_tokens.png"),
+                                   vmin=0, vmax=1, cmap="gray", title="Selected Top-M")
+
+                pts_uv = torch.cat([
+                    u_center[b].squeeze(-1)[sel].unsqueeze(-1),
+                    v_center[b].squeeze(-1)[sel].unsqueeze(-1),
+                ], dim=-1)
+                self._save_overlay_points(img[b], pts_uv, os.path.join(out_dir, "overlay_selected.png"),
+                                          radius=1, color=(0,0,255))
+
+        # point cloud vis
+        if self.vis_dir is not None:
+            do_vis = (self._vis_iter % self.vis_every == 0) or bool(end_points.get("force_vis", False))
+            if do_vis and ("gt_depth_m" in end_points) and ("img_idxs" in end_points):
+                gt_depth = end_points["gt_depth_m"]
+                if torch.is_tensor(gt_depth):
+                    if gt_depth.dim() == 3:
+                        gt_depth = gt_depth.unsqueeze(1)
+                    elif gt_depth.dim() == 4:
+                        gt_depth = gt_depth[:, :1]
+                else:
+                    gt_depth = torch.as_tensor(gt_depth, device=img.device, dtype=torch.float32)
+                    if gt_depth.dim() == 3:
+                        gt_depth = gt_depth.unsqueeze(1)
+                    elif gt_depth.dim() == 4:
+                        gt_depth = gt_depth[:, :1]
+
+                img_idxs_vis = end_points["img_idxs"].long().clamp(0, H * W - 1)
+                z_pred = gather_depth_by_img_idxs(depth_map_pred, img_idxs_vis)
+                z_gt   = gather_depth_by_img_idxs(gt_depth, img_idxs_vis)
+
+                z_pred = torch.nan_to_num(z_pred, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(1e-6)
+                z_gt   = torch.nan_to_num(z_gt,   nan=0.0, posinf=0.0, neginf=0.0).clamp_min(1e-6)
+
+                u1, v1 = img_idxs_to_uv(img_idxs_vis, W)
+                xyz_pred = backproject_uvz(u1, v1, z_pred, K)
+                xyz_gt   = backproject_uvz(u1, v1, z_gt,   K)
+                self._save_pred_gt_cloud_ply(xyz_pred, xyz_gt, end_points)
+                print("[vis] point cloud: red=pred depth, blue=GT depth")
+
+            self._vis_iter += 1
+
+        # ------------------------------------------------------------
+        # 6) view + labels + grouping + head
+        # ------------------------------------------------------------
+        end_points, res_feat = self.view(seed_features_graspable, end_points)
+        seed_features_graspable = seed_features_graspable + res_feat
+
+        if self.is_training:
+            grasp_top_views_rot, end_points = process_grasp_labels(end_points)
+        else:
+            grasp_top_views_rot = end_points["grasp_top_view_rot"]
+
+        group_features = self.cy_group(seed_xyz_graspable, seed_features_graspable, grasp_top_views_rot)
+        end_points = self.grasp_head(group_features, end_points)
+
+        return end_points
+    
+
+class TokGraspableHead2D(nn.Module):
+    def __init__(self, in_dim=128):
+        super().__init__()
+        self.head = nn.Conv2d(in_dim, 3, kernel_size=1)
+
+    def forward(self, feat_grid, end_points):
+        """
+        feat_grid: (B,C,H,W)
+        output:
+          objectness_score: (B,2,HW)
+          graspness_score : (B,1,HW)
+        """
+        x = self.head(feat_grid)  # (B,3,H,W)
+        B, _, H, W = x.shape
+        x = x.view(B, 3, H * W)
+        end_points["objectness_score"] = x[:, :2, :]
+        end_points["graspness_score"] = x[:, 2:3, :]
+        return end_points
+    
+    
+class economicgrasp_c2_3(nn.Module):
+    """
+    C2.3:
+      - full-resolution alignment (stride=1)
+      - no avg_pool on img_feat / depth_map_pred
+      - enhancer on 448x448
+      - lightweight 2D graspable head on all pixels
+      - project only selected Top-M tokens to 512
+      - reuse ViewNet / process_grasp_labels / Cylinder grouping / Grasp head
+    """
+    def __init__(
+        self,
+        cylinder_radius=0.05,
+        seed_feat_dim=512,
+        is_training=True,
+        min_depth=0.2,
+        max_depth=1.0,
+        tok_feat_dim=128,
+        feature_3d_dim=32,
+        use_inv_depth=True,
+        use_depth_grad=True,
+        use_gt_xyz_for_train=False,
+        topk_use_objectness=True,
+        detach_depth_for_enhancer=True,
+        vis_dir='c2.3',
+        vis_every=1000
+    ):
+        super().__init__()
+        self.is_training = bool(is_training)
+        self.use_gt_xyz_for_train = bool(use_gt_xyz_for_train)
+        self.topk_use_objectness = bool(topk_use_objectness)
+        self.detach_depth_for_enhancer = bool(detach_depth_for_enhancer)
+
+        self.seed_feature_dim = int(seed_feat_dim)
+        self.num_depth = cfgs.num_depth
+        self.num_angle = cfgs.num_angle
+        self.M_points  = cfgs.m_point
+        self.num_view  = cfgs.num_view
+
+        self.min_depth = float(min_depth)
+        self.max_depth = float(max_depth)
+        self.converage_ratio = 0.3
+
+        # depth regression net
+        self.depth_net = DINOv2DepthRegressionNet(
+            encoder="vitb",
+            stride=1,   # 这里固定 1，只是 debug tok 用不到了
+            min_depth=self.min_depth,
+            max_depth=self.max_depth,
+            freeze_backbone=True,
+        )
+
+        # full-res regression spatial enhancer
+        self.enhancer = RegressionSpatialEnhancer(
+            tok_feat_dim=tok_feat_dim,
+            feature_3d_dim=feature_3d_dim,
+            use_inv_depth=use_inv_depth,
+            use_depth_grad=use_depth_grad,
+        )
+
+        # full-res lightweight token head
+        self.graspable_2d = TokGraspableHead2D(in_dim=tok_feat_dim)
+
+        # selected tokens -> 512
+        self.sel_proj = nn.Sequential(
+            nn.Linear(tok_feat_dim, self.seed_feature_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.seed_feature_dim, self.seed_feature_dim),
+        )
+
+        # reuse original heads
+        self.view = ViewNet(self.num_view, seed_feature_dim=self.seed_feature_dim, is_training=self.is_training)
+        self.cy_group = Cylinder_Grouping_Global_Interaction(
+            nsample=16, cylinder_radius=cylinder_radius, seed_feature_dim=self.seed_feature_dim
+        )
+        self.grasp_head = Grasp_Head_Local_Interaction(num_angle=self.num_angle, num_depth=self.num_depth)
+
+        # vis/debug (可直接沿用你 c2_2 的 helper)
+        self.vis_dir = vis_dir
+        self.vis_every = vis_every
+        self._vis_iter = 0
+        self.vis_token_every = vis_every
+        self.vis_token_maxB = 1
+        self.debug_print_every = 50
+        self.debug_first_only = False
+        self._debug_has_done = False
+        if self.vis_dir is not None:
+            os.makedirs(self.vis_dir, exist_ok=True)
+
+    # ---------- reuse these helpers from c2_2 ----------
+    @staticmethod
+    def _backproject_uvz(uv_b_n2, z_b_n1, K_b_33):
+        fx = K_b_33[:, 0, 0].unsqueeze(1)
+        fy = K_b_33[:, 1, 1].unsqueeze(1)
+        cx = K_b_33[:, 0, 2].unsqueeze(1)
+        cy = K_b_33[:, 1, 2].unsqueeze(1)
+        u = uv_b_n2[..., 0]
+        v = uv_b_n2[..., 1]
+        z = z_b_n1.squeeze(-1)
+        x = (u - cx) / fx * z
+        y = (v - cy) / fy * z
+        return torch.stack([x, y, z], dim=-1)
+
+    @staticmethod
+    def _fps_indices(xyz: torch.Tensor, M: int, start: torch.Tensor = None):
+        device = xyz.device
+        K = xyz.shape[0]
+        if K == 0:
+            return torch.zeros((M,), device=device, dtype=torch.long)
+
+        M = min(M, K)
+        centroids = torch.empty((M,), device=device, dtype=torch.long)
+        dist = torch.full((K,), 1e10, device=device, dtype=xyz.dtype)
+
+        if start is None:
+            farthest = torch.randint(0, K, (1,), device=device, dtype=torch.long)
+        else:
+            farthest = start.view(1).to(device=device, dtype=torch.long).clamp_(0, K - 1)
+
+        for i in range(M):
+            centroids[i] = farthest[0]
+            centroid = xyz[farthest]
+            d = ((xyz - centroid) ** 2).sum(dim=-1)
+            dist = torch.minimum(dist, d)
+            farthest = torch.argmax(dist).view(1)
+        return centroids
+
+    def _save_map_png(self, arr2d, out_path, vmin=None, vmax=None, cmap="Spectral", title=None):
+        if torch.is_tensor(arr2d):
+            arr2d = arr2d.detach().float().cpu().numpy()
+        plt.figure(figsize=(6, 6))
+        if vmin is None: vmin = float(np.nanmin(arr2d))
+        if vmax is None: vmax = float(np.nanmax(arr2d))
+        plt.imshow(arr2d, vmin=vmin, vmax=vmax, cmap=cmap)
+        plt.axis("off")
+        if title is not None:
+            plt.title(title)
+        plt.tight_layout(pad=0)
+        plt.savefig(out_path, dpi=150)
+        plt.close()
+
+    def _save_overlay_points(self, img_448, pts_uv, out_path, radius=1, color=(0,0,255)):
+        import cv2
+        x = img_448.detach().float().cpu()
+        x = x - x.min()
+        x = x / (x.max() + 1e-6)
+        x = (x.permute(1,2,0).numpy() * 255.0).astype(np.uint8)
+        x_bgr = x[..., ::-1].copy()
+
+        pts = pts_uv.detach().cpu().numpy()
+        H, W = x_bgr.shape[:2]
+        for (u,v) in pts:
+            uu = int(round(float(u))); vv = int(round(float(v)))
+            if 0 <= uu < W and 0 <= vv < H:
+                cv2.circle(x_bgr, (uu,vv), radius, color, thickness=-1)
+        cv2.imwrite(out_path, x_bgr)
+
+    @torch.no_grad()
+    def _save_pred_gt_cloud_ply(self, cloud_pred: torch.Tensor, cloud_gt: torch.Tensor, end_points: dict):
+        if o3d is None or self.vis_dir is None:
+            return
+        p = cloud_pred[0].detach().float().cpu().numpy()
+        g = cloud_gt[0].detach().float().cpu().numpy()
+
+        def _valid(x):
+            m = np.isfinite(x).all(axis=1)
+            m &= (x[:, 2] > 0)
+            return x[m]
+
+        p = _valid(p); g = _valid(g)
+        if p.shape[0] == 0 or g.shape[0] == 0:
+            return
+
+        p_col = np.zeros((p.shape[0], 3), dtype=np.float32); p_col[:, 0] = 1.0
+        g_col = np.zeros((g.shape[0], 3), dtype=np.float32); g_col[:, 2] = 1.0
+        pts = np.concatenate([p, g], axis=0)
+        cols = np.concatenate([p_col, g_col], axis=0)
+
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pts.astype(np.float64))
+        pcd.colors = o3d.utility.Vector3dVector(cols.astype(np.float64))
+
+        tag = end_points.get("vis_tag", None)
+        if tag is None:
+            scene = end_points.get("scene", "scene")
+            frame = end_points.get("frame", "frame")
+            tag = f"{scene}_{frame}"
+
+        out_path = os.path.join(self.vis_dir, f"tok_pred_gt_xyz_{tag}_iter{self._vis_iter:06d}.ply")
+        o3d.io.write_point_cloud(out_path, pcd, write_ascii=False)
+
+    def forward(self, end_points: dict):
+        img = end_points["img"]   # (B,3,448,448)
+        K   = end_points["K"]     # (B,3,3)
+
+        B, _, H, W = img.shape
+        assert (H, W) == (448, 448)
+        Ntok = H * W
+        M = int(self.M_points)
+
+        # ============================================================
+        # 1) depth regression
+        # ============================================================
+        # depth_map_pred_448: (B,1,448,448)
+        # depth_tok_dbg     : (B,1,448,448) if stride=1
+        # img_feat          : (B,C,448,448), C=128 for vitb
+        depth_map_pred_448, depth_tok_dbg, img_feat = self.depth_net(img)
+
+        depth_map_pred = torch.nan_to_num(
+            depth_map_pred_448, nan=0.0, posinf=0.0, neginf=0.0
+        ).clamp(min=self.min_depth, max=self.max_depth)
+
+        end_points["depth_map_pred"] = depth_map_pred
+        end_points["depth_tok_dbg"] = depth_tok_dbg
+        end_points["depth_tok_pred"] = depth_map_pred   # full-res for C2.3
+        end_points["img_feat_dpt"] = img_feat
+
+        # ============================================================
+        # 2) full-resolution enhancer (no avg_pool)
+        # ============================================================
+        if img_feat.shape[-2:] != (H, W):
+            img_feat = F.interpolate(img_feat, size=(H, W), mode="bilinear", align_corners=False)
+
+        # 可选：像 c2_2_detach 那样切断 grasp->depth 的直接梯度
+        if getattr(self, "detach_depth_for_enhancer", True):
+            depth_for_enh = depth_map_pred.detach()
+        else:
+            depth_for_enh = depth_map_pred
+
+        # feat_grid_enh: (B,C,H,W)
+        feat_grid_enh = self.enhancer(img_feat, depth_for_enh, K, stride=1)
+
+        # ============================================================
+        # 3) full-res token graspable head
+        # ============================================================
+        end_points = self.graspable_2d(feat_grid_enh, end_points)
+        objectness_score = end_points["objectness_score"]            # (B,2,Ntok)
+        graspness_score  = end_points["graspness_score"].squeeze(1) # (B,Ntok)
+        objectness_pred  = torch.argmax(objectness_score, dim=1)    # (B,Ntok)
+
+        # token_valid_mask should be full-res: (B,Ntok)
+        if "token_valid_mask" in end_points:
+            valid_tok = end_points["token_valid_mask"].bool()
+            if valid_tok.shape[1] != Ntok:
+                raise ValueError(
+                    f"C2.3 expects token_valid_mask with Ntok={Ntok}, got {tuple(valid_tok.shape)}. "
+                    f"Please change dataloader token labels to full-resolution 448x448 flatten."
+                )
+        else:
+            valid_tok = torch.ones((B, Ntok), device=img.device, dtype=torch.bool)
+
+        # 用于筛选/可视化的 graspness，建议限制到 [0,1]
+        grasp_raw = graspness_score
+        grasp_sel = grasp_raw.clamp(0.0, 1.0)
+
+        mask_obj_pred = valid_tok & (objectness_pred == 1)
+        mask_thr_pred = mask_obj_pred & (grasp_sel > float(cfgs.graspness_threshold))
+
+        end_points["dbg_grasp_raw"] = grasp_raw.detach()
+        end_points["dbg_grasp_sel"] = grasp_sel.detach()
+        end_points["dbg_mask_obj"] = mask_obj_pred.detach()
+        end_points["dbg_mask_pred"] = mask_thr_pred.detach()
+        end_points["dbg_objectness_pred"] = objectness_pred.detach()
+
+        with torch.no_grad():
+            end_points["D: PredCand#(thr)"] = mask_thr_pred.float().sum(dim=1).mean().reshape(())
+            end_points["D: PredObj#"] = mask_obj_pred.float().sum(dim=1).mean().reshape(())
+            end_points["D: GraspRaw min"] = grasp_raw.min().reshape(())
+            end_points["D: GraspRaw max"] = grasp_raw.max().reshape(())
+            end_points["D: GraspSel mean"] = grasp_sel.mean().reshape(())
+
+        # ============================================================
+        # 4) xyz for all full-res pixels
+        # ============================================================
+        # flat_all: (B,Ntok)
+        flat_all = torch.arange(H * W, device=img.device, dtype=torch.long).unsqueeze(0).expand(B, -1).contiguous()
+
+        # full-res pixel (u,v) from flat index
+        # x = idx % W, y = idx // W
+        u_all = (flat_all % W).float()   # (B,Ntok)
+        v_all = (flat_all // W).float()  # (B,Ntok)
+        uv_all = torch.stack([u_all, v_all], dim=-1)  # (B,Ntok,2)
+
+        # pred z for all pixels
+        z_all_pred = depth_map_pred.view(B, -1, 1).contiguous()  # (B,Ntok,1)
+        z_all_pred = torch.nan_to_num(z_all_pred, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(1e-6)
+
+        # xyz from pred
+        xyz_all_pred = self._backproject_uvz(uv_all, z_all_pred.detach(), K)  # (B,Ntok,3)
+
+        # GT xyz for label matching if enabled
+        use_gt_xyz = self.is_training and self.use_gt_xyz_for_train and ("gt_depth_m" in end_points)
+        if use_gt_xyz:
+            gt_depth = end_points["gt_depth_m"]
+            if torch.is_tensor(gt_depth):
+                if gt_depth.dim() == 3:
+                    gt_depth = gt_depth.unsqueeze(1)   # (B,1,H,W)
+                elif gt_depth.dim() == 4:
+                    gt_depth = gt_depth[:, :1]
+            else:
+                gt_depth = torch.as_tensor(gt_depth, device=img.device, dtype=torch.float32)
+                if gt_depth.dim() == 3:
+                    gt_depth = gt_depth.unsqueeze(1)
+                elif gt_depth.dim() == 4:
+                    gt_depth = gt_depth[:, :1]
+
+            z_all_gt = gt_depth.view(B, -1, 1).contiguous()  # (B,Ntok,1)
+            z_all_gt = torch.nan_to_num(z_all_gt, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(1e-6)
+            xyz_all_match = self._backproject_uvz(uv_all, z_all_gt, K)
+        else:
+            xyz_all_match = xyz_all_pred
+
+        # ============================================================
+        # 5) Top-M selection with FPS + coverage
+        # ============================================================
+        # feat_flat: (B,Ntok,C)
+        feat_flat = feat_grid_enh.view(B, feat_grid_enh.shape[1], -1).transpose(1, 2).contiguous()
+
+        sel_xyz = []
+        sel_feat = []
+        sel_idx_list = []
+
+        graspable_num_batch = 0.0
+
+        # --------------------------------------------------------
+        # C1-style sampler for C2.3
+        # candidate = objectness & graspness
+        # selection = one-shot FPS on 3D xyz of all graspable candidates
+        # --------------------------------------------------------
+        for b in range(B):
+            idx_graspable = torch.nonzero(
+                valid_tok[b]
+                & (objectness_pred[b] == 1)
+                & (grasp_sel[b] > float(cfgs.graspness_threshold)),
+                as_tuple=False
+            ).squeeze(1)
+
+            graspable_num_batch += idx_graspable.numel()
+
+            # fallback: no graspable candidates
+            if idx_graspable.numel() == 0:
+                ridx = torch.randint(0, Ntok, (M,), device=img.device)
+                sel_idx_list.append(ridx)
+
+                cur_xyz = xyz_all_match[b].index_select(0, ridx).contiguous()
+                cur_feat_low = feat_flat[b].index_select(0, ridx).contiguous()
+                cur_feat = self.sel_proj(cur_feat_low).transpose(0, 1).contiguous()
+
+                sel_xyz.append(cur_xyz)
+                sel_feat.append(cur_feat)
+                continue
+
+            # not enough candidates: repeat sampling like C1
+            if idx_graspable.numel() < M:
+                rep = torch.randint(0, idx_graspable.numel(), (M,), device=img.device)
+                ridx = idx_graspable[rep]
+                sel_idx_list.append(ridx)
+
+                cur_xyz = xyz_all_match[b].index_select(0, ridx).contiguous()
+                cur_feat_low = feat_flat[b].index_select(0, ridx).contiguous()
+                cur_feat = self.sel_proj(cur_feat_low).transpose(0, 1).contiguous()
+
+                sel_xyz.append(cur_xyz)
+                sel_feat.append(cur_feat)
+                continue
+
+            # enough candidates: one-shot FPS in 3D
+            xyz_in = xyz_all_match[b].index_select(0, idx_graspable).unsqueeze(0).contiguous()  # (1,Ng,3)
+            fps_idxs = furthest_point_sample(xyz_in, M).to(torch.int32).contiguous()             # (1,M)
+
+            cur_xyz = gather_operation(
+                xyz_in.transpose(1, 2).contiguous(), fps_idxs
+            ).transpose(1, 2).squeeze(0).contiguous()  # (M,3)
+
+            feat_in = feat_flat[b].index_select(0, idx_graspable).contiguous()  # (Ng,C)
+            cur_feat_low = gather_operation(
+                feat_in.unsqueeze(0).transpose(1, 2).contiguous(), fps_idxs
+            ).squeeze(0).transpose(0, 1).contiguous()  # (M,C)
+
+            cur_feat = self.sel_proj(cur_feat_low).transpose(0, 1).contiguous()  # (512,M)
+
+            # convert local fps index back to original token index
+            ridx = idx_graspable.index_select(0, fps_idxs.squeeze(0).long())
+            sel_idx_list.append(ridx)
+
+            sel_xyz.append(cur_xyz)
+            sel_feat.append(cur_feat)
+    
+        seed_xyz_graspable = torch.stack(sel_xyz, 0).contiguous()           # (B,M,3)
+        seed_features_graspable = torch.stack(sel_feat, 0).contiguous()     # (B,512,M)
+
+        end_points["token_sel_idx"] = torch.stack(sel_idx_list, dim=0).contiguous()  # (B,M)
+        end_points["xyz_graspable"] = seed_xyz_graspable
+        end_points["token_sel_xyz"] = seed_xyz_graspable
+        end_points["D: Graspable Points"] = (
+            torch.as_tensor(graspable_num_batch, device=img.device, dtype=torch.float32) / float(B)
+        ).detach().reshape(())
+
+        # ============================================================
+        # 5.5) debug print
+        # ============================================================
+        do_print = (self._vis_iter % self.debug_print_every == 0) or bool(end_points.get("force_vis", False))
+        if do_print:
+            with torch.no_grad():
+                tok_valid = valid_tok
+
+                pred_obj = end_points["dbg_objectness_pred"]
+                grasp_raw_ = end_points["dbg_grasp_raw"]
+                grasp_sel_ = end_points["dbg_grasp_sel"]
+                mask_obj = end_points["dbg_mask_obj"]
+                mask_thr = end_points["dbg_mask_pred"]
+
+                msg = (
+                    f"[dbg] iter={self._vis_iter} "
+                    f"valid={tok_valid.float().sum(1).mean().item():.1f} "
+                    f"obj_pred1={mask_obj.float().sum(1).mean().item():.1f} "
+                    f"cand_thr={mask_thr.float().sum(1).mean().item():.1f} "
+                    f"gr_raw[min,max]=({grasp_raw_.min().item():.3f},{grasp_raw_.max().item():.3f}) "
+                    f"gr_sel[p10,p50,p90]=("
+                    f"{torch.quantile(grasp_sel_, 0.1).item():.3f},"
+                    f"{torch.quantile(grasp_sel_, 0.5).item():.3f},"
+                    f"{torch.quantile(grasp_sel_, 0.9).item():.3f})"
+                )
+
+                if ("objectness_label_tok" in end_points) and ("graspness_label_tok" in end_points):
+                    gt_obj = end_points["objectness_label_tok"].long()
+                    gt_gra = end_points["graspness_label_tok"].float()
+
+                    if gt_obj.shape[1] == Ntok and gt_gra.shape[1] == Ntok:
+                        gt_valid = (gt_obj != -1) & tok_valid
+                        gt_obj1 = (gt_obj == 1) & gt_valid
+
+                        if gt_obj1.any():
+                            g = gt_gra[gt_obj1]
+                            msg += (
+                                f" | GT_gra[obj] p50={torch.quantile(g,0.5).item():.3f}"
+                                f" p90={torch.quantile(g,0.9).item():.3f}"
+                                f" mean={g.mean().item():.3f}"
+                            )
+
+                        sel = end_points["token_sel_idx"]  # (B,M)
+                        gt_pos = gt_obj1 & (gt_gra > 0.2)
+                        cover = []
+                        sel_gtg = []
+                        for bb in range(B):
+                            cover.append(gt_pos[bb].gather(0, sel[bb]).float().mean())
+                            sel_gtg.append(gt_gra[bb].gather(0, sel[bb]).mean())
+                        msg += f" | sel_gtpos_ratio={torch.stack(cover).mean().item():.3f}"
+                        msg += f" | sel_GTg_mean={torch.stack(sel_gtg).mean().item():.3f}"
+                    else:
+                        msg += f" | WARNING: full-res GT token labels expected Ntok={Ntok}, got obj={tuple(gt_obj.shape)}, gra={tuple(gt_gra.shape)}"
+
+                print(msg)
+
+        # ============================================================
+        # 5.6) token vis
+        # ============================================================
+        do_tok_vis = (self.vis_dir is not None) and (
+            (self._vis_iter % self.vis_token_every) == 0 or bool(end_points.get("force_vis", False))
+        )
+        if do_tok_vis:
+            tag = end_points.get("vis_tag", f"iter{self._vis_iter:06d}")
+            out_dir = os.path.join(self.vis_dir, f"tokdbg_{tag}")
+            os.makedirs(out_dir, exist_ok=True)
+
+            b = 0
+            pred_obj_map = end_points["dbg_objectness_pred"][b].view(H, W).float()
+            pred_gra_map = end_points["dbg_grasp_sel"][b].view(H, W)
+            cand_map     = end_points["dbg_mask_pred"][b].float().view(H, W)
+
+            self._save_map_png(pred_obj_map, os.path.join(out_dir, "pred_objectness.png"),
+                            vmin=0, vmax=1, cmap="viridis", title="Pred obj")
+            self._save_map_png(pred_gra_map, os.path.join(out_dir, "pred_graspness.png"),
+                            vmin=0, vmax=1, cmap="Spectral", title="Pred graspness")
+            self._save_map_png(cand_map, os.path.join(out_dir, "pred_candidate_mask.png"),
+                            vmin=0, vmax=1, cmap="gray", title="Pred cand mask")
+
+            if ("objectness_label_tok" in end_points) and ("graspness_label_tok" in end_points):
+                gt_obj = end_points["objectness_label_tok"]
+                gt_gra = end_points["graspness_label_tok"]
+                if gt_obj.shape[1] == Ntok and gt_gra.shape[1] == Ntok:
+                    gt_obj_map = gt_obj[b].view(H, W).float()
+                    gt_gra_map = gt_gra[b].view(H, W).float()
+                    self._save_map_png(gt_obj_map, os.path.join(out_dir, "gt_objectness.png"),
+                                    vmin=-1, vmax=1, cmap="viridis", title="GT obj (-1 invalid)")
+                    self._save_map_png(gt_gra_map, os.path.join(out_dir, "gt_graspness.png"),
+                                    vmin=0, vmax=1, cmap="Spectral", title="GT graspness")
+
+            if "token_sel_idx" in end_points:
+                sel = end_points["token_sel_idx"][b]  # (M,)
+                sel_mask = torch.zeros((Ntok,), device=img.device)
+                sel_mask[sel] = 1.0
+                self._save_map_png(sel_mask.view(H, W), os.path.join(out_dir, "selected_tokens.png"),
+                                vmin=0, vmax=1, cmap="gray", title="Selected Top-M")
+
+                xs = (sel % W).float()
+                ys = (sel // W).float()
+                pts_uv = torch.stack([xs, ys], dim=-1)  # (M,2)
+                self._save_overlay_points(img[b], pts_uv, os.path.join(out_dir, "overlay_selected.png"),
+                                        radius=1, color=(0,0,255))
+
+        # ============================================================
+        # 5.7) point cloud vis on sampled img_idxs
+        # ============================================================
+        if self.vis_dir is not None:
+            do_vis = (self._vis_iter % self.vis_every == 0) or bool(end_points.get("force_vis", False))
+            if do_vis and ("gt_depth_m" in end_points) and ("img_idxs" in end_points):
+                gt_depth = end_points["gt_depth_m"]
+                if torch.is_tensor(gt_depth):
+                    if gt_depth.dim() == 3:
+                        gt_depth = gt_depth.unsqueeze(1)
+                    elif gt_depth.dim() == 4:
+                        gt_depth = gt_depth[:, :1]
+                else:
+                    gt_depth = torch.as_tensor(gt_depth, device=img.device, dtype=torch.float32)
+                    if gt_depth.dim() == 3:
+                        gt_depth = gt_depth.unsqueeze(1)
+                    elif gt_depth.dim() == 4:
+                        gt_depth = gt_depth[:, :1]
+
+                img_idxs_vis = end_points["img_idxs"].long().clamp(0, H * W - 1)  # (B,Ns)
+                z_pred = gather_depth_by_img_idxs(depth_map_pred, img_idxs_vis)    # (B,Ns,1)
+                z_gt   = gather_depth_by_img_idxs(gt_depth, img_idxs_vis)          # (B,Ns,1)
+
+                z_pred = torch.nan_to_num(z_pred, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(1e-6)
+                z_gt   = torch.nan_to_num(z_gt,   nan=0.0, posinf=0.0, neginf=0.0).clamp_min(1e-6)
+
+                u_vis = (img_idxs_vis % W).float()
+                v_vis = (img_idxs_vis // W).float()
+                uv_vis = torch.stack([u_vis, v_vis], dim=-1)  # (B,Ns,2)
+
+                xyz_pred = self._backproject_uvz(uv_vis, z_pred, K)
+                xyz_gt   = self._backproject_uvz(uv_vis, z_gt, K)
+                self._save_pred_gt_cloud_ply(xyz_pred, xyz_gt, end_points)
+                print("[vis] point cloud: red=pred depth, blue=GT depth")
+
+            self._vis_iter += 1
+
+        # ============================================================
+        # 6) view + labels + grouping + head
+        # ============================================================
+        end_points, res_feat = self.view(seed_features_graspable, end_points)
+        seed_features_graspable = seed_features_graspable + res_feat
+
+        if self.is_training:
+            grasp_top_views_rot, end_points = process_grasp_labels(end_points)
+        else:
+            grasp_top_views_rot = end_points["grasp_top_view_rot"]
+
+        group_features = self.cy_group(seed_xyz_graspable, seed_features_graspable, grasp_top_views_rot)
+        end_points = self.grasp_head(group_features, end_points)
+
+        return end_points
+    
+
+class economicgrasp_c2_4(nn.Module):
+    """
+    C2.4:
+      - full-resolution regression depth
+      - full-resolution regression spatial enhancer
+      - point-aligned gather by img_idxs (same spirit as C1_detach)
+      - reuse C1 point-wise graspable/FPS/view/group/head
+
+    Compared with C2.3:
+      * remove dense full-res token head
+      * remove token-level selection
+      * keep image-centric frontend, switch back to point-centric backend
+    """
+    def __init__(
+        self,
+        cylinder_radius=0.05,
+        seed_feat_dim=512,
+        pe_dim=64,
+        is_training=True,
+        min_depth=0.2,
+        max_depth=1.0,
+        tok_feat_dim=128,
+        feature_3d_dim=32,
+        use_inv_depth=True,
+        use_depth_grad=True,
+        use_gt_xyz_for_train=False,
+        detach_depth_for_enhancer=True,
+        freeze_backbone=True,
+    ):
+        super().__init__()
+        self.is_training = bool(is_training)
+        self.use_gt_xyz_for_train = bool(use_gt_xyz_for_train)
+        self.detach_depth_for_enhancer = bool(detach_depth_for_enhancer)
+
+        self.seed_feature_dim = int(seed_feat_dim)
+        self.pe_dim = int(pe_dim)
+        self.num_depth = cfgs.num_depth
+        self.num_angle = cfgs.num_angle
+        self.M_points  = cfgs.m_point
+        self.num_view  = cfgs.num_view
+
+        self.min_depth = float(min_depth)
+        self.max_depth = float(max_depth)
+
+        # ------------------------------------------------------------
+        # depth regression net (same family as C2.3)
+        # ------------------------------------------------------------
+        self.depth_net = DINOv2DepthRegressionNet(
+            encoder="vitb",
+            stride=1,
+            min_depth=self.min_depth,
+            max_depth=self.max_depth,
+            freeze_backbone=freeze_backbone,
+        )
+
+        # ------------------------------------------------------------
+        # full-res regression enhancer (same spirit as C2.3)
+        # ------------------------------------------------------------
+        self.enhancer = RegressionSpatialEnhancer(
+            tok_feat_dim=tok_feat_dim,
+            feature_3d_dim=feature_3d_dim,
+            use_inv_depth=use_inv_depth,
+            use_depth_grad=use_depth_grad,
+        )
+
+        # ------------------------------------------------------------
+        # point-wise projection/fusion (same spirit as C1_detach)
+        # ------------------------------------------------------------
+        self.img_proj = nn.Identity()
+
+        self.pe_mlp = nn.Sequential(
+            nn.Linear(4, self.pe_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.pe_dim, self.pe_dim),
+        )
+
+        # point_img_feat dim may vary, so use LazyLinear
+        self.fuse = nn.Sequential(
+            nn.LazyLinear(self.seed_feature_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.seed_feature_dim, self.seed_feature_dim),
+        )
+
+        # ------------------------------------------------------------
+        # reuse original heads (same as C1)
+        # ------------------------------------------------------------
+        self.graspable = GraspableNet(seed_feature_dim=self.seed_feature_dim)
+        self.view = ViewNet(self.num_view, seed_feature_dim=self.seed_feature_dim, is_training=self.is_training)
+        self.cy_group = Cylinder_Grouping_Global_Interaction(
+            nsample=16, cylinder_radius=cylinder_radius, seed_feature_dim=self.seed_feature_dim
+        )
+        self.grasp_head = Grasp_Head_Local_Interaction(
+            num_angle=self.num_angle,
+            num_depth=self.num_depth
+        )
+
+        # ------------------------------------------------------------
+        # vis/debug
+        # ------------------------------------------------------------
+        self.vis_dir = os.path.join("vis", "c2_4_dbg")
+        self.vis_every = 200
+        self._vis_iter = 0
+        if self.vis_dir is not None:
+            os.makedirs(self.vis_dir, exist_ok=True)
+
+    @torch.no_grad()
+    def _save_pred_gt_cloud_ply(self, cloud_pred: torch.Tensor, cloud_gt: torch.Tensor, end_points: dict):
+        if o3d is None or self.vis_dir is None:
+            return
+
+        p = cloud_pred[0].detach().float().cpu().numpy()
+        g = cloud_gt[0].detach().float().cpu().numpy()
+
+        def _valid(x):
+            m = np.isfinite(x).all(axis=1)
+            m &= (x[:, 2] > 0)
+            return x[m]
+
+        p = _valid(p)
+        g = _valid(g)
+        if p.shape[0] == 0 or g.shape[0] == 0:
+            return
+
+        p_col = np.zeros((p.shape[0], 3), dtype=np.float32); p_col[:, 0] = 1.0
+        g_col = np.zeros((g.shape[0], 3), dtype=np.float32); g_col[:, 2] = 1.0
+
+        pts = np.concatenate([p, g], axis=0)
+        cols = np.concatenate([p_col, g_col], axis=0)
+
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pts.astype(np.float64))
+        pcd.colors = o3d.utility.Vector3dVector(cols.astype(np.float64))
+
+        tag = end_points.get("vis_tag", None)
+        if tag is None:
+            scene = end_points.get("scene", "scene")
+            frame = end_points.get("frame", "frame")
+            tag = f"{scene}_{frame}"
+
+        out_path = os.path.join(self.vis_dir, f"pred_gt_xyz_{tag}_iter{self._vis_iter:06d}.ply")
+        o3d.io.write_point_cloud(out_path, pcd, write_ascii=False)
+
+    def forward(self, end_points: dict):
+        img = end_points["img"]            # (B,3,448,448)
+        K   = end_points["K"]              # (B,3,3)
+        img_idxs = end_points["img_idxs"]  # (B,N) flatten idx in 448*448
+
+        B, _, H, W = img.shape
+        assert (H, W) == (448, 448)
+
+        # ============================================================
+        # 1) depth regression
+        # ============================================================
+        # depth_map_pred_448: (B,1,448,448)
+        # depth_tok_dbg     : (B,1,448,448) because stride=1
+        # img_feat          : (B,128,448,448)
+        depth_map_pred_448, depth_tok_dbg, img_feat = self.depth_net(img)
+
+        depth_map_pred = torch.nan_to_num(
+            depth_map_pred_448, nan=0.0, posinf=0.0, neginf=0.0
+        ).clamp(min=self.min_depth, max=self.max_depth)
+
+        end_points["depth_map_pred"] = depth_map_pred
+        end_points["depth_tok_dbg"] = depth_tok_dbg
+        end_points["depth_tok_pred"] = depth_map_pred
+        end_points["img_feat_dpt"] = img_feat
+
+        # ============================================================
+        # 2) full-resolution enhancer
+        # ============================================================
+        if img_feat.shape[-2:] != (H, W):
+            img_feat = F.interpolate(img_feat, size=(H, W), mode="bilinear", align_corners=False)
+
+        depth_for_enh = depth_map_pred.detach() if self.detach_depth_for_enhancer else depth_map_pred
+        feat_grid_enh = self.enhancer(img_feat, depth_for_enh, K, stride=1)   # (B,C,448,448)
+
+        # ============================================================
+        # 3) point-wise gather from enhanced feature map
+        # ============================================================
+        Cf = feat_grid_enh.shape[1]
+        feat_flat = feat_grid_enh.view(B, Cf, -1)                              # (B,Cf,HW)
+        idx = img_idxs.long().clamp(0, H * W - 1).unsqueeze(1).expand(-1, Cf, -1)
+        point_img_feat = torch.gather(feat_flat, 2, idx).transpose(1, 2).contiguous()  # (B,N,Cf)
+
+        point_img_feat = self.img_proj(point_img_feat)  # (B,N,C') or identity
+
+        # ============================================================
+        # 4) point-wise xyz from predicted depth (same style as C1_detach)
+        # ============================================================
+        z = gather_depth_by_img_idxs(depth_map_pred, img_idxs)  # (B,N,1)
+        z = torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(1e-6)
+
+        # detach geometry path like C1_detach
+        z_sg = z.detach()
+
+        u, v = img_idxs_to_uv(img_idxs, W)   # typically (B,N,1)
+        xyz = backproject_uvz(u, v, z_sg, K) # (B,N,3)
+        end_points["point_clouds"] = xyz
+
+        # optional vis
+        if self.vis_dir is not None:
+            do_vis = (self._vis_iter % self.vis_every == 0) or bool(end_points.get("force_vis", False))
+
+            if do_vis and ("gt_depth_m" in end_points):
+                gt_depth = end_points["gt_depth_m"]
+                if gt_depth.dim() == 3:
+                    gt_depth = gt_depth.unsqueeze(1)
+                elif gt_depth.dim() == 4:
+                    gt_depth = gt_depth[:, :1]
+
+                z_gt = gather_depth_by_img_idxs(gt_depth, img_idxs)
+                z_gt = torch.nan_to_num(z_gt, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(1e-6)
+                xyz_gt = backproject_uvz(u, v, z_gt, K)
+                self._save_pred_gt_cloud_ply(xyz, xyz_gt, end_points)
+
+            self._vis_iter += 1
+
+        # ============================================================
+        # 5) geometry PE + fuse -> seed_features (same as C1)
+        # ============================================================
+        invz = (1.0 / xyz[..., 2:3]).clamp_max(1e6)
+        pe = self.pe_mlp(torch.cat([xyz, invz], dim=-1))              # (B,N,pe_dim)
+
+        fused = self.fuse(torch.cat([point_img_feat, pe], dim=-1))    # (B,N,512)
+        seed_features = fused.transpose(1, 2).contiguous()            # (B,512,N)
+
+        # ============================================================
+        # 6) point-wise graspable mask (same as C1)
+        # ============================================================
+        end_points = self.graspable(seed_features, end_points)
+        seed_features_flipped = seed_features.transpose(1, 2).contiguous()  # (B,N,512)
+
+        objectness_score = end_points["objectness_score"]                  # (B,2,N)
+        graspness_score  = end_points["graspness_score"].squeeze(1)        # (B,N)
+
+        objectness_pred = torch.argmax(objectness_score, dim=1)
+        objectness_mask = (objectness_pred == 1)
+        graspness_mask  = graspness_score > cfgs.graspness_threshold
+        graspable_mask  = objectness_mask & graspness_mask
+
+        # ============================================================
+        # 7) FPS downsample on graspable points (same as C1)
+        # ============================================================
+        seed_xyz = xyz
+        point_num = seed_xyz.size(1)
+
+        seed_features_graspable = []
+        seed_xyz_graspable = []
+        graspable_num_batch = 0.0
+
+        for i in range(B):
+            cur_mask = graspable_mask[i]
+            cur_idx = torch.nonzero(cur_mask, as_tuple=False).squeeze(1)
+            graspable_num_batch += cur_idx.numel()
+
+            if cur_idx.numel() == 0:
+                ridx = torch.randint(0, point_num, (self.M_points,), device=seed_xyz.device)
+                cur_seed_xyz = seed_xyz[i].index_select(0, ridx).contiguous()
+                cur_feat_mc  = seed_features_flipped[i].index_select(0, ridx).contiguous()
+                cur_feat     = cur_feat_mc.transpose(0, 1).contiguous()
+                seed_xyz_graspable.append(cur_seed_xyz)
+                seed_features_graspable.append(cur_feat)
+                continue
+
+            if cur_idx.numel() < self.M_points:
+                rep = torch.randint(0, cur_idx.numel(), (self.M_points,), device=seed_xyz.device)
+                ridx = cur_idx[rep]
+                cur_seed_xyz = seed_xyz[i].index_select(0, ridx).contiguous()
+                cur_feat_mc  = seed_features_flipped[i].index_select(0, ridx).contiguous()
+                cur_feat     = cur_feat_mc.transpose(0, 1).contiguous()
+                seed_xyz_graspable.append(cur_seed_xyz)
+                seed_features_graspable.append(cur_feat)
+                continue
+
+            xyz_in = seed_xyz[i].index_select(0, cur_idx).unsqueeze(0).contiguous()  # (1,Ng,3)
+            fps_idxs = furthest_point_sample(xyz_in, self.M_points).to(torch.int32).contiguous()
+
+            cur_seed_xyz = gather_operation(
+                xyz_in.transpose(1, 2).contiguous(), fps_idxs
+            ).transpose(1, 2).squeeze(0).contiguous()  # (M,3)
+
+            feat_in = seed_features_flipped[i].index_select(0, cur_idx).contiguous()  # (Ng,512)
+            cur_feat = gather_operation(
+                feat_in.unsqueeze(0).transpose(1, 2).contiguous(), fps_idxs
+            ).squeeze(0).contiguous()  # (512,M)
+
+            seed_xyz_graspable.append(cur_seed_xyz)
+            seed_features_graspable.append(cur_feat)
+
+        seed_xyz_graspable = torch.stack(seed_xyz_graspable, 0).contiguous()            # (B,M,3)
+        seed_features_graspable = torch.stack(seed_features_graspable, 0).contiguous()  # (B,512,M)
+
+        end_points["xyz_graspable"] = seed_xyz_graspable
+        end_points["D: Graspable Points"] = (
+            torch.as_tensor(graspable_num_batch, device=seed_xyz.device, dtype=torch.float32) / float(B)
+        ).detach().reshape(())
+
+        # ============================================================
+        # 8) view selection
+        # ============================================================
+        end_points, res_feat = self.view(seed_features_graspable, end_points)
+        seed_features_graspable = seed_features_graspable + res_feat
+
+        # ============================================================
+        # 9) label processing
+        # ============================================================
+        if self.is_training:
+            grasp_top_views_rot, end_points = process_grasp_labels(end_points)
+        else:
+            grasp_top_views_rot = end_points["grasp_top_view_rot"]
+
+        # ============================================================
+        # 10) grouping + head
+        # ============================================================
+        group_features = self.cy_group(seed_xyz_graspable, seed_features_graspable, grasp_top_views_rot)
+        end_points = self.grasp_head(group_features, end_points)
+
+        return end_points
+    
+        
 def pred_decode(end_points):
     batch_size = len(end_points['point_clouds'])
     grasp_preds = []

@@ -11,7 +11,7 @@ import collections.abc as container_abcs
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from utils.arguments import cfgs
+# from utils.arguments import cfgs
 from utils.data_utils import CameraInfo, transform_point_cloud, create_point_cloud_from_depth_image, \
     get_workspace_mask, remove_invisible_grasp_points
 
@@ -592,6 +592,9 @@ class GraspNetMultiDataset(Dataset):
 
         depth_prob_gt, depth_prob_w = self.build_depth_prob_gt(gt_depth_m_resized)
 
+        scene_idx = int(scene.split('_')[-1])
+        anno_idx = int(self.frameid[index])
+
         ret_dict = {
             'point_clouds': cloud_sampled.astype(np.float32),
             'cloud_colors': color_sampled.astype(np.float32),
@@ -603,6 +606,10 @@ class GraspNetMultiDataset(Dataset):
             'gt_depth_m': gt_depth_m_resized,          # (448,448) float32 meters
             'depth_prob_gt': depth_prob_gt,            # (1, Nfeat, 256)
             'depth_prob_weight': depth_prob_w,         # (1, Nfeat)
+            
+            'scene_idx': np.int64(scene_idx),
+            'anno_idx': np.int64(anno_idx),
+            'dataset_idx': np.int64(index),
         }
         return ret_dict
 
@@ -773,9 +780,14 @@ class GraspNetMultiDataset(Dataset):
         # invalid tokens: ignore in CE
         obj_tok[valid_cnt < 1.0] = -1
 
-        objectness_label_tok = obj_tok.reshape(-1).astype(np.int64)      # (Ntok,)
-        graspness_label_tok  = grasp_tok.reshape(-1).astype(np.float32)  # (Ntok,)
-        token_valid_mask     = (valid_cnt.reshape(-1) >= 1.0)            # (Ntok,)
+        # objectness_label_tok = obj_tok.reshape(-1).astype(np.int64)      # (Ntok,)
+        # graspness_label_tok  = grasp_tok.reshape(-1).astype(np.float32)  # (Ntok,)
+        # token_valid_mask     = (valid_cnt.reshape(-1) >= 1.0)            # (Ntok,)
+
+        objectness_label_tok = obj_map_448.reshape(-1).astype(np.int64)
+        objectness_label_tok[valid_map_448.reshape(-1) < 1.0] = -1
+        graspness_label_tok = grasp_map_448.reshape(-1).astype(np.float32)
+        token_valid_mask = (valid_map_448.reshape(-1) >= 1.0)
 
         # -----------------------------
         # 5) Sample point cloud (point-level)
@@ -837,6 +849,9 @@ class GraspNetMultiDataset(Dataset):
         if self.augment:
             cloud_sampled, object_poses_list = self.augment_data(cloud_sampled, object_poses_list)
 
+
+        scene_idx = int(scene.split('_')[-1])
+        anno_idx = int(self.frameid[index])
         # -----------------------------
         # 7) return dict
         # -----------------------------
@@ -878,6 +893,10 @@ class GraspNetMultiDataset(Dataset):
             'gt_depth_m': gt_depth_m_resized.astype(np.float32),
             'depth_prob_gt': depth_prob_gt.astype(np.float32),
             'depth_prob_weight': depth_prob_w.astype(np.float32),
+
+            'scene_idx': np.int64(scene_idx),
+            'anno_idx': np.int64(anno_idx),
+            'dataset_idx': np.int64(index),
         }
         return ret_dict
 
