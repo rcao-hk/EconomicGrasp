@@ -9,3 +9,5 @@ libs/knn
 *.ply
 experiment
 *.pth
+*.vscode
+vis
