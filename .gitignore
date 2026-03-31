@@ -11,3 +11,6 @@ experiment
 *.pth
 *.vscode
 vis
+log
+build
+*.egg-info
