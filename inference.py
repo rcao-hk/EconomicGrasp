@@ -38,6 +38,8 @@ TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=F
 
 # Init the model
 if cfgs.multi_modal:
+    # from models.economicgrasp import economicgrasp_multi, pred_decode
+    # net = economicgrasp_multi(seed_feat_dim=512, is_training=False)
     # from models.economicgrasp_depth import EconomicGrasp_RGBDepthProb, pred_decode
     # net = EconomicGrasp_RGBDepthProb(img_feat_dim=256,
     #              depth_stride=2,     # <-- your expectation: 224x224 tokens
@@ -69,26 +71,40 @@ if cfgs.multi_modal:
     #              min_depth=cfgs.min_depth,
     #              max_depth=cfgs.max_depth,
     #              is_training=False)
-    # from models.economicgrasp_depth_c1 import economicgrasp_c2_3
-    # from models.economicgrasp_depth_c1 import pred_decode_c2_1 as pred_decode
-    # net = economicgrasp_c2_3(
-    #              min_depth=cfgs.min_depth,
-    #              max_depth=cfgs.max_depth,
-    #              is_training=False,
-    #              vis_every=100)
+    from models.economicgrasp_depth_c1 import economicgrasp_c2_3
+    from models.economicgrasp_depth_c1 import pred_decode_c2_1 as pred_decode
+    net = economicgrasp_c2_3(
+                 min_depth=cfgs.min_depth,
+                 max_depth=cfgs.max_depth,
+                 is_training=False,
+                 vis_dir=os.path.join('vis', 'c2.3_test'),
+                 vis_every=1000)
     # from models.economicgrasp_depth_c1 import economicgrasp_c2_4, pred_decode
     # net = economicgrasp_c2_4(
     #              min_depth=cfgs.min_depth,
     #              max_depth=cfgs.max_depth,
     #              is_training=False)
-    # from models.economicgrasp import economicgrasp_multi, pred_decode
-    # net = economicgrasp_multi(seed_feat_dim=512, is_training=False)
-    from models.economicgrasp_2d import economicgrasp_c3, pred_decode
-    net = economicgrasp_c3(
-                 min_depth=cfgs.min_depth,
-                 max_depth=cfgs.max_depth,
-                 is_training=False,
-                 vis_every=100)
+    # from models.economicgrasp_2d import economicgrasp_c3, pred_decode
+    # net = economicgrasp_c3(
+    #              min_depth=cfgs.min_depth,
+    #              max_depth=cfgs.max_depth,
+    #              is_training=False,
+    #              vis_every=100)
+    # from models.economicgrasp_2d import economicgrasp_c3_1
+    # from models.economicgrasp_2d import pred_decode_c3_1 as pred_decode
+    # net = economicgrasp_c3_1(
+    #              min_depth=cfgs.min_depth,
+    #              max_depth=cfgs.max_depth,
+    #              is_training=False,
+    #              vis_every=100)
+    # from models.economicgrasp_2d import economicgrasp_c3_2
+    # from models.economicgrasp_2d import pred_decode_c3_2 as pred_decode
+    # net = economicgrasp_c3_2(
+    #              min_depth=cfgs.min_depth,
+    #              max_depth=cfgs.max_depth,
+    #              is_training=False,
+    #              vis_dir=os.path.join('vis', 'c3.2_test'),
+    #              vis_every=100)
 else:
     from models.economicgrasp import economicgrasp, pred_decode
     net = economicgrasp(seed_feat_dim=512, is_training=False)
@@ -146,12 +162,15 @@ def inference():
             preds = grasp_preds[i].detach().cpu().numpy()
             gg = GraspGroup(preds)
 
+            if cfgs.save_nocollision:
+                no_collision_dir = os.path.join(cfgs.save_dir+'_nocollision', SCENE_LIST[data_idx], cfgs.camera)
+                os.makedirs(no_collision_dir, exist_ok=True)
+                no_collision_path = os.path.join(no_collision_dir, str(data_idx % 256).zfill(4) + '.npy')
+                gg.save_npy(no_collision_path)
+                
             # collision detection
             if cfgs.collision_thresh > 0:
                 cloud, _ = TEST_DATASET.get_data(data_idx, return_raw_cloud=True)
-                # mfcdetector = ModelFreeCollisionDetector(cloud, voxel_size=cfgs.voxel_size)
-                # collision_mask = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=cfgs.collision_thresh)
-                # gg = gg[~collision_mask]
                 mfcdetector = ModelFreeCollisionDetectorTorch(cloud.reshape(-1, 3), voxel_size=cfgs.collision_voxel_size)
                 collision_mask = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=cfgs.collision_thresh)
                 collision_mask = collision_mask.detach().cpu().numpy()
@@ -160,8 +179,7 @@ def inference():
             # save grasps
             save_dir = os.path.join(cfgs.save_dir, SCENE_LIST[data_idx], cfgs.camera)
             save_path = os.path.join(save_dir, str(data_idx % 256).zfill(4) + '.npy')
-            if not os.path.exists(save_dir):
-                os.makedirs(save_dir)
+            os.makedirs(save_dir, exist_ok=True)
             gg.save_npy(save_path)
 
         if batch_idx % batch_interval == 0:
