@@ -272,7 +272,7 @@ from torchvision import transforms
 class GraspNetMultiDataset(Dataset):
     def __init__(self, root, camera='kinect', split='train', num_points=20000, voxel_size=0.005, remove_outlier=False, remove_invisible=True,
                  augment=False, load_label=True, use_gt_depth=False,
-                 min_depth=0.2, max_depth=1.0, bin_num=256):
+                 min_depth=0.2, max_depth=1.0, bin_num=256, depth_strides=2):
         self.root = root
         self.split = split
         self.voxel_size = voxel_size
@@ -309,7 +309,7 @@ class GraspNetMultiDataset(Dataset):
         self.depth_prob_min = min_depth
         self.depth_prob_max = max_depth
         self.depth_prob_bins = bin_num
-        self.depth_prob_strides = [2]   # 需要更省就改成 [4]
+        self.depth_prob_strides = depth_strides   # 需要更省就改成 [4]
         self.depth_prob_valid_threshold = -1       # <0 表示不做阈值裁剪；loss 里用 weight 即可
         self.gt_factor_depth = None                # None -> 默认用 meta['factor_depth']；也可以强制 1000.0
         
@@ -458,7 +458,7 @@ class GraspNetMultiDataset(Dataset):
         depth_prob_w : (1, Nfeat) float32, valid_ratio per 2x2 patch
         """
         Hr, Wr = self.resize_shape              # (448,448)
-        s = 2
+        s = self.depth_prob_strides
         Ht, Wt = Hr // s, Wr // s               # (224,224)
         Nfeat = Ht * Wt
         D = int(self.depth_prob_bins)
@@ -918,6 +918,7 @@ class GraspNetTransDataset(GraspNetMultiDataset):
         min_depth=0.2,
         max_depth=1.0,
         bin_num=256,
+        depth_strides=2,
     ):
         self.root = graspnet_root
         self.rgb_root = rgb_root
@@ -961,7 +962,7 @@ class GraspNetTransDataset(GraspNetMultiDataset):
         self.depth_prob_min = min_depth
         self.depth_prob_max = max_depth
         self.depth_prob_bins = bin_num
-        self.depth_prob_strides = [2]
+        self.depth_prob_strides = depth_strides
         self.depth_prob_valid_threshold = -1
         self.gt_factor_depth = None
 
