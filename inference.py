@@ -3,7 +3,7 @@ import numpy as np
 import time
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from graspnetAPI import GraspGroup, GraspNetEval
 
 from utils.collision_detector import ModelFreeCollisionDetector, ModelFreeCollisionDetectorTorch
@@ -22,19 +22,82 @@ def my_worker_init_fn(worker_id):
     pass
 
 
-# Create dataset and dataloader
-if cfgs.multi_modal:
-    TEST_DATASET = GraspNetMultiDataset(cfgs.dataset_root, split='{}'.format(cfgs.test_mode),
-                                    camera=cfgs.camera, num_points=cfgs.num_point, remove_outlier=True, augment=False,
-                                    load_label=False)
-else:
-    TEST_DATASET = GraspNetDataset(cfgs.dataset_root, split='{}'.format(cfgs.test_mode),
-                                    camera=cfgs.camera, num_points=cfgs.num_point, remove_outlier=True, augment=False,
-                                    load_label=False)
+def build_dataset(args):
+    load_label = False   # 你当前测试脚本原本就是 False
 
-SCENE_LIST = TEST_DATASET.scene_list()
-TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
-                             num_workers=2, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn)
+    if args.multi_modal:
+        dataset = GraspNetMultiDataset(
+            args.dataset_root,
+            split='{}'.format(args.test_mode),
+            camera=args.camera,
+            num_points=args.num_point,
+            remove_outlier=True,
+            augment=False,
+            load_label=load_label
+        )
+    else:
+        dataset = GraspNetDataset(
+            args.dataset_root,
+            split='{}'.format(args.test_mode),
+            camera=args.camera,
+            num_points=args.num_point,
+            remove_outlier=True,
+            augment=False,
+            load_label=load_label
+        )
+    return dataset
+
+
+def build_eval_subset(dataset, sample_interval, annos_per_scene=256):
+    total = len(dataset)
+
+    if sample_interval <= 0:
+        raise ValueError(f"sample_interval must be > 0, got {sample_interval}")
+
+    if sample_interval >= 1.0:
+        indices = list(range(total))
+        return dataset, indices
+
+    stride = max(1, int(round(1.0 / sample_interval)))
+    indices = []
+
+    num_scenes = (total + annos_per_scene - 1) // annos_per_scene
+    for scene_id in range(num_scenes):
+        start = scene_id * annos_per_scene
+        end = min((scene_id + 1) * annos_per_scene, total)
+        scene_len = end - start
+
+        local_indices = list(range(0, scene_len, stride))
+        indices.extend([start + idx for idx in local_indices])
+
+    subset = Subset(dataset, indices)
+    return subset, indices
+
+
+def build_dataloader(args):
+    full_dataset = build_dataset(args)
+    sample_interval = getattr(args, "sample_interval", 1.0)
+    eval_dataset, sampled_indices = build_eval_subset(full_dataset, sample_interval)
+
+    test_dataloader = DataLoader(
+        eval_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=getattr(args, "num_workers", 2),
+        worker_init_fn=my_worker_init_fn,
+        collate_fn=collate_fn
+    )
+    return full_dataset, eval_dataset, test_dataloader, sampled_indices
+
+
+# Create dataset and dataloader
+FULL_TEST_DATASET, TEST_DATASET, TEST_DATALOADER, SAMPLED_INDICES = build_dataloader(cfgs)
+SCENE_LIST = FULL_TEST_DATASET.scene_list()
+
+print(f"Total test samples: {len(FULL_TEST_DATASET)}")
+print(f"Evaluated samples:  {len(TEST_DATASET)}")
+print(f"sample_interval:    {getattr(cfgs, 'sample_interval', 1.0)}")
+
 
 # Init the model
 if cfgs.multi_modal:
@@ -46,7 +109,6 @@ if cfgs.multi_modal:
     #              min_depth=cfgs.min_depth,
     #              max_depth=cfgs.max_depth,
     #              bin_num=cfgs.bin_num, is_training=False)
-
     # from models.economicgrasp_depth_c1 import economicgrasp_c1, pred_decode
     # net = economicgrasp_c1(depth_stride=2,
     #                        min_depth=cfgs.min_depth,
@@ -71,14 +133,14 @@ if cfgs.multi_modal:
     #              min_depth=cfgs.min_depth,
     #              max_depth=cfgs.max_depth,
     #              is_training=False)
-    from models.economicgrasp_depth_c1 import economicgrasp_c2_3
-    from models.economicgrasp_depth_c1 import pred_decode_c2_1 as pred_decode
-    net = economicgrasp_c2_3(
-                 min_depth=cfgs.min_depth,
-                 max_depth=cfgs.max_depth,
-                 is_training=False,
-                 vis_dir=os.path.join('vis', 'c2.3_test'),
-                 vis_every=1000)
+    # from models.economicgrasp_depth_c1 import economicgrasp_c2_3
+    # from models.economicgrasp_depth_c1 import pred_decode_c2_1 as pred_decode
+    # net = economicgrasp_c2_3(
+    #              min_depth=cfgs.min_depth,
+    #              max_depth=cfgs.max_depth,
+    #              is_training=False,
+    #              vis_dir=os.path.join('vis', 'c2.3_test'),
+    #              vis_every=1000)
     # from models.economicgrasp_depth_c1 import economicgrasp_c2_4, pred_decode
     # net = economicgrasp_c2_4(
     #              min_depth=cfgs.min_depth,
@@ -105,9 +167,26 @@ if cfgs.multi_modal:
     #              is_training=False,
     #              vis_dir=os.path.join('vis', 'c3.2_test'),
     #              vis_every=100)
+    # from models.economicgrasp_c5 import economicgrasp_c5
+    # from models.economicgrasp_c5 import pred_decode_c5 as pred_decode
+    # net = economicgrasp_c5(
+    #              min_depth=cfgs.min_depth,
+    #              max_depth=cfgs.max_depth,
+    #              is_training=False,
+    #              vis_dir=os.path.join('vis', 'c5_test'),
+    #              vis_every=1000)
+    from models.economicgrasp_query import economicgrasp_query, pred_decode_query
+    from models.economicgrasp_query import pred_decode_query as pred_decode
+    net = economicgrasp_query(
+                 min_depth=cfgs.min_depth,
+                 max_depth=cfgs.max_depth,
+                 is_training=False,
+                 vis_dir=os.path.join('vis', 'query_test'),
+                 vis_every=1000)
 else:
     from models.economicgrasp import economicgrasp, pred_decode
     net = economicgrasp(seed_feat_dim=512, is_training=False)
+
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 net.to(device)
 
@@ -117,18 +196,7 @@ try:
     net.load_state_dict(checkpoint['model_state_dict'])
 except:
     net.load_state_dict(checkpoint)
-# state = checkpoint.get("state_dict", checkpoint.get("model_state_dict", checkpoint))
-# w2 = state["enhancer.fusion_fc2.weight"]
-# embed_dims = w2.shape[0]
-# ff_dim = w2.shape[1]
 
-# # --- 关键：load 前先 build，让参数“存在” ---
-# net.enhancer.ff_dim = int(ff_dim)                  # 确保一致
-# net.enhancer._build(int(embed_dims), device=device)
-# # --- 现在再 load，就不会 unexpected 了 ---
-# net.load_state_dict(state, strict=True)
-
-# start_epoch = checkpoint['epoch']
 print("-> loaded checkpoint %s" % (cfgs.checkpoint_path))
 
 
@@ -136,9 +204,9 @@ print("-> loaded checkpoint %s" % (cfgs.checkpoint_path))
 def inference():
     batch_interval = 20
     stat_dict = {}  # collect statistics
-    # set model to eval mode (for bn and dp)
     net.eval()
     tic = time.time()
+
     for batch_idx, batch_data in enumerate(TEST_DATALOADER):
         for key in batch_data:
             if 'list' in key:
@@ -156,26 +224,46 @@ def inference():
             end_points = net(batch_data)
             grasp_preds = pred_decode(end_points)
 
+        cur_bs = len(grasp_preds)
+
         # Save results for evaluation
-        for i in range(cfgs.batch_size):
-            data_idx = batch_idx * cfgs.batch_size + i
+        for i in range(cur_bs):
+            # 当前subset中的样本下标
+            subset_data_idx = batch_idx * cfgs.batch_size + i
+            # 映射回原始full dataset中的样本下标
+            data_idx = SAMPLED_INDICES[subset_data_idx]
+
             preds = grasp_preds[i].detach().cpu().numpy()
             gg = GraspGroup(preds)
 
             if cfgs.save_nocollision:
-                no_collision_dir = os.path.join(cfgs.save_dir+'_nocollision', SCENE_LIST[data_idx], cfgs.camera)
+                no_collision_dir = os.path.join(
+                    cfgs.save_dir + '_nocollision',
+                    SCENE_LIST[data_idx],
+                    cfgs.camera
+                )
                 os.makedirs(no_collision_dir, exist_ok=True)
-                no_collision_path = os.path.join(no_collision_dir, str(data_idx % 256).zfill(4) + '.npy')
+                no_collision_path = os.path.join(
+                    no_collision_dir,
+                    str(data_idx % 256).zfill(4) + '.npy'
+                )
                 gg.save_npy(no_collision_path)
-                
+
             # collision detection
             if cfgs.collision_thresh > 0:
-                cloud, _ = TEST_DATASET.get_data(data_idx, return_raw_cloud=True)
-                mfcdetector = ModelFreeCollisionDetectorTorch(cloud.reshape(-1, 3), voxel_size=cfgs.collision_voxel_size)
-                collision_mask = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=cfgs.collision_thresh)
+                cloud, _ = FULL_TEST_DATASET.get_data(data_idx, return_raw_cloud=True)
+                mfcdetector = ModelFreeCollisionDetectorTorch(
+                    cloud.reshape(-1, 3),
+                    voxel_size=cfgs.collision_voxel_size
+                )
+                collision_mask = mfcdetector.detect(
+                    gg,
+                    approach_dist=0.05,
+                    collision_thresh=cfgs.collision_thresh
+                )
                 collision_mask = collision_mask.detach().cpu().numpy()
                 gg = gg[~collision_mask]
-            
+
             # save grasps
             save_dir = os.path.join(cfgs.save_dir, SCENE_LIST[data_idx], cfgs.camera)
             save_path = os.path.join(save_dir, str(data_idx % 256).zfill(4) + '.npy')

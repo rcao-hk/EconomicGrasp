@@ -70,7 +70,7 @@ def get_loss_c2_1(end_points):
 
     end_points['A: Objectness Loss'] = objectness_loss
     end_points['A: Grasp Loss'] = grasp_loss
-    end_points['A: DepthReg Loss'] = depth_prob_loss
+    end_points['A: Depth Prob Loss'] = depth_prob_loss
     end_points['A: Overall Loss'] = loss
     return loss, end_points
 
@@ -331,7 +331,7 @@ def compute_score_loss_cls(end_points):
     grasp_score_label = (end_points['batch_grasp_score'] * 10 / 2).long()  # (B,M)
     valid_mask = end_points['batch_valid_mask']                  # (B,M)
 
-    loss = criterion(grasp_score_pred.squeeze(1), grasp_score_label)  # (B,M)  (squeeze(1) keeps compat)
+    loss = criterion(grasp_score_pred, grasp_score_label)  # (B,M)  (squeeze(1) keeps compat)
     if torch.sum(valid_mask) == 0:
         loss = 0 * torch.sum(loss)
         acc = 0 * torch.sum(loss)
