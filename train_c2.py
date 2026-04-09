@@ -117,6 +117,7 @@ TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=F
 #                         )
 net = economicgrasp_bip3d(min_depth=cfgs.min_depth,
                         max_depth=cfgs.max_depth,
+                        bin_num=cfgs.bin_num,
                         is_training=True,
                         vis_dir=os.path.join('vis', 'bip3d'),
                         # vis_dir=None,

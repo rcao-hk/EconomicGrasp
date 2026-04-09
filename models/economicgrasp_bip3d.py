@@ -166,8 +166,8 @@ class SingleScaleDepthFusionSpatialEnhancer(nn.Module):
         depth_prob = depth_prob / depth_prob.sum(dim=-1, keepdim=True).clamp_min(self.eps)
 
         pts = self.get_pts(H, W, K, stride=stride, device=feat_2d.device, dtype=feat_2d.dtype)  # (B,N,D,3)
-        pts_feature = self.pts_fc(pts)  # (B,N,D,C3)
-        pts_feature = (depth_prob.unsqueeze(-1) * pts_feature).sum(dim=-2)  # (B,N,C3)
+        pts_mean = (depth_prob.unsqueeze(-1) * pts).sum(dim=-2)   # (B,N,3)
+        pts_feature = self.pts_fc(pts_mean)                       # (B,N,C3)
 
         fused_inputs = [feature_2d_flat]
         if self.with_feature_3d:
@@ -227,9 +227,8 @@ class economicgrasp_bip3d(nn.Module):
         depth_branch_in_channels: int = 1,
         use_gt_xyz_for_train: bool = False,
         use_input_depth_for_xyz: bool = False,
-        detach_prob_for_enhancer: bool = False,
+        detach_prob_for_enhancer: bool = True,
         detach_depth_feat_for_enhancer: bool = False,
-        topk_use_objectness: bool = True,
         vis_dir: str = 'bip3d',
         vis_every: int = 1000,
         debug_print_every: int = 50,
@@ -247,9 +246,7 @@ class economicgrasp_bip3d(nn.Module):
         self.use_input_depth_for_xyz = bool(use_input_depth_for_xyz)
         self.detach_prob_for_enhancer = bool(detach_prob_for_enhancer)
         self.detach_depth_feat_for_enhancer = bool(detach_depth_feat_for_enhancer)
-        self.topk_use_objectness = bool(topk_use_objectness)
 
-        # sel_proj removed: downstream seed feature dim must match token feature dim
         self.seed_feature_dim = int(tok_feat_dim)
         self.num_depth = int(getattr(cfgs, 'num_depth', 4))
         self.num_angle = int(getattr(cfgs, 'num_angle', 12))
@@ -305,7 +302,7 @@ class economicgrasp_bip3d(nn.Module):
         self.enhancer = SingleScaleDepthFusionSpatialEnhancer(
             embed_dims=tok_feat_dim,
             feature_3d_dim=feature_3d_dim,
-            ff_dim=1024,
+            ff_dim=256,
             min_depth=self.min_depth,
             max_depth=self.max_depth,
             num_depth=self.bin_num,
@@ -442,18 +439,38 @@ class economicgrasp_bip3d(nn.Module):
 
     @staticmethod
     def _get_depth_input(end_points: dict) -> Optional[torch.Tensor]:
+        # Prefer real sensor depth / explicit depth input
         cand_keys = [
-            "depth", "depths", "depth_input", "depth_map", "depth_img", "depths_1hw",
-            "depth_map_input", "sensor_depth", "gt_depth_m",
+            "depth",            # recommended: dataloader output, (B,1,H,W) or (B,H,W)
         ]
-        for k in cand_keys:
-            if k in end_points and torch.is_tensor(end_points[k]):
-                d = end_points[k]
-                if d.dim() == 3:
-                    d = d.unsqueeze(1)
-                elif d.dim() == 4:
-                    d = d[:, :1]
-                return d
+
+        # GT depth should be last-resort fallback only
+        fallback_keys = [
+            "gt_depth_m",
+        ]
+
+        for k in cand_keys + fallback_keys:
+            if k not in end_points:
+                continue
+            d = end_points[k]
+            if not torch.is_tensor(d):
+                continue
+
+            # normalize to (B,1,H,W)
+            if d.dim() == 2:
+                # unlikely after collate, but keep robust
+                d = d.unsqueeze(0).unsqueeze(0)   # (1,1,H,W)
+            elif d.dim() == 3:
+                # could be (B,H,W) or (1,H,W)
+                d = d.unsqueeze(1)                # -> (B,1,H,W)
+            elif d.dim() == 4:
+                d = d[:, :1]                      # keep single channel
+            else:
+                continue
+
+            d = torch.nan_to_num(d, nan=0.0, posinf=0.0, neginf=0.0).float()
+            return d
+
         return None
 
     def _run_depth_branch(self, depth_input: Optional[torch.Tensor], target_hw: Tuple[int, int]):
@@ -482,9 +499,9 @@ class economicgrasp_bip3d(nn.Module):
         depth_map_pred_448, depth_tok_dbg, img_feat, depth_prob_448, depth_logits_448, prob_tok_flat = \
             self.depth_net(img, return_prob=True, return_tok_prob=True)
 
-        depth_map_pred = torch.nan_to_num(depth_map_pred_448, nan=0.0, posinf=0.0, neginf=0.0)
-        depth_map_pred = depth_map_pred.clamp(min=self.min_depth, max=self.max_depth)
-
+        # depth_map_pred = torch.nan_to_num(depth_map_pred_448, nan=0.0, posinf=0.0, neginf=0.0)
+        # depth_map_pred = depth_map_pred.clamp(min=self.min_depth, max=self.max_depth)
+        depth_map_pred = depth_map_pred_448
         if img_feat.shape[-2:] != (H, W):
             img_feat = F.interpolate(img_feat, size=(H, W), mode="bilinear", align_corners=False)
 
@@ -517,6 +534,7 @@ class economicgrasp_bip3d(nn.Module):
         # 3) single-scale BIP3D-style enhancer
         # ------------------------------------------------------------------
         depth_prob_for_enh = depth_prob_448.detach() if self.detach_prob_for_enhancer else depth_prob_448
+        img_feat = img_feat.detach() if self.detach_prob_for_enhancer else img_feat
         if feat_3d_single is not None and self.detach_depth_feat_for_enhancer:
             feat_3d_single = feat_3d_single.detach()
 

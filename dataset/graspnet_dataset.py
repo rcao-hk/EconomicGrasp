@@ -450,6 +450,24 @@ class GraspNetMultiDataset(Dataset):
         K[1, 2] *= sy
         return K
 
+    def build_resized_depth_m_with_crop(self, depth_raw, factor_depth, crop_box, out_hw=(448,448)):
+        """
+        depth_raw: (H,W) uint16 / float, sensor depth in raw units
+        factor_depth: scalar, e.g. 1000.0
+        crop_box: (x0,y0,x1,y1)
+        return:
+            depth_m_resized: (outH,outW) float32 meters
+        """
+        x0, y0, x1, y1 = crop_box
+        outH, outW = out_hw
+
+        depth_m = depth_raw.astype(np.float32) / float(factor_depth)
+        depth_crop = depth_m[y0:y1, x0:x1].copy()
+        depth_m_resized = cv2.resize(
+            depth_crop, (outW, outH), interpolation=cv2.INTER_NEAREST
+        ).astype(np.float32)
+        return depth_m_resized
+
     def build_depth_prob_gt(self, depth_m_resized: np.ndarray):
         """
         depth_m_resized: (448,448) float32 meters (aligned with resized RGB)
@@ -523,7 +541,8 @@ class GraspNetMultiDataset(Dataset):
 
     def get_data(self, index, return_raw_cloud=False):
         color = np.array(Image.open(self.colorpath[index]), dtype=np.float32) / 255.0  # (H,W,3)
-        depth = np.array(Image.open(self.depthpath[index]))                            # (H,W)
+        sensor_depth = np.array(Image.open(self.depthpath[index]))                            # (H,W)
+        depth = sensor_depth.copy()
         seg = np.array(Image.open(self.labelpath[index]))                              # (H,W)
         gt_depth = np.array(Image.open(self.gtdepthpath[index]))
         
@@ -579,7 +598,10 @@ class GraspNetMultiDataset(Dataset):
         color_crop = color[y0:y1, x0:x1].copy()
         img = self.img_transforms(color_crop)
         resized_idxs = self.get_resized_idxs_from_flat_crop(pix_flat, (H, W), crop_box, out_hw=self.resize_shape)
-        
+        sensor_depth_m_resized = self.build_resized_depth_m_with_crop(
+            sensor_depth, factor_depth, crop_box, out_hw=self.resize_shape
+        )
+
         # ---- GT depth (virtual) -> meters -> resize to 448x448 ----
         # 注意：gt_depth 可能是 uint16 (mm / factor_depth)
         fd = float(self.gt_factor_depth) if (self.gt_factor_depth is not None) else float(factor_depth)
@@ -606,7 +628,8 @@ class GraspNetMultiDataset(Dataset):
             'gt_depth_m': gt_depth_m_resized,          # (448,448) float32 meters
             'depth_prob_gt': depth_prob_gt,            # (1, Nfeat, 256)
             'depth_prob_weight': depth_prob_w,         # (1, Nfeat)
-            
+            # 'depth': sensor_depth_m_resized[None].astype(np.float32),   # (1,448,448)
+            # 'sensor_depth_m': sensor_depth_m_resized.astype(np.float32),# (448,448), debug
             'scene_idx': np.int64(scene_idx),
             'anno_idx': np.int64(anno_idx),
             'dataset_idx': np.int64(index),
@@ -618,7 +641,8 @@ class GraspNetMultiDataset(Dataset):
         # 0) load raw data
         # -----------------------------
         color = np.array(Image.open(self.colorpath[index]), dtype=np.float32) / 255.0   # (H,W,3)
-        depth = np.array(Image.open(self.depthpath[index]))                              # (H,W)
+        sensor_depth = np.array(Image.open(self.depthpath[index]))                              # (H,W)
+        depth = sensor_depth.copy()
         seg = np.array(Image.open(self.labelpath[index]))                                # (H,W)
         meta = scio.loadmat(self.metapath[index])
         scene = self.scenename[index]
@@ -686,6 +710,10 @@ class GraspNetMultiDataset(Dataset):
         color_crop = color[y0:y1, x0:x1].copy()
         img = self.img_transforms(color_crop)
 
+        sensor_depth_m_resized = self.build_resized_depth_m_with_crop(
+            sensor_depth, factor_depth, crop_box, out_hw=self.resize_shape
+        )
+        
         # GT depth meters: crop -> resize
         fd = float(self.gt_factor_depth) if (self.gt_factor_depth is not None) else float(factor_depth)
         gt_depth_m = gt_depth.astype(np.float32) / fd
@@ -893,6 +921,9 @@ class GraspNetMultiDataset(Dataset):
             'gt_depth_m': gt_depth_m_resized.astype(np.float32),
             'depth_prob_gt': depth_prob_gt.astype(np.float32),
             'depth_prob_weight': depth_prob_w.astype(np.float32),
+
+            # 'depth': sensor_depth_m_resized[None].astype(np.float32),
+            # 'sensor_depth_m': sensor_depth_m_resized.astype(np.float32),
 
             'scene_idx': np.int64(scene_idx),
             'anno_idx': np.int64(anno_idx),
