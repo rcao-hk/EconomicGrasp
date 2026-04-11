@@ -58,6 +58,7 @@ parser.add_argument('--max_depth', type=float, default=1.0, help='Maximum depth 
 parser.add_argument('--bin_num', type=int, default=256, help='Number of bins for depth probability')
 parser.add_argument('--eval_start_epoch', type=int, default=0, help='Epoch to start evaluation [default: 0]')
 parser.add_argument('--ckpt_save_interval', type=int, default=5, help='Number for save checkpoint[default: 5]')
+parser.add_argument('--fuse_type', type=str, default='early', help='Fuse type for multi-modal model [default: add]')
 
 parser.add_argument("--save_nocollision", action='store_true')
 parser.add_argument("--sample_interval", type=float, default=1.0,

@@ -45,55 +45,90 @@ class PSPUpsample(nn.Module):
 
 class PSPNet(nn.Module):
     def __init__(
-            self, n_classes=22, sizes=(1, 2, 3, 6), psp_size=2048,
-            deep_features_size=1024, backend='resnet18', pretrained=True
+        self, n_classes=22, sizes=(1, 2, 3, 6), psp_size=2048,
+        deep_features_size=1024, backend='resnet18', pretrained=True,
+        out_dim=None,                 # <- 新增：统一输出维度（img_feat_dim）
+        return_pyramid=False,         # <- 可选：默认不返回 pyramid（兼容旧代码）
     ):
-        super(PSPNet, self).__init__()
+        super().__init__()
+        self.return_pyramid_default = return_pyramid
+        self.out_dim = out_dim
+
         self.feats = getattr(extractors, backend)(pretrained)
         self.psp = PSPModule(psp_size, 1024, sizes)
         self.drop_1 = nn.Dropout2d(p=0.3)
 
+        # upsample path（保持你原逻辑）
         if deep_features_size == 64:
-            self.up_1 = PSPUpsample(1024, 256)
-            self.up_2 = PSPUpsample(256, 64)
-            self.up_3 = PSPUpsample(64, 64)
+            self.up_1 = PSPUpsample(1024, 256)   # stride/8 -> /4
+            self.up_2 = PSPUpsample(256, 64)     # /4 -> /2
+            self.up_3 = PSPUpsample(64, 64)      # /2 -> /1
+            c_p4, c_p2, c_p1 = 256, 64, 64
         elif deep_features_size == 128:
             self.up_1 = PSPUpsample(1024, 512)
             self.up_2 = PSPUpsample(512, 256)
             self.up_3 = PSPUpsample(256, 128)
+            c_p4, c_p2, c_p1 = 512, 256, 128
         elif deep_features_size == 256:
             self.up_1 = PSPUpsample(1024, 512)
             self.up_2 = PSPUpsample(512, 256)
             self.up_3 = PSPUpsample(256, 256)
+            c_p4, c_p2, c_p1 = 512, 256, 256
+        else:
+            raise ValueError(f"Unsupported deep_features_size={deep_features_size}")
 
         self.drop_2 = nn.Dropout2d(p=0.15)
-        # self.final = nn.Sequential(
-        #     # nn.Conv2d(64, 32, kernel_size=1),
-        #     nn.Conv2d(64, 64, kernel_size=1),
-        #     nn.LogSoftmax()
-        # )
 
-        # self.final_seg = nn.Sequential(
-        #     nn.Conv2d(64, n_classes, kernel_size=1),
-        #     nn.LogSoftmax()
-        # )
+        # -------- 新增：把每个尺度投影到 out_dim（img_feat_dim） --------
+        # p8: psp 输出 1024 通道
+        if out_dim is not None:
+            self.proj_p8 = nn.Conv2d(1024, out_dim, kernel_size=1, bias=False)
+            self.proj_p4 = nn.Conv2d(c_p4, out_dim, kernel_size=1, bias=False)
+            self.proj_p2 = nn.Conv2d(c_p2, out_dim, kernel_size=1, bias=False)
+            self.proj_p1 = nn.Conv2d(c_p1, out_dim, kernel_size=1, bias=False)
+            self.proj_bn8 = nn.BatchNorm2d(out_dim)
+            self.proj_bn4 = nn.BatchNorm2d(out_dim)
+            self.proj_bn2 = nn.BatchNorm2d(out_dim)
+            self.proj_bn1 = nn.BatchNorm2d(out_dim)
+            self.proj_relu = nn.ReLU(inplace=True)
+        else:
+            self.proj_p8 = self.proj_p4 = self.proj_p2 = self.proj_p1 = None
 
-        # self.classifier = nn.Sequential(
-        #     nn.Linear(deep_features_size, 256),
-        #     nn.ReLU(),
-        #     nn.Linear(256, n_classes)
-        # )
+    def _proj(self, x, proj, bn):
+        x = proj(x)
+        x = bn(x)
+        return self.proj_relu(x)
 
-    def forward(self, x):
-        f, class_f = self.feats(x) 
-        p = self.psp(f)
-        p = self.drop_1(p)
+    def forward(self, x, return_pyramid=None):
+        if return_pyramid is None:
+            return_pyramid = self.return_pyramid_default
 
-        p = self.up_1(p)
-        p = self.drop_2(p)
+        f, _ = self.feats(x)           # f: stride/8 (在你这个 resnet34 里)
+        p8 = self.psp(f)               # (B,1024,H/8,W/8)
+        p8 = self.drop_1(p8)
 
-        p = self.up_2(p)
-        p = self.drop_2(p)
+        p4 = self.up_1(p8)             # (B,*,H/4,W/4)
+        p4 = self.drop_2(p4)
 
-        p = self.up_3(p)
-        return p
+        p2 = self.up_2(p4)             # (B,*,H/2,W/2)
+        p2 = self.drop_2(p2)
+
+        p1 = self.up_3(p2)             # (B,*,H,W)
+
+        if not return_pyramid:
+            # 兼容旧逻辑：返回最终 p1（或你原本认为的 img_feat）
+            return p1
+
+        # 统一通道
+        if self.out_dim is not None:
+            p8o = self._proj(p8, self.proj_p8, self.proj_bn8)
+            p4o = self._proj(p4, self.proj_p4, self.proj_bn4)
+            p2o = self._proj(p2, self.proj_p2, self.proj_bn2)
+            p1o = self._proj(p1, self.proj_p1, self.proj_bn1)
+        else:
+            p8o, p4o, p2o, p1o = p8, p4, p2, p1
+
+        # p16：由 p8 再下采样一次（DeepViewAgg 常用最深层）
+        p16o = F.avg_pool2d(p8o, kernel_size=2, stride=2)  # (B,C,H/16,W/16)
+
+        return {"p1": p1o, "p2": p2o, "p4": p4o, "p8": p8o, "p16": p16o}

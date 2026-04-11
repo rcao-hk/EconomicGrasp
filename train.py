@@ -19,9 +19,9 @@ from utils.arguments import cfgs
 # Local Libraries
 from models.economicgrasp import economicgrasp, economicgrasp_multi
 # from models.economicgrasp_2d import EconomicGrasp_ImageCenter
-from models.loss_economicgrasp import get_loss as get_loss_economicgrasp
+# from models.loss_economicgrasp import get_loss as get_loss_economicgrasp
 # from models.economicgrasp_depth import EconomicGrasp_RGBDepthProb
-# from models.loss_economicgrasp_depth import get_loss as get_loss_economicgrasp
+from models.loss_economicgrasp_depth import get_loss as get_loss_economicgrasp
 from dataset.graspnet_dataset import GraspNetDataset, GraspNetMultiDataset, collate_fn
 
 # ----------- GLOBAL CONFIG ------------
@@ -69,7 +69,8 @@ TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=F
                               num_workers=2, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
 # Init the model
 if cfgs.multi_modal:
-    net = economicgrasp_multi(seed_feat_dim=512, is_training=True)
+    # net = economicgrasp(seed_feat_dim=512, is_training=True)
+    net = economicgrasp_multi(seed_feat_dim=512, fuse_type=cfgs.fuse_type, is_training=True, vis_dir=os.path.join('vis', 'eco_multi_{}'.format(cfgs.fuse_type)), vis_every=500)
     # net = EconomicGrasp_RGBDepthProb(img_feat_dim=256,
     #              depth_stride=2,     # <-- your expectation: 224x224 tokens
     #              min_depth=cfgs.min_depth,
@@ -186,7 +187,7 @@ def train_one_epoch():
                 if key not in stat_dict: stat_dict[key] = 0
                 stat_dict[key] += end_points[key].item()
 
-        overall_loss += end_points['A: Grasp Loss'].item()
+        overall_loss += stat_dict['A: Grasp Loss']
         batch_interval = 20
 
         if (batch_idx + 1) % batch_interval == 0:
@@ -235,7 +236,7 @@ def evaluate_one_epoch():
                 if key not in stat_dict: stat_dict[key] = 0
                 stat_dict[key] += end_points[key].item()
     
-        overall_loss += end_points['A: Grasp Loss'].item()
+        overall_loss += stat_dict['A: Grasp Loss']
     for key in sorted(stat_dict.keys()):
         log_writer.add_scalar('test_' + key, stat_dict[key]/float(batch_idx+1), (EPOCH_CNT+1)*len(TRAIN_DATALOADER)*cfgs.batch_size)
         log_string('eval mean %s: %f'%(key, stat_dict[key]/(float(batch_idx+1))))

@@ -101,8 +101,9 @@ print(f"sample_interval:    {getattr(cfgs, 'sample_interval', 1.0)}")
 
 # Init the model
 if cfgs.multi_modal:
-    # from models.economicgrasp import economicgrasp_multi, pred_decode
-    # net = economicgrasp_multi(seed_feat_dim=512, is_training=False)
+    from models.economicgrasp import economicgrasp_multi, pred_decode
+    net = economicgrasp_multi(seed_feat_dim=512, fuse_type=cfgs.fuse_type, is_training=False, vis_dir=os.path.join('vis', 'eco_multi_{}_test'.format(cfgs.fuse_type)), vis_every=500)
+    
     # from models.economicgrasp_depth import EconomicGrasp_RGBDepthProb, pred_decode
     # net = EconomicGrasp_RGBDepthProb(img_feat_dim=256,
     #              depth_stride=2,     # <-- your expectation: 224x224 tokens
@@ -175,14 +176,14 @@ if cfgs.multi_modal:
     #              is_training=False,
     #              vis_dir=os.path.join('vis', 'c5_test'),
     #              vis_every=1000)
-    from models.economicgrasp_query import economicgrasp_query, pred_decode_query
-    from models.economicgrasp_query import pred_decode_query as pred_decode
-    net = economicgrasp_query(
-                 min_depth=cfgs.min_depth,
-                 max_depth=cfgs.max_depth,
-                 is_training=False,
-                 vis_dir=os.path.join('vis', 'query_test'),
-                 vis_every=1000)
+    # from models.economicgrasp_query import economicgrasp_query, pred_decode_query
+    # from models.economicgrasp_query import pred_decode_query as pred_decode
+    # net = economicgrasp_query(
+    #              min_depth=cfgs.min_depth,
+    #              max_depth=cfgs.max_depth,
+    #              is_training=False,
+    #              vis_dir=os.path.join('vis', 'query_test'),
+    #              vis_every=1000)
 else:
     from models.economicgrasp import economicgrasp, pred_decode
     net = economicgrasp(seed_feat_dim=512, is_training=False)
