@@ -215,3 +215,177 @@ def process_grasp_labels(end_points):
 
 
 
+def process_grasp_labels_c5_1(end_points, valid_dist_thresh: float = 0.005):
+    """
+    Top-K latent matching version for c5.1.
+    Stores extra tensors for visualization:
+      - batch_best_hyp_k
+      - batch_best_hyp_dist
+      - batch_grasp_point (matched GT point)
+    """
+    seed_xyz_hyp = end_points.get('xyz_graspable_hyp', None)
+    if seed_xyz_hyp is None:
+        seed_xyz_mu = end_points['xyz_graspable']
+        seed_xyz_hyp = seed_xyz_mu.unsqueeze(2)
+    seed_xyz_mu = end_points['xyz_graspable']
+    pred_top_view_inds = end_points['grasp_top_view_inds']
+
+    batch_size, num_seed, K_hyp, _ = seed_xyz_hyp.size()
+    valid_points_count = 0
+    valid_views_count = 0
+
+    batch_grasp_points = []
+    batch_grasp_views_rot = []
+    batch_view_graspness = []
+    batch_grasp_rotations = []
+    batch_grasp_depth = []
+    batch_grasp_scores = []
+    batch_grasp_widths = []
+    batch_valid_mask = []
+    batch_best_k = []
+    batch_best_dist = []
+
+    for i in range(batch_size):
+        pred_top_view = pred_top_view_inds[i]
+        poses = end_points['object_poses_list'][i]
+
+        grasp_points_merged = []
+        grasp_views_rot_merged = []
+        grasp_rotations_merged = []
+        grasp_depth_merged = []
+        grasp_scores_merged = []
+        grasp_widths_merged = []
+        view_graspness_merged = []
+        top_view_index_merged = []
+
+        for obj_idx, pose in enumerate(poses):
+            grasp_points = end_points['grasp_points_list'][i][obj_idx]
+            grasp_rotations = end_points['grasp_rotations_list'][i][obj_idx]
+            grasp_depth = end_points['grasp_depth_list'][i][obj_idx]
+            grasp_scores = end_points['grasp_scores_list'][i][obj_idx]
+            grasp_widths = end_points['grasp_widths_list'][i][obj_idx]
+            view_graspness = end_points['view_graspness_list'][i][obj_idx]
+            top_view_index = end_points['top_view_index_list'][i][obj_idx]
+            num_grasp_points = grasp_points.size(0)
+
+            grasp_views = generate_grasp_views(cfgs.num_view).to(pose.device)
+            grasp_points_trans = transform_point_cloud(grasp_points, pose, '3x4')
+            grasp_views_trans = transform_point_cloud(grasp_views, pose[:3, :3], '3x3')
+
+            angles = torch.zeros(grasp_views.size(0), dtype=grasp_views.dtype, device=grasp_views.device)
+            grasp_views_rot = batch_viewpoint_params_to_matrix(-grasp_views, angles)
+            grasp_views_rot_trans = torch.matmul(pose[:3, :3], grasp_views_rot)
+
+            _, view_inds, _ = knn_points(grasp_views.unsqueeze(0), grasp_views_trans.unsqueeze(0), K=1)
+            view_inds = view_inds.squeeze(-1).squeeze(0)
+
+            view_graspness_trans = torch.index_select(view_graspness, 1, view_inds)
+            grasp_views_rot_trans = torch.index_select(grasp_views_rot_trans, 0, view_inds)
+            grasp_views_rot_trans = grasp_views_rot_trans.unsqueeze(0).expand(num_grasp_points, -1, -1, -1)
+
+            top_view_index_trans = (-1 * torch.ones((num_grasp_points, grasp_rotations.shape[1]), dtype=torch.long)
+                                    .to(grasp_points.device))
+            tpid, tvip, tids = torch.where(view_inds == top_view_index.unsqueeze(-1))
+            top_view_index_trans[tpid, tvip] = tids
+
+            grasp_points_merged.append(grasp_points_trans)
+            view_graspness_merged.append(view_graspness_trans)
+            top_view_index_merged.append(top_view_index_trans)
+            grasp_rotations_merged.append(grasp_rotations)
+            grasp_depth_merged.append(grasp_depth)
+            grasp_scores_merged.append(grasp_scores)
+            grasp_widths_merged.append(grasp_widths)
+            grasp_views_rot_merged.append(grasp_views_rot_trans)
+
+        grasp_points_merged = torch.cat(grasp_points_merged, dim=0)
+        view_graspness_merged = torch.cat(view_graspness_merged, dim=0)
+        top_view_index_merged = torch.cat(top_view_index_merged, dim=0)
+        grasp_rotations_merged = torch.cat(grasp_rotations_merged, dim=0)
+        grasp_depth_merged = torch.cat(grasp_depth_merged, dim=0)
+        grasp_scores_merged = torch.cat(grasp_scores_merged, dim=0)
+        grasp_widths_merged = torch.cat(grasp_widths_merged, dim=0)
+        grasp_views_rot_merged = torch.cat(grasp_views_rot_merged, dim=0)
+
+        hyp_flat = seed_xyz_hyp[i].reshape(1, num_seed * K_hyp, 3)
+        gt_pts = grasp_points_merged.unsqueeze(0)
+        dists, nn_inds, _ = knn_points(hyp_flat, gt_pts, K=1)
+        dists = dists.squeeze(0).squeeze(-1).view(num_seed, K_hyp)
+        nn_inds = nn_inds.squeeze(0).squeeze(-1).view(num_seed, K_hyp)
+
+        best_k = torch.argmin(dists, dim=1)
+        best_dist = dists.gather(1, best_k.unsqueeze(-1)).squeeze(-1)
+        best_nn = nn_inds.gather(1, best_k.unsqueeze(-1)).squeeze(-1)
+
+        matched_points = grasp_points_merged.index_select(0, best_nn)
+        matched_views_rot = grasp_views_rot_merged.index_select(0, best_nn)
+        matched_view_graspness = view_graspness_merged.index_select(0, best_nn)
+        matched_top_view_index = top_view_index_merged.index_select(0, best_nn)
+        matched_grasp_rotations = grasp_rotations_merged.index_select(0, best_nn)
+        matched_grasp_depth = grasp_depth_merged.index_select(0, best_nn)
+        matched_grasp_scores = grasp_scores_merged.index_select(0, best_nn)
+        matched_grasp_widths = grasp_widths_merged.index_select(0, best_nn)
+
+        pred_top_view_ = pred_top_view.view(num_seed, 1, 1, 1).expand(-1, -1, 3, 3)
+        top_grasp_views_rot = torch.gather(matched_views_rot, 1, pred_top_view_).squeeze(1)
+
+        pid, vid = torch.where(pred_top_view.unsqueeze(-1) == matched_top_view_index)
+        top_grasp_rotations = 12 * torch.ones(num_seed, dtype=torch.int32, device=best_nn.device)
+        top_grasp_depth = 4 * torch.ones(num_seed, dtype=torch.int32, device=best_nn.device)
+        top_grasp_scores = torch.zeros(num_seed, dtype=torch.float32, device=best_nn.device)
+        top_grasp_widths = 0.1 * torch.ones(num_seed, dtype=torch.float32, device=best_nn.device)
+        top_grasp_rotations[pid] = torch.gather(matched_grasp_rotations[pid], 1, vid.view(-1, 1)).squeeze(1)
+        top_grasp_depth[pid] = torch.gather(matched_grasp_depth[pid], 1, vid.view(-1, 1)).squeeze(1)
+        top_grasp_scores[pid] = torch.gather(matched_grasp_scores[pid], 1, vid.view(-1, 1)).squeeze(1)
+        top_grasp_widths[pid] = torch.gather(matched_grasp_widths[pid], 1, vid.view(-1, 1)).squeeze(1)
+
+        valid_point_mask = best_dist < valid_dist_thresh
+        valid_view_mask = torch.zeros(num_seed, dtype=torch.bool, device=best_nn.device)
+        valid_view_mask[pid] = True
+        valid_mask = valid_point_mask & valid_view_mask
+
+        valid_points_count += torch.sum(valid_point_mask)
+        valid_views_count += torch.sum(valid_view_mask)
+
+        batch_grasp_points.append(matched_points)
+        batch_grasp_views_rot.append(top_grasp_views_rot)
+        batch_view_graspness.append(matched_view_graspness)
+        batch_grasp_rotations.append(top_grasp_rotations)
+        batch_grasp_depth.append(top_grasp_depth)
+        batch_grasp_scores.append(top_grasp_scores)
+        batch_grasp_widths.append(top_grasp_widths)
+        batch_valid_mask.append(valid_mask)
+        batch_best_k.append(best_k)
+        batch_best_dist.append(best_dist)
+
+    batch_grasp_points = torch.stack(batch_grasp_points, 0)
+    batch_grasp_views_rot = torch.stack(batch_grasp_views_rot, 0)
+    batch_view_graspness = torch.stack(batch_view_graspness, 0)
+    batch_grasp_rotations = torch.stack(batch_grasp_rotations, 0)
+    batch_grasp_depth = torch.stack(batch_grasp_depth, 0)
+    batch_grasp_scores = torch.stack(batch_grasp_scores, 0)
+    batch_grasp_widths = torch.stack(batch_grasp_widths, 0)
+    batch_valid_mask = torch.stack(batch_valid_mask, 0)
+    batch_best_k = torch.stack(batch_best_k, 0)
+    batch_best_dist = torch.stack(batch_best_dist, 0)
+
+    end_points['batch_grasp_point'] = batch_grasp_points
+    end_points['batch_grasp_rotations'] = batch_grasp_rotations
+    end_points['batch_grasp_depth'] = batch_grasp_depth
+    end_points['batch_grasp_score'] = batch_grasp_scores
+    end_points['batch_grasp_width'] = batch_grasp_widths
+    end_points['batch_grasp_view_graspness'] = batch_view_graspness
+    end_points['batch_valid_mask'] = batch_valid_mask
+    end_points['batch_best_hyp_k'] = batch_best_k
+    end_points['batch_best_hyp_dist'] = batch_best_dist
+    end_points['C: Valid Points'] = valid_points_count / batch_size
+
+    with torch.no_grad():
+        hist = []
+        for k in range(K_hyp):
+            hist.append((batch_best_k == k).float().mean())
+        hist = torch.stack(hist)
+        end_points['D: RayMix Valid Ratio'] = batch_valid_mask.float().mean()
+        end_points['D: RayMix BestK Hist'] = hist
+        end_points['D: RayMix BestDist'] = batch_best_dist.mean()
+
+    return batch_grasp_views_rot, end_points

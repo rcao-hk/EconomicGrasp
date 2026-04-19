@@ -18,8 +18,12 @@ from torch.utils.tensorboard import SummaryWriter
 from utils.arguments import cfgs
 
 # Local Libraries
-from models.economicgrasp_bip3d import economicgrasp_bip3d
+from models.economicgrasp_bip3d import economicgrasp_bip3d, economicgrasp_dpt
 from models.loss_economicgrasp_depth_c1 import get_loss_c2_1 as get_loss_economicgrasp
+
+# from models.economicgrasp_query import economicgrasp_query
+# from models.loss_economicgrasp_query import get_loss_query as get_loss_economicgrasp
+
 from dataset.graspnet_dataset import GraspNetMultiDataset, collate_fn
 
 # ----------- GLOBAL CONFIG ------------
@@ -31,7 +35,7 @@ def setup_distributed():
     """Initialize single-node multi-GPU distributed training via torchrun.
 
     Launch:
-      torchrun --nproc_per_node=NUM_GPUS train_economicgrasp_bip3d_ddp.py
+      torchrun --nproc_per_node=NUM_GPUS train_ddp.py
 
     Also supports plain python execution as a single-process fallback.
     """
@@ -222,14 +226,29 @@ class Trainer:
             persistent_workers=(cfgs.num_workers > 0),
         )
 
-        self.net = economicgrasp_bip3d(
+        # self.net = economicgrasp_bip3d(
+        #     min_depth=cfgs.min_depth,
+        #     max_depth=cfgs.max_depth,
+        #     bin_num=cfgs.bin_num,
+        #     is_training=True,
+        #     vis_dir=os.path.join('vis', 'bip3d') if self.main else None,
+        #     vis_every=1000,
+        # )
+        self.net = economicgrasp_dpt(
             min_depth=cfgs.min_depth,
             max_depth=cfgs.max_depth,
             bin_num=cfgs.bin_num,
             is_training=True,
-            vis_dir=os.path.join('vis', 'bip3d_test') if self.main else None,
-            vis_every=500,
+            vis_dir=os.path.join('vis', 'dpt_view') if self.main else None,
+            vis_every=1000,
         )
+        # self.net = economicgrasp_query(
+        #     min_depth=cfgs.min_depth,
+        #     max_depth=cfgs.max_depth,
+        #     is_training=True,
+        #     vis_dir=os.path.join('vis', 'query') if self.main else None,
+        #     vis_every=500,
+        # )
         self.net.to(self.device)
 
         if self.distributed:
@@ -452,7 +471,7 @@ class Trainer:
         ckpt_name = f'epoch_{epoch}_train_{train_loss}_val_{eval_loss}'
         torch.save(self.unwrap_model().state_dict(), os.path.join(cfgs.log_dir, ckpt_name + '.tar'))
 
-    def save_checkpoint(self, epoch):
+    def save_checkpoint(self, epoch, save_interval=False):
         if not self.main:
             return
         save_dict = {
@@ -460,7 +479,8 @@ class Trainer:
             'optimizer_state_dict': self.optimizer.state_dict(),
             'model_state_dict': self.unwrap_model().state_dict(),
         }
-        torch.save(save_dict, os.path.join(cfgs.log_dir, f'checkpoint_{epoch}.tar'))
+        if save_interval:
+            torch.save(save_dict, os.path.join(cfgs.log_dir, f'checkpoint_{epoch}.tar'))
         torch.save(save_dict, os.path.join(cfgs.log_dir, 'checkpoint.tar'))
 
     def train(self, start_epoch):
@@ -481,10 +501,10 @@ class Trainer:
                     min_loss = eval_loss
                     best_epoch = epoch
                     self.save_best_state_dict(epoch, train_loss, eval_loss)
-                elif not EPOCH_CNT % cfgs.ckpt_save_interval:
                     self.save_checkpoint(epoch)
                 self.log_string(f'best_epoch:{best_epoch}')
-            self.save_checkpoint(epoch)
+            save_interval_flag = EPOCH_CNT % cfgs.ckpt_save_interval == 0
+            self.save_checkpoint(epoch, save_interval_flag)
 
     def close(self):
         if self.log_writer is not None:
