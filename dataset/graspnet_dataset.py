@@ -649,7 +649,6 @@ class GraspNetMultiDataset(Dataset):
         gt_depth = np.array(Image.open(self.gtdepthpath[index]))                         # (H,W)
 
         graspness = np.load(self.graspnesspath[index])
-        gt_graspness = np.load(self.gtgraspnesspath[index])
 
         try:
             obj_idxs = meta['cls_indexes'].flatten().astype(np.int32)
@@ -664,7 +663,7 @@ class GraspNetMultiDataset(Dataset):
         # optionally replace with GT depth / graspness
         if self.use_gt_depth:
             depth = gt_depth
-            graspness = gt_graspness
+            graspness = np.load(self.gtgraspnesspath[index])
 
         # normalize graspness to 1D masked-sequence style
         graspness = np.asarray(graspness, dtype=np.float32)

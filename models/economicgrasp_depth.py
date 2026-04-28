@@ -120,27 +120,145 @@ def _make_coords_for_me(cloud: torch.Tensor, voxel_size: float):
 
 
 from models.dinov2_dpt import DA2
+# class DINOv2DepthDistributionNet(nn.Module):
+#     """
+#     使用 DA2 的 DPTHead 直接输出 bin logits（out_dim=bin_num），不额外加 conv。
+
+#     forward(img, return_prob=False):
+#       return_prob=False:
+#         depth_448: (B,1,448,448)  E[z] in meters
+#         depth_tok: (B,1,448/stride,448/stride) debug
+#         img_feat:  (B,Cf,Hf,Wf)  path_1 feature (通常 patch_h*14, patch_w*14 -> 448)
+#       return_prob=True:
+#         + depth_prob_448:   (B,bin_num,448,448)
+#         + depth_logits_448: (B,bin_num,448,448)
+#     """
+#     def __init__(self,
+#                  encoder="vitb",
+#                  stride=2,
+#                  min_depth=0.2,
+#                  max_depth=2.0,
+#                  bin_num=256,
+#                  freeze_backbone=True,
+#                  eps=1e-6):
+#         super().__init__()
+#         assert stride in [1, 2, 4]
+#         self.stride = int(stride)
+#         self.min_depth = float(min_depth)
+#         self.max_depth = float(max_depth)
+#         self.bin_num = int(bin_num)
+#         self.freeze_backbone_flag = bool(freeze_backbone)
+#         self.eps = float(eps)
+
+#         model_configs = {
+#             "vits": {"encoder": "vits", "features": 64,  "out_channels": [48, 96, 192, 384]},
+#             "vitb": {"encoder": "vitb", "features": 128, "out_channels": [96, 192, 384, 768]},
+#             "vitl": {"encoder": "vitl", "features": 256, "out_channels": [256, 512, 1024, 1024]},
+#             "vitg": {"encoder": "vitg", "features": 384, "out_channels": [1536, 1536, 1536, 1536]},
+#         }
+#         assert encoder in model_configs
+
+#         # 关键：out_dim=bin_num
+#         self.depthnet = DA2(**{
+#             **model_configs[encoder],
+#             "out_dim": self.bin_num
+#         })
+
+#         # 只加载 backbone（与你现有一致）
+#         ckpt = torch.load(f"checkpoints/depth_anything_v2_{encoder}.pth", map_location="cpu")
+#         self.depthnet.load_state_dict({k: v for k, v in ckpt.items() if "pretrained" in k}, strict=False)
+
+#         if self.freeze_backbone_flag:
+#             self._freeze_backbone()
+
+#         # bin centers
+#         bins = torch.linspace(self.min_depth, self.max_depth, self.bin_num)
+#         self.register_buffer("depth_bins", bins, persistent=False)
+
+#     def _freeze_backbone(self):
+#         for p in self.depthnet.pretrained.parameters():
+#             p.requires_grad_(False)
+
+#     def train(self, mode=True):
+#         super().train(mode)
+#         if mode and self.freeze_backbone_flag:
+#             self._freeze_backbone()
+#         return self
+
+#     def forward(
+#         self,
+#         img: torch.Tensor,
+#         return_prob: bool = False,
+#         return_tok_prob: bool = False,
+#     ):
+#         B, _, H, W = img.shape
+#         assert (H, W) == (448, 448)
+
+#         patch_h, patch_w = H // 14, W // 14
+#         feats = self.depthnet.pretrained.get_intermediate_layers(
+#             img,
+#             self.depthnet.intermediate_layer_idx[self.depthnet.encoder],
+#             return_class_token=True
+#         )
+
+#         # (B,Cf,?,?) and (B,D,448,448)
+#         img_feat, depth_logits_448 = self.depthnet.depth_head(feats, patch_h, patch_w)
+
+#         # logits -> prob on 448
+#         depth_prob_448 = torch.softmax(depth_logits_448, dim=1)  # (B,D,448,448)
+#         depth_prob_448 = torch.nan_to_num(depth_prob_448, nan=0.0, posinf=0.0, neginf=0.0)
+
+#         # E[z] on 448
+#         z = self.depth_bins.view(1, self.bin_num, 1, 1).to(depth_prob_448)
+#         depth_448 = (depth_prob_448 * z).sum(dim=1, keepdim=True).clamp(self.min_depth, self.max_depth)
+
+#         # token debug depth (E[z])
+#         if self.stride > 1:
+#             depth_tok = F.interpolate(depth_448, size=(H // self.stride, W // self.stride), mode="nearest")
+#         else:
+#             depth_tok = depth_448
+
+#         # align img_feat to 448 for later gather
+#         if img_feat.shape[-2:] != (H, W):
+#             img_feat = F.interpolate(img_feat, size=(H, W), mode="bilinear", align_corners=False)
+
+#         if not return_prob:
+#             return depth_448, depth_tok, img_feat
+
+#         # ---------- optional: token/patch prob for BIP3D-style loss ----------
+#         if return_tok_prob:
+#             # IMPORTANT: must match your GT builder's patch size.
+#             # If your build_depth_prob_gt uses s=2, keep stride=2 here.
+#             s = self.stride  # typically 2 -> 224x224
+#             prob_tok = F.avg_pool2d(depth_prob_448, kernel_size=s, stride=s)  # (B,D,Ht,Wt)
+#             prob_tok = torch.nan_to_num(prob_tok, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(self.eps)
+#             prob_tok = prob_tok / prob_tok.sum(dim=1, keepdim=True).clamp_min(self.eps)  # renorm sum_D=1
+
+#             # (B,1,Nfeat,D)
+#             prob_tok_flat = prob_tok.permute(0, 2, 3, 1).reshape(B, -1, self.bin_num).unsqueeze(1).contiguous()
+
+#             return depth_448, depth_tok, img_feat, depth_prob_448, depth_logits_448, prob_tok_flat
+
+#         return depth_448, depth_tok, img_feat, depth_prob_448, depth_logits_448
+    
+
 class DINOv2DepthDistributionNet(nn.Module):
     """
-    使用 DA2 的 DPTHead 直接输出 bin logits（out_dim=bin_num），不额外加 conv。
+    Depth distribution head based on Depth-Anything-V2 DINOv2 backbone.
 
-    forward(img, return_prob=False):
-      return_prob=False:
-        depth_448: (B,1,448,448)  E[z] in meters
-        depth_tok: (B,1,448/stride,448/stride) debug
-        img_feat:  (B,Cf,Hf,Wf)  path_1 feature (通常 patch_h*14, patch_w*14 -> 448)
-      return_prob=True:
-        + depth_prob_448:   (B,bin_num,448,448)
-        + depth_logits_448: (B,bin_num,448,448)
+    Added behavior versus the previous version:
+      - can optionally return raw DINO feats so another DPTHead can reuse them.
     """
-    def __init__(self,
-                 encoder="vitb",
-                 stride=2,
-                 min_depth=0.2,
-                 max_depth=2.0,
-                 bin_num=256,
-                 freeze_backbone=True,
-                 eps=1e-6):
+    def __init__(
+        self,
+        encoder: str = "vitb",
+        stride: int = 2,
+        min_depth: float = 0.2,
+        max_depth: float = 2.0,
+        bin_num: int = 256,
+        freeze_backbone: bool = True,
+        eps: float = 1e-6,
+    ):
         super().__init__()
         assert stride in [1, 2, 4]
         self.stride = int(stride)
@@ -158,20 +276,14 @@ class DINOv2DepthDistributionNet(nn.Module):
         }
         assert encoder in model_configs
 
-        # 关键：out_dim=bin_num
-        self.depthnet = DA2(**{
-            **model_configs[encoder],
-            "out_dim": self.bin_num
-        })
+        self.depthnet = DA2(**{**model_configs[encoder], "out_dim": self.bin_num})
 
-        # 只加载 backbone（与你现有一致）
         ckpt = torch.load(f"checkpoints/depth_anything_v2_{encoder}.pth", map_location="cpu")
         self.depthnet.load_state_dict({k: v for k, v in ckpt.items() if "pretrained" in k}, strict=False)
 
         if self.freeze_backbone_flag:
             self._freeze_backbone()
 
-        # bin centers
         bins = torch.linspace(self.min_depth, self.max_depth, self.bin_num)
         self.register_buffer("depth_bins", bins, persistent=False)
 
@@ -190,6 +302,7 @@ class DINOv2DepthDistributionNet(nn.Module):
         img: torch.Tensor,
         return_prob: bool = False,
         return_tok_prob: bool = False,
+        return_feats: bool = False,
     ):
         B, _, H, W = img.shape
         assert (H, W) == (448, 448)
@@ -198,49 +311,45 @@ class DINOv2DepthDistributionNet(nn.Module):
         feats = self.depthnet.pretrained.get_intermediate_layers(
             img,
             self.depthnet.intermediate_layer_idx[self.depthnet.encoder],
-            return_class_token=True
+            return_class_token=True,
         )
 
-        # (B,Cf,?,?) and (B,D,448,448)
         img_feat, depth_logits_448 = self.depthnet.depth_head(feats, patch_h, patch_w)
 
-        # logits -> prob on 448
-        depth_prob_448 = torch.softmax(depth_logits_448, dim=1)  # (B,D,448,448)
+        depth_prob_448 = torch.softmax(depth_logits_448, dim=1)
         depth_prob_448 = torch.nan_to_num(depth_prob_448, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # E[z] on 448
         z = self.depth_bins.view(1, self.bin_num, 1, 1).to(depth_prob_448)
         depth_448 = (depth_prob_448 * z).sum(dim=1, keepdim=True).clamp(self.min_depth, self.max_depth)
 
-        # token debug depth (E[z])
         if self.stride > 1:
             depth_tok = F.interpolate(depth_448, size=(H // self.stride, W // self.stride), mode="nearest")
         else:
             depth_tok = depth_448
 
-        # align img_feat to 448 for later gather
         if img_feat.shape[-2:] != (H, W):
             img_feat = F.interpolate(img_feat, size=(H, W), mode="bilinear", align_corners=False)
 
         if not return_prob:
+            if return_feats:
+                return depth_448, depth_tok, img_feat, feats
             return depth_448, depth_tok, img_feat
 
-        # ---------- optional: token/patch prob for BIP3D-style loss ----------
+        outputs = [depth_448, depth_tok, img_feat, depth_prob_448, depth_logits_448]
+
         if return_tok_prob:
-            # IMPORTANT: must match your GT builder's patch size.
-            # If your build_depth_prob_gt uses s=2, keep stride=2 here.
-            s = self.stride  # typically 2 -> 224x224
-            prob_tok = F.avg_pool2d(depth_prob_448, kernel_size=s, stride=s)  # (B,D,Ht,Wt)
+            s = self.stride
+            prob_tok = F.avg_pool2d(depth_prob_448, kernel_size=s, stride=s)
             prob_tok = torch.nan_to_num(prob_tok, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(self.eps)
-            prob_tok = prob_tok / prob_tok.sum(dim=1, keepdim=True).clamp_min(self.eps)  # renorm sum_D=1
-
-            # (B,1,Nfeat,D)
+            prob_tok = prob_tok / prob_tok.sum(dim=1, keepdim=True).clamp_min(self.eps)
             prob_tok_flat = prob_tok.permute(0, 2, 3, 1).reshape(B, -1, self.bin_num).unsqueeze(1).contiguous()
+            outputs.append(prob_tok_flat)
 
-            return depth_448, depth_tok, img_feat, depth_prob_448, depth_logits_448, prob_tok_flat
+        if return_feats:
+            outputs.append(feats)
 
-        return depth_448, depth_tok, img_feat, depth_prob_448, depth_logits_448
-    
+        return tuple(outputs)
+
 # -------------------------
 # RGB -> depth distribution (stride=2 => 224x224 tokens)
 # -------------------------

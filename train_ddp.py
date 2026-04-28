@@ -18,7 +18,7 @@ from torch.utils.tensorboard import SummaryWriter
 from utils.arguments import cfgs
 
 # Local Libraries
-from models.economicgrasp_bip3d import economicgrasp_bip3d, economicgrasp_dpt
+from models.economicgrasp_bip3d import economicgrasp_bip3d, economicgrasp_dpt, economicgrasp_dpt_direct
 from models.loss_economicgrasp_depth_c1 import get_loss_c2_1 as get_loss_economicgrasp
 
 # from models.economicgrasp_query import economicgrasp_query
@@ -239,9 +239,18 @@ class Trainer:
             max_depth=cfgs.max_depth,
             bin_num=cfgs.bin_num,
             is_training=True,
-            vis_dir=os.path.join('vis', 'dpt_view') if self.main else None,
+            vis_dir=os.path.join('vis', 'dpt_view_attn_new') if self.main else None,
             vis_every=1000,
         )
+        # self.net = economicgrasp_dpt_direct(
+        #     min_depth=cfgs.min_depth,
+        #     max_depth=cfgs.max_depth,
+        #     bin_num=cfgs.bin_num,
+        #     is_training=True,
+        #     vis_dir=os.path.join('vis', 'dpt_view_attn_direct') if self.main else None,
+        #     vis_every=1000,
+        # )
+        
         # self.net = economicgrasp_query(
         #     min_depth=cfgs.min_depth,
         #     max_depth=cfgs.max_depth,
