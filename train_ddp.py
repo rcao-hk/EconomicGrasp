@@ -239,7 +239,7 @@ class Trainer:
             max_depth=cfgs.max_depth,
             bin_num=cfgs.bin_num,
             is_training=True,
-            vis_dir=os.path.join('vis', 'dpt_view_attn_new') if self.main else None,
+            vis_dir=os.path.join('vis', 'dpt_enhancer') if self.main else None,
             vis_every=1000,
         )
         # self.net = economicgrasp_dpt_direct(

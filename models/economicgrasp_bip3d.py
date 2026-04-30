@@ -5117,6 +5117,7 @@ def get_model(cfgs):
     )
 
 from models.dinov2_dpt import DPTHead
+from models.grasp_spatial_enhancer import GraspSpatialEnhancer
 class economicgrasp_dpt(nn.Module):
     """
     economicgrasp_dpt:
@@ -5187,17 +5188,22 @@ class economicgrasp_dpt(nn.Module):
             use_clstoken=True,
         )
 
-        # self.enhancer = SingleScaleDepthFusionSpatialEnhancer(
-        #     embed_dims=tok_feat_dim,
-        #     feature_3d_dim=32,
-        #     ff_dim=256,
-        #     min_depth=self.min_depth,
-        #     max_depth=self.max_depth,
-        #     num_depth=self.bin_num,
-        #     with_feature_3d=False,
-        # )
-
-        # self.view = ViewNet(self.num_view, seed_feature_dim=self.seed_feature_dim, is_training=self.is_training)
+        self.spatial_enhancer = GraspSpatialEnhancer(
+            embed_dims=tok_feat_dim,
+            feature_3d_dim=32,
+            min_depth=self.min_depth,
+            max_depth=self.max_depth,
+            num_depth=self.bin_num,
+            detach_depth_prob=True,      # 第一轮建议 True，避免破坏 depth_net
+            use_prob_embedding=False,    # 第一轮建议 False，先用 depth moments + IPE
+            use_post_norm=False,         # 第一轮建议 False，保持 path_1 分布
+            vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'spatial_enhancer'),
+            vis_every=self.vis_every,
+            vis_rank0_only=True,
+            save_vis_npz=True,
+            )
+        
+        self.view = ViewNet(self.num_view, seed_feature_dim=self.seed_feature_dim, is_training=self.is_training)
         # self.view = GeometryAwareDenseFieldViewNet(
         #     num_view=self.num_view,
         #     seed_feature_dim=self.seed_feature_dim,
@@ -5209,19 +5215,19 @@ class economicgrasp_dpt(nn.Module):
         #     vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'geom_viewnet'),
         #     vis_every=self.vis_every,
         # )
-        self.view = GeometryAwareDenseFieldAttnViewNet(
-            num_view=self.num_view,
-            seed_feature_dim=self.seed_feature_dim,
-            hidden_dim=self.seed_feature_dim,
-            min_depth=self.min_depth,
-            max_depth=self.max_depth,
-            bin_num=self.bin_num,
-            view_dirs=generate_grasp_views(self.num_view),
-            vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'geom_attn_viewnet'),
-            vis_every=self.vis_every,
-            num_heads=4,
-            attn_dropout=0.01
-        )
+        # self.view = GeometryAwareDenseFieldAttnViewNet(
+        #     num_view=self.num_view,
+        #     seed_feature_dim=self.seed_feature_dim,
+        #     hidden_dim=self.seed_feature_dim,
+        #     min_depth=self.min_depth,
+        #     max_depth=self.max_depth,
+        #     bin_num=self.bin_num,
+        #     view_dirs=generate_grasp_views(self.num_view),
+        #     vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'geom_attn_viewnet'),
+        #     vis_every=self.vis_every,
+        #     num_heads=4,
+        #     attn_dropout=0.01
+        # )
         self.cy_group = Cylinder_Grouping_Global_Interaction(
             nsample=16,
             cylinder_radius=cylinder_radius,
@@ -5412,20 +5418,27 @@ class economicgrasp_dpt(nn.Module):
         patch_h, patch_w = H // 14, W // 14
         proposal_path1, proposal_logits_448 = self.proposal_head(feats, patch_h, patch_w)
 
+        # ------------------------------------------------------------------
+        # Grasp Spatial Enhancer
+        # ------------------------------------------------------------------
+        proposal_path1_enh, spatial_aux = self.spatial_enhancer(
+            feat_2d=proposal_path1,       # (B,C,Hf,Wf)
+            depth_prob=depth_prob_448,    # (B,D,448,448)
+            K=K,                          # K must match resized/cropped 448x448 image
+            image_hw=(H, W),              # usually (448,448)
+            return_maps=False,
+            img=end_points.get("img", img) if isinstance(end_points, dict) else img,
+            vis_prefix=None,
+        )
+
+        for k, v in spatial_aux.items():
+            end_points[k] = v
+
+        feat_grid = F.interpolate(proposal_path1_enh, size=(H, W), mode='bilinear', align_corners=False)
+        # feat_grid = F.interpolate(proposal_path1, size=(H, W), mode='bilinear', align_corners=False)
+
         objectness_logits_448 = proposal_logits_448[:, :2, :, :]
         graspness_logits_448 = proposal_logits_448[:, 2:3, :, :]
-
-        # depth_prob_for_enh = depth_prob_448.detach()
-        # proposal_path1_enh = self.enhancer(
-        #     feat_2d=proposal_path1,
-        #     depth_prob=depth_prob_for_enh,   # (B,D,448,448), enhancer 内部会 resize
-        #     K=K,
-        #     feature_3d=None,
-        #     stride=self.stride,
-        # )
-        # feat_grid = F.interpolate(proposal_path1_enh, size=(H, W), mode='bilinear', align_corners=False)
-
-        feat_grid = F.interpolate(proposal_path1, size=(H, W), mode='bilinear', align_corners=False)
 
         end_points['img_feat_dpt'] = feat_grid
         end_points['depth_map_pred'] = depth_448
@@ -5550,15 +5563,15 @@ class economicgrasp_dpt(nn.Module):
         # ------------------------------------------------------------------
         # 10) view + labels + grouping + head
         # ------------------------------------------------------------------
-        # end_points, res_feat = self.view(seed_features_graspable, end_points)
-        end_points, res_feat = self.view(
-            seed_features=seed_features_graspable,   # (B,C,M)
-            token_sel_idx=token_sel_idx,             # (B,M)
-            K=K,
-            depth_map=depth_448,                     # (B,1,448,448)
-            depth_prob=depth_prob_448,               # (B,D,448,448)
-            end_points=end_points,
-        )
+        end_points, res_feat = self.view(seed_features_graspable, end_points)
+        # end_points, res_feat = self.view(
+        #     seed_features=seed_features_graspable,   # (B,C,M)
+        #     token_sel_idx=token_sel_idx,             # (B,M)
+        #     K=K,
+        #     depth_map=depth_448,                     # (B,1,448,448)
+        #     depth_prob=depth_prob_448,               # (B,D,448,448)
+        #     end_points=end_points,
+        # )
         seed_features_graspable = seed_features_graspable + res_feat
 
         if self.is_training:
