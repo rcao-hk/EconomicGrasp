@@ -5650,7 +5650,7 @@ class MetricRegionCropGrouping(nn.Module):
                 valid = (grid_u >= 0.0) & (grid_u <= float(W - 1)) & (grid_v >= 0.0) & (grid_v <= float(H - 1))
 
                 roi_depth = self._sample_one_chw(depth_map[b], grid_u, grid_v, src_hw=(H, W))[0]
-                z_ref = seed_xyz[b, m, 2].detach() if seed_xyz is not None else roi_depth[P // 2, P // 2].detach()
+                z_ref = seed_xyz[b, m, 2].detach()
                 depth_rel = torch.tanh((roi_depth - z_ref) / max(self.depth_norm_scale, 1e-6))
                 roi_uncert = self._sample_one_chw(uncert_map[b], grid_u, grid_v, src_hw=(H, W))[0]
                 roi_obj = self._sample_one_chw(obj_prob[b], grid_u, grid_v, src_hw=(H, W))[0]
