@@ -5116,6 +5116,843 @@ def get_model(cfgs):
         vis_every=500,
     )
 
+
+
+
+class MetricRegionCropGrouping(nn.Module):
+    """
+    E3GNet-style depth-adaptive local region crop for economicgrasp_dpt.
+
+    Changes in this version:
+      1) Removed all chunk-based computation. The whole B x M seed set is processed once.
+      2) Added use_view_conditioned_pool flag:
+           - False: valid-aware max pooling over ROI patch features.
+           - True:  seed+view conditioned attention pooling over ROI patch features.
+      3) Concatenated valid mask into patch_encoder input.
+      4) Removed group_delta/residual_fusion. Final grouped feature is a simple weighted sum:
+           grouped = norm(seed_scale * seed_ctx + roi_scale * pooled + view_scale * view_ctx)
+      5) Added debug scalars in end_points and optional rank-0 print logs.
+      6) Visualization panel now includes pool attention map when view-conditioned pooling is enabled.
+
+    Input:
+      seed_features:      (B,C,M)
+      token_sel_idx:      (B,M), flattened index on source image/depth map
+      seed_xyz:           (B,M,3), used for seed depth / radius scale
+      top_view_rot:       (B,M,3,3), selected/GT view rotation used as conditioning
+      feat_map:           (B,C,Hf,Wf), dense DPT/DINO feature map
+      depth_map:          (B,1,H,W)
+      depth_prob:         (B,D,H,W), optional, used only for uncertainty visualization/debug
+      objectness_logits:  (B,2,H,W), optional, used only for visualization/debug
+      graspness_map:      (B,1,H,W), optional, used only for visualization/debug
+      K:                  (B,3,3), resized/cropped image intrinsics
+
+    Output:
+      grouped feature:    (B,256,M), compatible with Grasp_Head_Local_Interaction.
+    """
+
+    def __init__(
+        self,
+        seed_feature_dim: int = 128,
+        feat_dim: int = 128,
+        out_dim: int = 256,
+        hidden_dim: int = 128,
+        patch_size: int = 12,
+        metric_radius: float = 0.08,
+        radius_px_min: float = 8.0,
+        radius_px_max: float = 64.0,
+        train_scale_min: float = 0.80,
+        train_scale_max: float = 1.25,
+        min_depth: float = 0.2,
+        max_depth: float = 1.0,
+        depth_norm_scale: float = 0.08,
+        detach_depth: bool = True,
+        detach_aux_maps: bool = True,
+        # pooling / fusion
+        use_view_conditioned_pool: bool = False,
+        seed_scale_init: float = 1.0,
+        roi_scale_init: float = 1.0,
+        view_scale_init: float = 1.0,
+        use_output_norm: bool = True,
+        # visualization / debug
+        vis_dir: Optional[str] = None,
+        vis_every: int = 500,
+        vis_num_seeds: int = 4,
+        vis_seed_mode: str = "first",  # first | large_radius | high_uncert | random
+        vis_dpi: int = 150,
+        save_npz: bool = True,
+        debug_print_every: int = 0,
+        debug_rank0_only: bool = True,
+    ):
+        super().__init__()
+        self.seed_feature_dim = int(seed_feature_dim)
+        self.feat_dim = int(feat_dim)
+        self.out_dim = int(out_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.patch_size = int(patch_size)
+        self.metric_radius = float(metric_radius)
+        self.radius_px_min = float(radius_px_min)
+        self.radius_px_max = float(radius_px_max)
+        self.train_scale_min = float(train_scale_min)
+        self.train_scale_max = float(train_scale_max)
+        self.min_depth = float(min_depth)
+        self.max_depth = float(max_depth)
+        self.depth_norm_scale = float(depth_norm_scale)
+        self.detach_depth = bool(detach_depth)
+        self.detach_aux_maps = bool(detach_aux_maps)
+        self.use_view_conditioned_pool = bool(use_view_conditioned_pool)
+        self.use_output_norm = bool(use_output_norm)
+
+        self.vis_dir = vis_dir
+        self.vis_every = int(vis_every)
+        self.vis_num_seeds = int(vis_num_seeds)
+        self.vis_seed_mode = str(vis_seed_mode)
+        self.vis_dpi = int(vis_dpi)
+        self.save_npz = bool(save_npz)
+        self.debug_print_every = int(debug_print_every)
+        self.debug_rank0_only = bool(debug_rank0_only)
+        if self.vis_dir is not None:
+            os.makedirs(self.vis_dir, exist_ok=True)
+
+        P = self.patch_size
+        lin = torch.linspace(-1.0, 1.0, P, dtype=torch.float32)
+        yy, xx = torch.meshgrid(lin, lin, indexing="ij")
+        base_xy = torch.stack([xx, yy], dim=0)  # (2,P,P), x/u first, y/v second
+        self.register_buffer("base_xy", base_xy, persistent=False)
+
+        # aux channels used by the train path:
+        #   local x/y (2), depth residual (1), valid mask (1)
+        aux_dim = 4
+        in_dim = self.feat_dim + aux_dim
+
+        self.patch_encoder = nn.Sequential(
+            nn.Conv2d(in_dim, hidden_dim, kernel_size=3, padding=1, bias=False),
+            nn.GroupNorm(8, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_dim, out_dim, kernel_size=3, padding=1, bias=False),
+            nn.GroupNorm(8, out_dim),
+            nn.ReLU(inplace=True),
+        )
+
+        self.seed_proj = nn.Sequential(
+            nn.Linear(seed_feature_dim, out_dim),
+            nn.ReLU(inplace=True),
+        )
+        self.view_mlp = nn.Sequential(
+            nn.Linear(9, out_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(out_dim, out_dim),
+            nn.ReLU(inplace=True),
+        )
+
+        # Simple fusion, no group_delta MLP.
+        self.seed_scale = nn.Parameter(torch.tensor(float(seed_scale_init), dtype=torch.float32))
+        self.roi_scale = nn.Parameter(torch.tensor(float(roi_scale_init), dtype=torch.float32))
+        self.view_scale = nn.Parameter(torch.tensor(float(view_scale_init), dtype=torch.float32))
+        self.output_norm = nn.LayerNorm(out_dim) if self.use_output_norm else nn.Identity()
+
+        # Optional view-conditioned pooling.
+        self.pool_q = nn.Sequential(
+            nn.Linear(out_dim * 2, out_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(out_dim, out_dim),
+        )
+        self.pool_k = nn.Linear(out_dim, out_dim)
+        self.pool_v = nn.Linear(out_dim, out_dim)
+        self.pool_norm = nn.LayerNorm(out_dim)
+        self._iter = 0
+
+    # ------------------------------------------------------------------
+    # geometry / sampling helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _idx_to_uv(idx_bm: torch.Tensor, H: int, W: int) -> torch.Tensor:
+        u = (idx_bm % W).float()
+        v = (idx_bm // W).float()
+        return torch.stack([u, v], dim=-1)  # (B,M,2)
+
+    @staticmethod
+    def _gather_depth(depth_b1hw: torch.Tensor, idx_bm: torch.Tensor) -> torch.Tensor:
+        B, _, H, W = depth_b1hw.shape
+        flat = depth_b1hw[:, 0].reshape(B, H * W)
+        return torch.gather(flat, 1, idx_bm).unsqueeze(-1)  # (B,M,1)
+
+    @staticmethod
+    def _sample_bmpp(
+        map_bchw: torch.Tensor,
+        grid_u: torch.Tensor,
+        grid_v: torch.Tensor,
+        src_hw: Tuple[int, int],
+    ) -> torch.Tensor:
+        """
+        map_bchw: (B,C,Hm,Wm)
+        grid_u/v: (B,M,P,P), coordinates in src_hw image coordinate system.
+        return:   (B,C,M,P,P)
+        """
+        B, C, Hm, Wm = map_bchw.shape
+        Hsrc, Wsrc = src_hw
+        M, P = grid_u.shape[1], grid_u.shape[2]
+
+        if Wsrc > 1:
+            u_m = grid_u * (float(Wm - 1) / float(Wsrc - 1))
+        else:
+            u_m = grid_u
+        if Hsrc > 1:
+            v_m = grid_v * (float(Hm - 1) / float(Hsrc - 1))
+        else:
+            v_m = grid_v
+
+        gx = 2.0 * u_m / float(max(Wm - 1, 1)) - 1.0 if Wm > 1 else torch.zeros_like(u_m)
+        gy = 2.0 * v_m / float(max(Hm - 1, 1)) - 1.0 if Hm > 1 else torch.zeros_like(v_m)
+
+        grid = torch.stack([gx, gy], dim=-1).view(B, M * P, P, 2)
+        sampled = F.grid_sample(
+            map_bchw,
+            grid,
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=True,
+        )  # (B,C,M*P,P)
+        return sampled.view(B, C, M, P, P).contiguous()
+
+    @staticmethod
+    def _sample_one_chw(
+        map_chw: torch.Tensor,
+        grid_u_pp: torch.Tensor,
+        grid_v_pp: torch.Tensor,
+        src_hw: Tuple[int, int],
+    ) -> torch.Tensor:
+        """Sample one CHW map on one P x P grid. Returns C x P x P."""
+        if map_chw.dim() == 2:
+            map_chw = map_chw.unsqueeze(0)
+        map_bchw = map_chw.unsqueeze(0)
+        grid_u = grid_u_pp.view(1, 1, *grid_u_pp.shape)
+        grid_v = grid_v_pp.view(1, 1, *grid_v_pp.shape)
+        return MetricRegionCropGrouping._sample_bmpp(map_bchw, grid_u, grid_v, src_hw=src_hw)[0, :, 0]
+
+    @staticmethod
+    def _depth_uncertainty(depth_prob_bdhw: torch.Tensor) -> torch.Tensor:
+        D = max(int(depth_prob_bdhw.shape[1]), 2)
+        prob = depth_prob_bdhw.clamp_min(1e-8)
+        entropy = -(prob * prob.log()).sum(dim=1, keepdim=True) / math.log(D)
+        return entropy.clamp(0.0, 1.0)
+
+    @staticmethod
+    def _masked_mean(x: torch.Tensor, mask: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+        x = x.float()
+        mask_f = mask.float()
+        return (x * mask_f).sum() / (mask_f.sum() + eps)
+
+    def _make_objectness_prob(self, objectness_logits: Optional[torch.Tensor], depth_map: torch.Tensor) -> torch.Tensor:
+        if objectness_logits is None:
+            return torch.zeros_like(depth_map)
+        return F.softmax(objectness_logits, dim=1)[:, 1:2]
+
+    # ------------------------------------------------------------------
+    # pooling
+    # ------------------------------------------------------------------
+    def _valid_aware_max_pool(
+        self,
+        patch_feat: torch.Tensor,    # (B*M,C,P,P)
+        valid_flat: torch.Tensor,    # (B*M,1,P,P), bool
+        B: int,
+        M: int,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor]:
+        patch_masked = patch_feat.masked_fill(~valid_flat, -1e4)
+        pooled = patch_masked.flatten(2).max(dim=-1).values  # (BM,C)
+        valid_tok = valid_flat.flatten(2).squeeze(1).bool()  # (BM,S)
+        empty = ~valid_tok.any(dim=-1)                       # (BM,)
+        pooled = torch.where(empty.unsqueeze(-1), torch.zeros_like(pooled), pooled)
+
+        # For logging only: max pooling is equivalent to hard one-hot selection per channel,
+        # so we report approximate token entropy as zero and max probability as one.
+        entropy = torch.zeros((), device=patch_feat.device)
+        maxprob = torch.ones((), device=patch_feat.device)
+        return pooled.view(B, M, self.out_dim), None, entropy, maxprob
+
+    def _view_conditioned_pool(
+        self,
+        patch_feat: torch.Tensor,      # (B*M,C,P,P)
+        valid_flat: torch.Tensor,      # (B*M,1,P,P), bool
+        seed_ctx: torch.Tensor,        # (B,M,C)
+        view_ctx: torch.Tensor,        # (B,M,C)
+        local_xy_b: torch.Tensor,      # (B,2,M,P,P)
+        depth_residual: torch.Tensor,  # (B,1,M,P,P)
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        B, M, C = seed_ctx.shape
+        _, _, P, _ = patch_feat.shape
+        S = P * P
+        BM = B * M
+
+        tokens = patch_feat.flatten(2).transpose(1, 2).contiguous()  # (BM,S,C)
+        q_in = torch.cat([seed_ctx, view_ctx], dim=-1).reshape(BM, 2 * C)
+        q = self.pool_q(q_in).unsqueeze(1)                           # (BM,1,C)
+        k = self.pool_k(tokens)                                       # (BM,S,C)
+        v = self.pool_v(tokens)                                       # (BM,S,C)
+
+        logits = (q * k).sum(dim=-1) / math.sqrt(float(max(C, 1)))    # (BM,S)
+
+        valid_tok = valid_flat.flatten(2).squeeze(1).bool()           # (BM,S)
+        logits = logits.masked_fill(~valid_tok, -1e4)
+
+        attn = F.softmax(logits, dim=-1)
+        attn = attn * valid_tok.float()
+        attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-6)
+
+        pooled = (attn.unsqueeze(-1) * v).sum(dim=1)                  # (BM,C)
+        pooled = self.pool_norm(pooled)
+
+        empty = ~valid_tok.any(dim=-1)
+        pooled = torch.where(empty.unsqueeze(-1), torch.zeros_like(pooled), pooled)
+        attn = torch.where(empty.unsqueeze(-1), torch.zeros_like(attn), attn)
+
+        p = attn.clamp_min(1e-8)
+        entropy = (-(p * p.log()).sum(dim=-1) / math.log(max(S, 2))).mean()
+        maxprob = attn.max(dim=-1).values.mean()
+
+        return pooled.view(B, M, C), attn.view(B, M, P, P), entropy, maxprob
+
+    # ------------------------------------------------------------------
+    # visualization helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _to_numpy(x):
+        if torch.is_tensor(x):
+            return x.detach().float().cpu().numpy()
+        return np.asarray(x)
+
+    @staticmethod
+    def _normalize_img_chw(img_chw: torch.Tensor) -> np.ndarray:
+        x = img_chw.detach().float().cpu()
+        if x.dim() == 2:
+            x = x.unsqueeze(0)
+        if x.size(0) == 1:
+            arr = x[0].numpy()
+            finite = np.isfinite(arr)
+            if finite.sum() == 0:
+                return np.zeros((arr.shape[0], arr.shape[1], 3), dtype=np.float32)
+            lo, hi = np.nanpercentile(arr[finite], [1, 99])
+            arr = np.clip((arr - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
+            return np.repeat(arr[..., None], 3, axis=-1)
+        x = x[:3]
+        x = x - x.amin(dim=(1, 2), keepdim=True)
+        x = x / (x.amax(dim=(1, 2), keepdim=True) + 1e-6)
+        return x.permute(1, 2, 0).numpy()
+
+    def _background_np(self, end_points: Optional[dict], depth_map: torch.Tensor, b: int) -> Tuple[np.ndarray, str]:
+        if end_points is not None and "img" in end_points and torch.is_tensor(end_points["img"]):
+            img = end_points["img"]
+            if img.dim() == 4 and img.size(0) > b:
+                return self._normalize_img_chw(img[b]), "rgb"
+        return self._normalize_img_chw(depth_map[b, 0]), "depth"
+
+    def _save_seed_radius_overlay(
+        self,
+        bg: np.ndarray,
+        uv_bm2: torch.Tensor,
+        radius_px_bm: torch.Tensor,
+        out_path: str,
+        H: int,
+        W: int,
+        selected: Optional[List[int]] = None,
+    ):
+        uv = self._to_numpy(uv_bm2)
+        r = self._to_numpy(radius_px_bm)
+        finite = np.isfinite(r) & np.isfinite(uv).all(axis=-1)
+        if finite.sum() == 0:
+            return
+        plt.figure(figsize=(7, 7))
+        plt.imshow(bg)
+        sc = plt.scatter(uv[finite, 0], uv[finite, 1], c=r[finite], s=8, cmap="viridis")
+        plt.colorbar(sc, fraction=0.046, pad=0.04, label="crop radius (px)")
+        if selected is not None:
+            for m in selected:
+                if 0 <= m < uv.shape[0]:
+                    plt.scatter([uv[m, 0]], [uv[m, 1]], s=90, marker="*", c="yellow", edgecolors="black", linewidths=0.6)
+        plt.xlim(0, W - 1)
+        plt.ylim(H - 1, 0)
+        plt.axis("off")
+        plt.tight_layout(pad=0.1)
+        plt.savefig(out_path, dpi=self.vis_dpi)
+        plt.close()
+
+    def _save_crop_overlay(
+        self,
+        bg: np.ndarray,
+        seed_uv: np.ndarray,
+        grid_u: np.ndarray,
+        grid_v: np.ndarray,
+        valid: np.ndarray,
+        out_path: str,
+        title: str,
+    ):
+        plt.figure(figsize=(7, 7))
+        plt.imshow(bg)
+        boundary_u = np.concatenate([grid_u[0, :], grid_u[:, -1], grid_u[-1, ::-1], grid_u[::-1, 0]])
+        boundary_v = np.concatenate([grid_v[0, :], grid_v[:, -1], grid_v[-1, ::-1], grid_v[::-1, 0]])
+        plt.plot(boundary_u, boundary_v, color="yellow", linewidth=1.2)
+        step = max(grid_u.shape[0] // 6, 1)
+        gu = grid_u[::step, ::step].reshape(-1)
+        gv = grid_v[::step, ::step].reshape(-1)
+        vv = valid[::step, ::step].reshape(-1).astype(np.float32)
+        plt.scatter(gu, gv, c=vv, s=18, cmap="RdYlGn", vmin=0.0, vmax=1.0, edgecolors="black", linewidths=0.25)
+        plt.scatter([seed_uv[0]], [seed_uv[1]], s=100, marker="*", c="cyan", edgecolors="black", linewidths=0.7)
+        plt.title(title)
+        plt.axis("off")
+        plt.tight_layout(pad=0.1)
+        plt.savefig(out_path, dpi=self.vis_dpi)
+        plt.close()
+
+    def _save_roi_panel(
+        self,
+        roi_rgb: np.ndarray,
+        depth_rel: np.ndarray,
+        uncert: np.ndarray,
+        obj: np.ndarray,
+        grasp: np.ndarray,
+        valid: np.ndarray,
+        feat_norm: np.ndarray,
+        pool_attn: Optional[np.ndarray],
+        out_path: str,
+        title: str,
+    ):
+        fig, axes = plt.subplots(2, 4, figsize=(12, 6))
+        ax = axes.reshape(-1)
+        ax[0].imshow(roi_rgb)
+        ax[0].set_title("RGB crop")
+
+        im1 = ax[1].imshow(depth_rel, vmin=-1.0, vmax=1.0, cmap="coolwarm")
+        ax[1].set_title("tanh((D-z)/scale)")
+        fig.colorbar(im1, ax=ax[1], fraction=0.046, pad=0.04)
+
+        im2 = ax[2].imshow(uncert, vmin=0.0, vmax=1.0, cmap="magma")
+        ax[2].set_title("depth uncertainty")
+        fig.colorbar(im2, ax=ax[2], fraction=0.046, pad=0.04)
+
+        im3 = ax[3].imshow(obj, vmin=0.0, vmax=1.0, cmap="viridis")
+        ax[3].set_title("objectness prob")
+        fig.colorbar(im3, ax=ax[3], fraction=0.046, pad=0.04)
+
+        im4 = ax[4].imshow(grasp, vmin=0.0, vmax=1.0, cmap="viridis")
+        ax[4].set_title("graspness")
+        fig.colorbar(im4, ax=ax[4], fraction=0.046, pad=0.04)
+
+        im5 = ax[5].imshow(valid.astype(np.float32), vmin=0.0, vmax=1.0, cmap="gray")
+        ax[5].set_title("valid mask")
+        fig.colorbar(im5, ax=ax[5], fraction=0.046, pad=0.04)
+
+        finite = np.isfinite(feat_norm)
+        if finite.sum() > 0:
+            vmin = float(np.nanpercentile(feat_norm[finite], 1))
+            vmax = float(np.nanpercentile(feat_norm[finite], 99))
+        else:
+            vmin, vmax = 0.0, 1.0
+        if vmax <= vmin:
+            vmax = vmin + 1e-6
+        im6 = ax[6].imshow(feat_norm, vmin=vmin, vmax=vmax, cmap="plasma")
+        ax[6].set_title("DPT feat norm")
+        fig.colorbar(im6, ax=ax[6], fraction=0.046, pad=0.04)
+
+        if pool_attn is not None:
+            attn = pool_attn.astype(np.float32)
+            im7 = ax[7].imshow(attn, vmin=0.0, vmax=max(float(np.nanmax(attn)), 1e-6), cmap="inferno")
+            ax[7].set_title("view-pool attn")
+            fig.colorbar(im7, ax=ax[7], fraction=0.046, pad=0.04)
+        else:
+            ax[7].axis("off")
+            ax[7].set_title("max pool")
+
+        for a in ax[:7]:
+            a.set_xticks([])
+            a.set_yticks([])
+        if pool_attn is not None:
+            ax[7].set_xticks([])
+            ax[7].set_yticks([])
+        fig.suptitle(title)
+        plt.tight_layout()
+        plt.savefig(out_path, dpi=self.vis_dpi)
+        plt.close()
+
+    def _choose_vis_seed_indices(
+        self,
+        token_sel_idx_bm: torch.Tensor,
+        radius_px_bm: torch.Tensor,
+        uncert_map: torch.Tensor,
+        b: int,
+    ) -> List[int]:
+        M = token_sel_idx_bm.shape[0]
+        device = token_sel_idx_bm.device
+        if self.vis_seed_mode == "random":
+            order = torch.randperm(M, device=device)
+        elif self.vis_seed_mode == "large_radius":
+            order = torch.argsort(radius_px_bm.detach(), descending=True)
+        elif self.vis_seed_mode == "high_uncert":
+            flat_uncert = uncert_map[b, 0].reshape(-1)
+            score = torch.gather(flat_uncert, 0, token_sel_idx_bm.long()).detach()
+            order = torch.argsort(score, descending=True)
+        else:
+            order = torch.arange(M, device=device)
+        return order[:max(self.vis_num_seeds, 0)].detach().cpu().tolist()
+
+    @torch.no_grad()
+    def _maybe_visualize(
+        self,
+        end_points: Optional[dict],
+        token_sel_idx: torch.Tensor,       # (B,M)
+        seed_xyz: Optional[torch.Tensor],  # (B,M,3)
+        radius_px_vis: torch.Tensor,       # (B,M)
+        feat_map: torch.Tensor,
+        depth_map: torch.Tensor,
+        uncert_map: torch.Tensor,
+        obj_prob: torch.Tensor,
+        graspness_map: torch.Tensor,
+        pool_attn_map: Optional[torch.Tensor],  # (B,M,P,P) or None
+    ):
+        if self.vis_dir is None or self.vis_every <= 0 or (self._iter % self.vis_every) != 0:
+            return
+        try:
+            B, _, H, W = depth_map.shape
+            b = 0
+            bg, bg_name = self._background_np(end_points, depth_map, b)
+            uv = self._idx_to_uv(token_sel_idx, H, W)
+            seed_ids = self._choose_vis_seed_indices(
+                token_sel_idx_bm=token_sel_idx[b],
+                radius_px_bm=radius_px_vis[b],
+                uncert_map=uncert_map,
+                b=b,
+            )
+
+            prefix = f"lrc_it{self._iter:06d}_b{b}"
+            self._save_seed_radius_overlay(
+                bg=bg,
+                uv_bm2=uv[b],
+                radius_px_bm=radius_px_vis[b],
+                out_path=os.path.join(self.vis_dir, f"{prefix}_seed_radius_overlay.png"),
+                H=H,
+                W=W,
+                selected=seed_ids,
+            )
+
+            img = None
+            if end_points is not None and "img" in end_points and torch.is_tensor(end_points["img"]):
+                img = end_points["img"]
+
+            feat_norm_map = feat_map.detach().float().norm(dim=1, keepdim=True)
+            base_xy = self.base_xy.to(device=depth_map.device, dtype=depth_map.dtype)
+
+            for local_rank, m in enumerate(seed_ids):
+                seed_uv = uv[b, m].detach().float()
+                r = float(radius_px_vis[b, m].detach().float().cpu())
+                z = float(seed_xyz[b, m, 2].detach().float().cpu()) if seed_xyz is not None else float("nan")
+                rx = torch.tensor(r, device=depth_map.device, dtype=depth_map.dtype)
+                ry = torch.tensor(r, device=depth_map.device, dtype=depth_map.dtype)
+                grid_u = seed_uv[0].to(depth_map.dtype) + rx * base_xy[0]
+                grid_v = seed_uv[1].to(depth_map.dtype) + ry * base_xy[1]
+                valid = (grid_u >= 0.0) & (grid_u <= float(W - 1)) & (grid_v >= 0.0) & (grid_v <= float(H - 1))
+
+                roi_depth = self._sample_one_chw(depth_map[b], grid_u, grid_v, src_hw=(H, W))[0]
+                z_ref = seed_xyz[b, m, 2].detach() if seed_xyz is not None else roi_depth[P // 2, P // 2].detach()
+                depth_rel = torch.tanh((roi_depth - z_ref) / max(self.depth_norm_scale, 1e-6))
+                roi_uncert = self._sample_one_chw(uncert_map[b], grid_u, grid_v, src_hw=(H, W))[0]
+                roi_obj = self._sample_one_chw(obj_prob[b], grid_u, grid_v, src_hw=(H, W))[0]
+                roi_grasp = self._sample_one_chw(graspness_map[b], grid_u, grid_v, src_hw=(H, W))[0]
+                roi_feat_norm = self._sample_one_chw(feat_norm_map[b], grid_u, grid_v, src_hw=(H, W))[0]
+
+                if img is not None:
+                    roi_img_chw = self._sample_one_chw(img[b].detach(), grid_u, grid_v, src_hw=(H, W))
+                    roi_rgb = self._normalize_img_chw(roi_img_chw)
+                else:
+                    roi_rgb = self._normalize_img_chw(roi_depth)
+
+                pool_attn_np = None
+                if pool_attn_map is not None:
+                    pool_attn_np = self._to_numpy(pool_attn_map[b, m])
+
+                grid_u_np = self._to_numpy(grid_u)
+                grid_v_np = self._to_numpy(grid_v)
+                valid_np = self._to_numpy(valid).astype(bool)
+                seed_uv_np = self._to_numpy(seed_uv)
+                depth_rel_np = self._to_numpy(depth_rel)
+                uncert_np = self._to_numpy(roi_uncert)
+                obj_np = self._to_numpy(roi_obj)
+                grasp_np = self._to_numpy(roi_grasp)
+                feat_norm_np = self._to_numpy(roi_feat_norm)
+
+                view_text = ""
+                if end_points is not None and "grasp_top_view_inds" in end_points and torch.is_tensor(end_points["grasp_top_view_inds"]):
+                    vinds = end_points["grasp_top_view_inds"]
+                    if vinds.dim() == 2 and vinds.size(0) > b and vinds.size(1) > m:
+                        view_text = f", view={int(vinds[b, m].detach().cpu())}"
+
+                pool_text = "view-attn" if pool_attn_np is not None else "max"
+                title = (
+                    f"seed m={m}, pix=({seed_uv_np[0]:.1f},{seed_uv_np[1]:.1f}), "
+                    f"r={r:.1f}px, z={z:.3f}, valid={valid_np.mean():.2f}, pool={pool_text}{view_text}"
+                )
+                stem = f"{prefix}_seed{local_rank:02d}_m{m:04d}"
+                self._save_crop_overlay(
+                    bg=bg,
+                    seed_uv=seed_uv_np,
+                    grid_u=grid_u_np,
+                    grid_v=grid_v_np,
+                    valid=valid_np,
+                    out_path=os.path.join(self.vis_dir, f"{stem}_overlay_box.png"),
+                    title=f"{title} [{bg_name}]",
+                )
+                self._save_roi_panel(
+                    roi_rgb=roi_rgb,
+                    depth_rel=depth_rel_np,
+                    uncert=uncert_np,
+                    obj=obj_np,
+                    grasp=grasp_np,
+                    valid=valid_np,
+                    feat_norm=feat_norm_np,
+                    pool_attn=pool_attn_np,
+                    out_path=os.path.join(self.vis_dir, f"{stem}_roi_panel.png"),
+                    title=title,
+                )
+                if self.save_npz:
+                    npz_kwargs = dict(
+                        seed_uv=seed_uv_np,
+                        radius_px=np.asarray(r, dtype=np.float32),
+                        seed_z=np.asarray(z, dtype=np.float32),
+                        grid_u=grid_u_np,
+                        grid_v=grid_v_np,
+                        valid=valid_np.astype(np.float32),
+                        depth_rel=depth_rel_np,
+                        uncert=uncert_np,
+                        obj=obj_np,
+                        grasp=grasp_np,
+                        feat_norm=feat_norm_np,
+                    )
+                    if pool_attn_np is not None:
+                        npz_kwargs["pool_attn"] = pool_attn_np
+                    np.savez_compressed(os.path.join(self.vis_dir, f"{stem}.npz"), **npz_kwargs)
+        except Exception as e:
+            print(f"[MetricRegionCropGrouping vis] failed at iter={self._iter}: {repr(e)}")
+
+    # ------------------------------------------------------------------
+    # debug helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _is_rank0() -> bool:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            return torch.distributed.get_rank() == 0
+        return True
+
+    def _maybe_debug_print(self, stats: dict):
+        if self.debug_print_every <= 0:
+            return
+        if self._iter % self.debug_print_every != 0:
+            return
+        if self.debug_rank0_only and not self._is_rank0():
+            return
+        try:
+            msg = (
+                f"[MetricRegionCropGrouping] it={self._iter} "
+                f"view_pool={int(self.use_view_conditioned_pool)} "
+                f"valid={float(stats['valid_ratio']):.3f} "
+                f"empty={float(stats['empty_ratio']):.3f} "
+                f"r_mean={float(stats['radius_px_mean']):.1f} "
+                f"r_min={float(stats['radius_px_min']):.1f} "
+                f"r_max={float(stats['radius_px_max']):.1f} "
+                f"dz_abs={float(stats['depth_abs_mean']):.3f} "
+                f"pool_ent={float(stats['pool_entropy']):.3f} "
+                f"pool_maxp={float(stats['pool_maxprob']):.3f} "
+                f"scales=({float(stats['seed_scale']):.3f},{float(stats['roi_scale']):.3f},{float(stats['view_scale']):.3f})"
+            )
+            print(msg)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # forward
+    # ------------------------------------------------------------------
+    def forward(
+        self,
+        seed_features: torch.Tensor,       # (B,C,M)
+        token_sel_idx: torch.Tensor,       # (B,M)
+        seed_xyz: torch.Tensor,            # (B,M,3)
+        top_view_rot: torch.Tensor,        # (B,M,3,3)
+        feat_map: torch.Tensor,            # (B,C,Hf,Wf)
+        depth_map: torch.Tensor,           # (B,1,H,W)
+        depth_prob: torch.Tensor = None,   # (B,D,H,W)
+        objectness_logits: torch.Tensor = None,
+        graspness_map: torch.Tensor = None,
+        K: torch.Tensor = None,
+        end_points: dict = None,
+    ) -> torch.Tensor:
+        B, Cseed, M = seed_features.shape
+        _, Cf, _, _ = feat_map.shape
+        _, _, H, W = depth_map.shape
+        device = seed_features.device
+        dtype = feat_map.dtype
+        P = self.patch_size
+
+        if K is None:
+            raise ValueError("MetricRegionCropGrouping requires K with shape (B,3,3).")
+        if Cf != self.feat_dim:
+            raise ValueError(f"MetricRegionCropGrouping expected feat_dim={self.feat_dim}, got feat_map channels={Cf}.")
+
+        # Aux maps are detached by default so local grasp loss does not destabilize depth/proposal heads.
+        depth_for_aux = depth_map.detach() if self.detach_depth else depth_map
+        if depth_prob is not None:
+            depth_prob_for_aux = depth_prob.detach() if self.detach_depth else depth_prob
+            uncert_map = self._depth_uncertainty(depth_prob_for_aux)
+        else:
+            uncert_map = torch.zeros_like(depth_for_aux)
+
+        obj_prob = self._make_objectness_prob(objectness_logits, depth_for_aux)
+        if graspness_map is None:
+            graspness_map = torch.zeros_like(depth_for_aux)
+        if self.detach_aux_maps:
+            obj_prob = obj_prob.detach()
+            graspness_map = graspness_map.detach()
+            uncert_map = uncert_map.detach()
+
+        uv = self._idx_to_uv(token_sel_idx, H, W)  # (B,M,2)
+        if seed_xyz is not None:
+            z_seed_all = seed_xyz[..., 2:3]
+        else:
+            z_seed_all = self._gather_depth(depth_for_aux, token_sel_idx)
+        z_seed_all = torch.nan_to_num(z_seed_all, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(1e-4)
+        z_seed_for_radius = z_seed_all.detach()
+
+        fx = K[:, 0, 0].view(B, 1)
+        fy = K[:, 1, 1].view(B, 1)
+
+        z_base = z_seed_for_radius[..., 0].clamp_min(1e-4)
+        rx = fx.to(dtype) * self.metric_radius / z_base.to(dtype)
+        ry = fy.to(dtype) * self.metric_radius / z_base.to(dtype)
+        if self.training and self.train_scale_max > self.train_scale_min:
+            scale = torch.empty(B, M, device=device, dtype=dtype).uniform_(self.train_scale_min, self.train_scale_max)
+            rx = rx * scale
+            ry = ry * scale
+        rx = rx.clamp(self.radius_px_min, self.radius_px_max)
+        ry = ry.clamp(self.radius_px_min, self.radius_px_max)
+
+        with torch.no_grad():
+            rx_vis = (fx * self.metric_radius / z_base).clamp(self.radius_px_min, self.radius_px_max)
+            ry_vis = (fy * self.metric_radius / z_base).clamp(self.radius_px_min, self.radius_px_max)
+            radius_px_vis = ((rx_vis + ry_vis) * 0.5).detach()
+
+        base_xy = self.base_xy.to(device=device, dtype=dtype)  # (2,P,P)
+        local_xy = base_xy.view(1, 2, 1, P, P)                 # (1,2,1,P,P)
+        uv_d = uv.to(dtype)
+
+        grid_u = uv_d[..., 0].view(B, M, 1, 1) + rx.view(B, M, 1, 1) * base_xy[0].view(1, 1, P, P)
+        grid_v = uv_d[..., 1].view(B, M, 1, 1) + ry.view(B, M, 1, 1) * base_xy[1].view(1, 1, P, P)
+
+        valid = (
+            (grid_u >= 0.0) & (grid_u <= float(W - 1)) &
+            (grid_v >= 0.0) & (grid_v <= float(H - 1))
+        )  # (B,M,P,P)
+        valid_f = valid.to(dtype).unsqueeze(1)  # (B,1,M,P,P)
+
+        roi_feat = self._sample_bmpp(feat_map, grid_u, grid_v, src_hw=(H, W)).to(dtype)          # (B,C,M,P,P)
+        roi_depth = self._sample_bmpp(depth_for_aux, grid_u, grid_v, src_hw=(H, W)).to(dtype)    # (B,1,M,P,P)
+
+        z_c_b1 = z_seed_all[..., 0].to(dtype).view(B, 1, M, 1, 1)
+        depth_residual = torch.tanh((roi_depth - z_c_b1) / max(self.depth_norm_scale, 1e-6))
+        local_xy_b = local_xy.expand(B, -1, M, -1, -1)
+
+        # Mask invalid cells before conv and also expose the valid mask as an input channel.
+        roi_feat = roi_feat * valid_f
+        local_xy_b = local_xy_b * valid_f
+        depth_residual = depth_residual * valid_f
+
+        roi = torch.cat([
+            roi_feat,
+            local_xy_b,
+            depth_residual,
+            valid_f,
+        ], dim=1)  # (B,C+4,M,P,P)
+        roi = torch.nan_to_num(roi, nan=0.0, posinf=0.0, neginf=0.0)
+        roi = roi.permute(0, 2, 1, 3, 4).reshape(B * M, Cf + 4, P, P).contiguous()
+
+        patch_feat = self.patch_encoder(roi)  # (B*M,256,P,P)
+        valid_flat = valid.reshape(B * M, 1, P, P)
+
+        seed_ctx = self.seed_proj(seed_features.transpose(1, 2).contiguous())  # (B,M,256)
+        view_ctx = self.view_mlp(top_view_rot.reshape(B, M, 9).to(seed_ctx.dtype))  # (B,M,256)
+
+        if self.use_view_conditioned_pool:
+            pooled, pool_attn_map, pool_entropy, pool_maxprob = self._view_conditioned_pool(
+                patch_feat=patch_feat,
+                valid_flat=valid_flat,
+                seed_ctx=seed_ctx,
+                view_ctx=view_ctx,
+                local_xy_b=local_xy_b,
+                depth_residual=depth_residual,
+            )
+        else:
+            pooled, pool_attn_map, pool_entropy, pool_maxprob = self._valid_aware_max_pool(
+                patch_feat=patch_feat,
+                valid_flat=valid_flat,
+                B=B,
+                M=M,
+            )
+
+        grouped = (
+            self.seed_scale.to(seed_ctx.dtype) * seed_ctx +
+            self.roi_scale.to(seed_ctx.dtype) * pooled.to(seed_ctx.dtype) +
+            self.view_scale.to(seed_ctx.dtype) * view_ctx
+        )
+        grouped = self.output_norm(grouped).transpose(1, 2).contiguous()  # (B,256,M)
+
+        # Debug stats.
+        with torch.no_grad():
+            valid_ratio = valid.float().mean()
+            empty_ratio = (~valid.flatten(2).any(dim=-1)).float().mean()
+            radius_train = ((rx.float() + ry.float()) * 0.5)
+            depth_abs = self._masked_mean(depth_residual.detach().abs().squeeze(1), valid)
+
+            stats = {
+                "valid_ratio": valid_ratio.detach(),
+                "empty_ratio": empty_ratio.detach(),
+                "radius_px_mean": radius_train.mean().detach(),
+                "radius_px_min": radius_train.min().detach(),
+                "radius_px_max": radius_train.max().detach(),
+                "depth_abs_mean": depth_abs.detach(),
+                "pool_entropy": pool_entropy.detach(),
+                "pool_maxprob": pool_maxprob.detach(),
+                "seed_scale": self.seed_scale.detach(),
+                "roi_scale": self.roi_scale.detach(),
+                "view_scale": self.view_scale.detach(),
+            }
+
+        if end_points is not None:
+            end_points["D: LR use view pool"] = torch.tensor(float(self.use_view_conditioned_pool), device=device).reshape(())
+            end_points["D: LR valid ratio"] = stats["valid_ratio"].reshape(())
+            end_points["D: LR empty ratio"] = stats["empty_ratio"].reshape(())
+            end_points["D: LR radius px mean"] = stats["radius_px_mean"].reshape(())
+            end_points["D: LR radius px min"] = stats["radius_px_min"].reshape(())
+            end_points["D: LR radius px max"] = stats["radius_px_max"].reshape(())
+            end_points["D: LR depth rel abs mean"] = stats["depth_abs_mean"].reshape(())
+            end_points["D: LR pool entropy"] = stats["pool_entropy"].reshape(())
+            end_points["D: LR pool maxprob"] = stats["pool_maxprob"].reshape(())
+            end_points["D: LR seed scale"] = stats["seed_scale"].reshape(())
+            end_points["D: LR roi scale"] = stats["roi_scale"].reshape(())
+            end_points["D: LR view scale"] = stats["view_scale"].reshape(())
+
+        self._maybe_debug_print(stats)
+
+        self._maybe_visualize(
+            end_points=end_points,
+            token_sel_idx=token_sel_idx,
+            seed_xyz=seed_xyz if seed_xyz is not None else None,
+            radius_px_vis=radius_px_vis,
+            feat_map=feat_map,
+            depth_map=depth_for_aux,
+            uncert_map=uncert_map,
+            obj_prob=obj_prob,
+            graspness_map=graspness_map,
+            pool_attn_map=pool_attn_map,
+        )
+
+        self._iter += 1
+        return grouped
+
+
 from models.dinov2_dpt import DPTHead
 from models.grasp_spatial_enhancer import GraspSpatialEnhancer
 class economicgrasp_dpt(nn.Module):
@@ -5228,11 +6065,11 @@ class economicgrasp_dpt(nn.Module):
         #     num_heads=4,
         #     attn_dropout=0.01
         # )
-        self.cy_group = Cylinder_Grouping_Global_Interaction(
-            nsample=16,
-            cylinder_radius=cylinder_radius,
-            seed_feature_dim=self.seed_feature_dim,
-        )
+        # self.cy_group = Cylinder_Grouping_Global_Interaction(
+        #     nsample=16,
+        #     cylinder_radius=cylinder_radius,
+        #     seed_feature_dim=self.seed_feature_dim,
+        # )
         # self.pv_group = ProjectedViewGrouping(
         #     seed_feature_dim=self.seed_feature_dim,
         #     out_dim=256,
@@ -5318,6 +6155,40 @@ class economicgrasp_dpt(nn.Module):
         #     vis_every=self.vis_every,
         #     debug_print_every=self.debug_print_every,
         # )
+        self.local_region_group = MetricRegionCropGrouping(
+            seed_feature_dim=self.seed_feature_dim,
+            feat_dim=self.seed_feature_dim,
+            out_dim=256,
+            hidden_dim=128,
+
+            patch_size=12,
+            metric_radius=0.08,
+            radius_px_min=8.0,
+            radius_px_max=64.0,
+
+            train_scale_min=0.80,
+            train_scale_max=1.25,
+
+            min_depth=self.min_depth,
+            max_depth=self.max_depth,
+            depth_norm_scale=0.08,
+
+            detach_depth=True,
+            detach_aux_maps=True,
+
+            use_view_conditioned_pool=True,
+            seed_scale_init=1.0,
+            roi_scale_init=1.0,
+            view_scale_init=1.0,
+            use_output_norm=True,
+
+            vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'local_region_crop'),
+            vis_every=self.vis_every,
+            vis_num_seeds=4,
+            vis_seed_mode='first',
+            save_npz=True,
+        )
+
         self.grasp_head = Grasp_Head_Local_Interaction(
             num_angle=self.num_angle,
             num_depth=self.num_depth,
@@ -5579,7 +6450,7 @@ class economicgrasp_dpt(nn.Module):
         else:
             grasp_top_views_rot = end_points["grasp_top_view_rot"]
 
-        group_features = self.cy_group(seed_xyz_graspable, seed_features_graspable, grasp_top_views_rot)
+        # group_features = self.cy_group(seed_xyz_graspable, seed_features_graspable, grasp_top_views_rot)
         # group_features = self.pv_group(
         #     seed_features=seed_features_graspable,
         #     token_sel_idx=token_sel_idx,
@@ -5605,6 +6476,20 @@ class economicgrasp_dpt(nn.Module):
         #     K=K,                                     # (B,3,3)
         #     end_points=end_points,
         # )
+        grasp_sel_map = grasp_sel.view(B, 1, H, W).contiguous()
+        group_features = self.local_region_group(
+            seed_features=seed_features_graspable,
+            token_sel_idx=token_sel_idx,
+            seed_xyz=seed_xyz_graspable,
+            top_view_rot=grasp_top_views_rot,
+            feat_map=feat_grid,
+            depth_map=depth_448,
+            depth_prob=depth_prob_448,
+            objectness_logits=objectness_logits_448,
+            graspness_map=grasp_sel_map,
+            K=K,
+            end_points=end_points,
+        )
         end_points = self.grasp_head(group_features, end_points)
         if (self._vis_iter % self.debug_print_every == 0):
             with torch.no_grad():
