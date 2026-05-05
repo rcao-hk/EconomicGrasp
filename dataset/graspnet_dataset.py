@@ -629,7 +629,7 @@ class GraspNetMultiDataset(Dataset):
             'depth_prob_gt': depth_prob_gt,            # (1, Nfeat, 256)
             'depth_prob_weight': depth_prob_w,         # (1, Nfeat)
             # 'depth': sensor_depth_m_resized[None].astype(np.float32),   # (1,448,448)
-            # 'sensor_depth_m': sensor_depth_m_resized.astype(np.float32),# (448,448), debug
+            'sensor_depth_m': sensor_depth_m_resized.astype(np.float32),# (448,448), debug
             'scene_idx': np.int64(scene_idx),
             'anno_idx': np.int64(anno_idx),
             'dataset_idx': np.int64(index),
@@ -922,7 +922,7 @@ class GraspNetMultiDataset(Dataset):
             'depth_prob_weight': depth_prob_w.astype(np.float32),
 
             # 'depth': sensor_depth_m_resized[None].astype(np.float32),
-            # 'sensor_depth_m': sensor_depth_m_resized.astype(np.float32),
+            'sensor_depth_m': sensor_depth_m_resized.astype(np.float32),
 
             'scene_idx': np.int64(scene_idx),
             'anno_idx': np.int64(anno_idx),

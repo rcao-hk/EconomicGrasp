@@ -5975,6 +5975,7 @@ class economicgrasp_dpt(nn.Module):
         freeze_backbone: bool = True,
         use_gt_xyz_for_train: bool = False,
         is_training: bool = True,
+        use_obs_depth: bool = False,
         vis_dir: Optional[str] = 'vis_dpt',
         vis_every: int = 500,
         debug_print_every: int = 50,
@@ -5990,6 +5991,8 @@ class economicgrasp_dpt(nn.Module):
         self.min_depth = float(min_depth)
         self.max_depth = float(max_depth)
         self.bin_num = int(bin_num)
+        self.use_obs_depth = bool(use_obs_depth)
+        
         self.stride = 1
         self.vis_dir = vis_dir
         self.vis_every = int(vis_every)
@@ -6034,6 +6037,7 @@ class economicgrasp_dpt(nn.Module):
             detach_depth_prob=True,      # 第一轮建议 True，避免破坏 depth_net
             use_prob_embedding=False,    # 第一轮建议 False，先用 depth moments + IPE
             use_post_norm=False,         # 第一轮建议 False，保持 path_1 分布
+            use_sensor_depth_feat=self.use_obs_depth,
             vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'spatial_enhancer'),
             vis_every=self.vis_every,
             vis_rank0_only=True,
@@ -6065,11 +6069,11 @@ class economicgrasp_dpt(nn.Module):
         #     num_heads=4,
         #     attn_dropout=0.01
         # )
-        # self.cy_group = Cylinder_Grouping_Global_Interaction(
-        #     nsample=16,
-        #     cylinder_radius=cylinder_radius,
-        #     seed_feature_dim=self.seed_feature_dim,
-        # )
+        self.cy_group = Cylinder_Grouping_Global_Interaction(
+            nsample=16,
+            cylinder_radius=cylinder_radius,
+            seed_feature_dim=self.seed_feature_dim,
+        )
         # self.pv_group = ProjectedViewGrouping(
         #     seed_feature_dim=self.seed_feature_dim,
         #     out_dim=256,
@@ -6155,39 +6159,39 @@ class economicgrasp_dpt(nn.Module):
         #     vis_every=self.vis_every,
         #     debug_print_every=self.debug_print_every,
         # )
-        self.local_region_group = MetricRegionCropGrouping(
-            seed_feature_dim=self.seed_feature_dim,
-            feat_dim=self.seed_feature_dim,
-            out_dim=256,
-            hidden_dim=128,
+        # self.local_region_group = MetricRegionCropGrouping(
+        #     seed_feature_dim=self.seed_feature_dim,
+        #     feat_dim=self.seed_feature_dim,
+        #     out_dim=256,
+        #     hidden_dim=128,
 
-            patch_size=12,
-            metric_radius=0.08,
-            radius_px_min=8.0,
-            radius_px_max=64.0,
+        #     patch_size=12,
+        #     metric_radius=0.08,
+        #     radius_px_min=8.0,
+        #     radius_px_max=64.0,
 
-            train_scale_min=0.80,
-            train_scale_max=1.25,
+        #     train_scale_min=0.80,
+        #     train_scale_max=1.25,
 
-            min_depth=self.min_depth,
-            max_depth=self.max_depth,
-            depth_norm_scale=0.08,
+        #     min_depth=self.min_depth,
+        #     max_depth=self.max_depth,
+        #     depth_norm_scale=0.08,
 
-            detach_depth=True,
-            detach_aux_maps=True,
+        #     detach_depth=True,
+        #     detach_aux_maps=True,
 
-            use_view_conditioned_pool=True,
-            seed_scale_init=1.0,
-            roi_scale_init=1.0,
-            view_scale_init=1.0,
-            use_output_norm=True,
+        #     use_view_conditioned_pool=True,
+        #     seed_scale_init=1.0,
+        #     roi_scale_init=1.0,
+        #     view_scale_init=1.0,
+        #     use_output_norm=True,
 
-            vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'local_region_crop'),
-            vis_every=self.vis_every,
-            vis_num_seeds=4,
-            vis_seed_mode='first',
-            save_npz=True,
-        )
+        #     vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'local_region_crop'),
+        #     vis_every=self.vis_every,
+        #     vis_num_seeds=4,
+        #     vis_seed_mode='first',
+        #     save_npz=True,
+        # )
 
         self.grasp_head = Grasp_Head_Local_Interaction(
             num_angle=self.num_angle,
@@ -6292,14 +6296,24 @@ class economicgrasp_dpt(nn.Module):
         # ------------------------------------------------------------------
         # Grasp Spatial Enhancer
         # ------------------------------------------------------------------
+        # proposal_path1_enh, spatial_aux = self.spatial_enhancer(
+        #     feat_2d=proposal_path1,       # (B,C,Hf,Wf)
+        #     depth_prob=depth_prob_448,    # (B,D,448,448)
+        #     K=K,                          # K must match resized/cropped 448x448 image
+        #     image_hw=(H, W),              # usually (448,448)
+        #     return_maps=False,
+        #     img=end_points.get("img", img) if isinstance(end_points, dict) else img,
+        #     vis_prefix=None,
+        # )
+
         proposal_path1_enh, spatial_aux = self.spatial_enhancer(
-            feat_2d=proposal_path1,       # (B,C,Hf,Wf)
-            depth_prob=depth_prob_448,    # (B,D,448,448)
-            K=K,                          # K must match resized/cropped 448x448 image
-            image_hw=(H, W),              # usually (448,448)
+            feat_2d=proposal_path1,
+            depth_prob=depth_prob_448,       # IPE 仍来自预测 depth_prob
+            K=K,
+            image_hw=(H, W),
+            sensor_depth=end_points.get("sensor_depth_m", None) if self.use_obs_depth else None,
             return_maps=False,
-            img=end_points.get("img", img) if isinstance(end_points, dict) else img,
-            vis_prefix=None,
+            img=end_points.get("img", img),
         )
 
         for k, v in spatial_aux.items():
@@ -6450,7 +6464,7 @@ class economicgrasp_dpt(nn.Module):
         else:
             grasp_top_views_rot = end_points["grasp_top_view_rot"]
 
-        # group_features = self.cy_group(seed_xyz_graspable, seed_features_graspable, grasp_top_views_rot)
+        group_features = self.cy_group(seed_xyz_graspable, seed_features_graspable, grasp_top_views_rot)
         # group_features = self.pv_group(
         #     seed_features=seed_features_graspable,
         #     token_sel_idx=token_sel_idx,
@@ -6476,20 +6490,21 @@ class economicgrasp_dpt(nn.Module):
         #     K=K,                                     # (B,3,3)
         #     end_points=end_points,
         # )
-        grasp_sel_map = grasp_sel.view(B, 1, H, W).contiguous()
-        group_features = self.local_region_group(
-            seed_features=seed_features_graspable,
-            token_sel_idx=token_sel_idx,
-            seed_xyz=seed_xyz_graspable,
-            top_view_rot=grasp_top_views_rot,
-            feat_map=feat_grid,
-            depth_map=depth_448,
-            depth_prob=depth_prob_448,
-            objectness_logits=objectness_logits_448,
-            graspness_map=grasp_sel_map,
-            K=K,
-            end_points=end_points,
-        )
+        # grasp_sel_map = grasp_sel.view(B, 1, H, W).contiguous()
+        # group_features = self.local_region_group(
+        #     seed_features=seed_features_graspable,
+        #     token_sel_idx=token_sel_idx,
+        #     seed_xyz=seed_xyz_graspable,
+        #     top_view_rot=grasp_top_views_rot,
+        #     feat_map=feat_grid,
+        #     depth_map=depth_448,
+        #     depth_prob=depth_prob_448,
+        #     objectness_logits=objectness_logits_448,
+        #     graspness_map=grasp_sel_map,
+        #     K=K,
+        #     end_points=end_points,
+        # )
+        
         end_points = self.grasp_head(group_features, end_points)
         if (self._vis_iter % self.debug_print_every == 0):
             with torch.no_grad():

@@ -74,7 +74,13 @@ class GraspSpatialEnhancer(nn.Module):
         use_prob_embedding: bool = False,
         use_post_norm: bool = False,
         prob_eps: float = 1e-6,
-
+        
+        # sensor depth feature
+        use_sensor_depth_feat: bool = True,
+        depth_feat_dim: int = 128,
+        depth_norm_fn: str = "layer",
+        depth_downsample: int = 2,
+        
         # visualization
         vis_dir: Optional[str] = None,
         vis_every: int = 500,
@@ -93,6 +99,9 @@ class GraspSpatialEnhancer(nn.Module):
         self.use_post_norm = bool(use_post_norm)
         self.prob_eps = float(prob_eps)
 
+        self.use_sensor_depth_feat = bool(use_sensor_depth_feat)
+        self.depth_feat_dim = int(depth_feat_dim)
+        
         self.vis_dir = vis_dir
         self.vis_every = int(vis_every)
         self.vis_dpi = int(vis_dpi)
@@ -115,22 +124,35 @@ class GraspSpatialEnhancer(nn.Module):
         # Because it is linear, we can use E[xyz] instead of enumerating all xyz_k.
         self.pts_fc = nn.Linear(3, self.feature_3d_dim)
 
+        if self.use_sensor_depth_feat:
+            self.depth_adapter = SensorDepthAdapter(
+                feature_3d_dim=self.depth_feat_dim,
+                min_depth=self.min_depth,
+                max_depth=self.max_depth,
+                norm_fn=depth_norm_fn,
+                downsample=depth_downsample,
+            )
+        else:
+            self.depth_adapter = None
+
         # Extra grasp-friendly scalar geometry:
         # ray_unit(3), normalized mean depth(1), normalized std depth(1), entropy(1)
-        scalar_in_dim = 6
-        self.scalar_geom_fc = nn.Sequential(
-            nn.Conv2d(scalar_in_dim, self.feature_3d_dim, kernel_size=1, bias=False),
-            _make_group_norm(self.feature_3d_dim),
-            nn.GELU(),
-            nn.Conv2d(self.feature_3d_dim, self.feature_3d_dim, kernel_size=1),
-        )
+        # scalar_in_dim = 6
+        # self.scalar_geom_fc = nn.Sequential(
+        #     nn.Conv2d(scalar_in_dim, self.feature_3d_dim, kernel_size=1, bias=False),
+        #     _make_group_norm(self.feature_3d_dim),
+        #     nn.GELU(),
+        #     nn.Conv2d(self.feature_3d_dim, self.feature_3d_dim, kernel_size=1),
+        # )
 
         fusion_in_dim = (
             self.embed_dims
-            + self.feature_3d_dim  # probabilistic 3D position embedding
-            + self.feature_3d_dim  # scalar geometry embedding
+            + self.feature_3d_dim  # probabilistic 3D position embedding from predicted depth
         )
 
+        if self.use_sensor_depth_feat:
+            fusion_in_dim += self.depth_feat_dim
+            
         if self.use_prob_embedding:
             # Optional. More expressive, but heavier at 448x448 and D=256.
             self.prob_fc = nn.Sequential(
@@ -583,10 +605,12 @@ class GraspSpatialEnhancer(nn.Module):
         entropy: torch.Tensor,
         ray_unit: torch.Tensor,
         ipe: torch.Tensor,
-        scalar_geom_feat: torch.Tensor,
+        # scalar_geom_feat: torch.Tensor,
         gate: torch.Tensor,
         delta: torch.Tensor,
         out: torch.Tensor,
+        depth_feat: Optional[torch.Tensor] = None,
+        sensor_depth: Optional[torch.Tensor] = None,
         img: Optional[torch.Tensor] = None,
         vis_prefix: Optional[str] = None,
     ):
@@ -625,7 +649,7 @@ class GraspSpatialEnhancer(nn.Module):
             feat_norm = feat_2d.detach().float().norm(dim=1, keepdim=True)
             out_norm = out.detach().float().norm(dim=1, keepdim=True)
             ipe_norm = ipe.detach().float().norm(dim=1, keepdim=True)
-            geom_norm = scalar_geom_feat.detach().float().norm(dim=1, keepdim=True)
+            # geom_norm = scalar_geom_feat.detach().float().norm(dim=1, keepdim=True)
 
             gate_mean = gate.detach().float().mean(dim=1, keepdim=True)
             delta_abs = delta.detach().float().abs().mean(dim=1, keepdim=True)
@@ -637,6 +661,53 @@ class GraspSpatialEnhancer(nn.Module):
             ray_y = ray_unit[:, 1:2]
             ray_z = ray_unit[:, 2:3]
 
+            # ------------------------------------------------------------------
+            # Sensor depth visualization maps
+            # ------------------------------------------------------------------
+            sensor_depth_vis = None          # raw/resized sensor depth map, invalid = 0
+            sensor_valid_vis = None          # raw valid mask
+            sensor_depth_feat_rs = None      # sensor depth resized to feature map resolution
+            sensor_valid_feat = None         # valid mask resized to feature map resolution
+            pred_sensor_absdiff = None       # |DPT mean_z - sensor depth| at feature resolution
+            pred_sensor_signed = None        # DPT mean_z - sensor depth
+
+            if sensor_depth is not None:
+                sd = sensor_depth.detach()
+                if sd.dim() == 3:
+                    sd = sd.unsqueeze(1)
+                sd = sd.to(device=mean_z.device, dtype=mean_z.dtype)
+
+                sensor_valid_vis = (
+                    (sd > self.min_depth)
+                    & (sd < self.max_depth)
+                    & torch.isfinite(sd)
+                ).float()
+
+                sd_clamped = sd.clamp(self.min_depth, self.max_depth)
+                sensor_depth_vis = torch.where(
+                    sensor_valid_vis > 0.5,
+                    sd_clamped,
+                    torch.zeros_like(sd_clamped),
+                )
+
+                if sensor_depth_vis.shape[-2:] != mean_z.shape[-2:]:
+                    sensor_depth_feat_rs = F.interpolate(
+                        sensor_depth_vis,
+                        size=mean_z.shape[-2:],
+                        mode="nearest",
+                    )
+                    sensor_valid_feat = F.interpolate(
+                        sensor_valid_vis,
+                        size=mean_z.shape[-2:],
+                        mode="nearest",
+                    )
+                else:
+                    sensor_depth_feat_rs = sensor_depth_vis
+                    sensor_valid_feat = sensor_valid_vis
+
+                pred_sensor_signed = (mean_z - sensor_depth_feat_rs) * sensor_valid_feat
+                pred_sensor_absdiff = pred_sensor_signed.abs()
+                
             # ------------------------------------------------------------------
             # Save compact summary grid
             # ------------------------------------------------------------------
@@ -653,119 +724,161 @@ class GraspSpatialEnhancer(nn.Module):
                 grid_items.append({"title": "RGB", "data": rgb_np, "rgb": True})
             else:
                 img_b0 = None
+                
+            if depth_feat is not None:
+                depth_feat_norm = depth_feat.detach().float().norm(dim=1, keepdim=True)
+            else:
+                depth_feat_norm = None
 
-            grid_items.extend([
-                {
-                    "title": "mean_z",
-                    "data": mean_z[b0, 0],
-                    "cmap": "viridis",
-                    "vmin": self.min_depth,
-                    "vmax": self.max_depth,
-                },
-                {
-                    "title": "top_z(argmax prob)",
-                    "data": top_z[b0, 0],
-                    "cmap": "viridis",
-                    "vmin": self.min_depth,
-                    "vmax": self.max_depth,
-                },
-                {
-                    "title": "std_z",
-                    "data": std_z[b0, 0],
-                    "cmap": "magma",
-                    "vmin": 0.0,
-                },
-                {
-                    "title": "entropy",
-                    "data": entropy[b0, 0],
-                    "cmap": "magma",
-                    "vmin": 0.0,
-                    "vmax": 1.0,
-                },
-                {
-                    "title": "prob_peak",
-                    "data": prob_peak[b0, 0],
-                    "cmap": "viridis",
-                    "vmin": 0.0,
-                    "vmax": 1.0,
-                },
-                {
-                    "title": "gate_mean",
-                    "data": gate_mean[b0, 0],
-                    "cmap": "viridis",
-                    "vmin": 0.0,
-                    "vmax": 1.0,
-                },
-                {
-                    "title": "delta_abs",
-                    "data": delta_abs[b0, 0],
-                    "cmap": "plasma",
-                    "vmin": 0.0,
-                },
-                {
-                    "title": "update_abs=|gate*delta|",
-                    "data": update_abs[b0, 0],
-                    "cmap": "plasma",
-                    "vmin": 0.0,
-                },
-                {
-                    "title": "update_ratio",
-                    "data": update_ratio[b0, 0],
-                    "cmap": "plasma",
-                    "vmin": 0.0,
-                },
-                {
-                    "title": "feat_norm_before",
-                    "data": feat_norm[b0, 0],
-                    "cmap": "viridis",
-                    "vmin": 0.0,
-                },
-                {
-                    "title": "feat_norm_after",
-                    "data": out_norm[b0, 0],
-                    "cmap": "viridis",
-                    "vmin": 0.0,
-                },
-                {
-                    "title": "ipe_norm",
-                    "data": ipe_norm[b0, 0],
-                    "cmap": "viridis",
-                    "vmin": 0.0,
-                },
-                {
-                    "title": "scalar_geom_norm",
-                    "data": geom_norm[b0, 0],
-                    "cmap": "viridis",
-                    "vmin": 0.0,
-                },
-                {
-                    "title": "ray_x",
-                    "data": ray_x[b0, 0],
-                    "cmap": "coolwarm",
-                    "vmin": -1.0,
-                    "vmax": 1.0,
-                },
-                {
-                    "title": "ray_y",
-                    "data": ray_y[b0, 0],
-                    "cmap": "coolwarm",
-                    "vmin": -1.0,
-                    "vmax": 1.0,
-                },
-                {
-                    "title": "ray_z",
-                    "data": ray_z[b0, 0],
-                    "cmap": "viridis",
-                    "vmin": 0.0,
-                    "vmax": 1.0,
-                },
-            ])
+            # grid_items.extend([
+            #     {
+            #         "title": "mean_z",
+            #         "data": mean_z[b0, 0],
+            #         "cmap": "viridis",
+            #         "vmin": self.min_depth,
+            #         "vmax": self.max_depth,
+            #     },
+            #     {
+            #         "title": "top_z(argmax prob)",
+            #         "data": top_z[b0, 0],
+            #         "cmap": "viridis",
+            #         "vmin": self.min_depth,
+            #         "vmax": self.max_depth,
+            #     },
+            #     {
+            #         "title": "std_z",
+            #         "data": std_z[b0, 0],
+            #         "cmap": "magma",
+            #         "vmin": 0.0,
+            #     },
+            #     {
+            #         "title": "entropy",
+            #         "data": entropy[b0, 0],
+            #         "cmap": "magma",
+            #         "vmin": 0.0,
+            #         "vmax": 1.0,
+            #     },
+            #     {
+            #         "title": "prob_peak",
+            #         "data": prob_peak[b0, 0],
+            #         "cmap": "viridis",
+            #         "vmin": 0.0,
+            #         "vmax": 1.0,
+            #     },
+            #     {
+            #         "title": "gate_mean",
+            #         "data": gate_mean[b0, 0],
+            #         "cmap": "viridis",
+            #         "vmin": 0.0,
+            #         "vmax": 1.0,
+            #     },
+            #     {
+            #         "title": "delta_abs",
+            #         "data": delta_abs[b0, 0],
+            #         "cmap": "plasma",
+            #         "vmin": 0.0,
+            #     },
+            #     {
+            #         "title": "update_abs=|gate*delta|",
+            #         "data": update_abs[b0, 0],
+            #         "cmap": "plasma",
+            #         "vmin": 0.0,
+            #     },
+            #     {
+            #         "title": "update_ratio",
+            #         "data": update_ratio[b0, 0],
+            #         "cmap": "plasma",
+            #         "vmin": 0.0,
+            #     },
+            #     {
+            #         "title": "feat_norm_before",
+            #         "data": feat_norm[b0, 0],
+            #         "cmap": "viridis",
+            #         "vmin": 0.0,
+            #     },
+            #     {
+            #         "title": "feat_norm_after",
+            #         "data": out_norm[b0, 0],
+            #         "cmap": "viridis",
+            #         "vmin": 0.0,
+            #     },
+            #     {
+            #         "title": "ipe_norm",
+            #         "data": ipe_norm[b0, 0],
+            #         "cmap": "viridis",
+            #         "vmin": 0.0,
+            #     },
+            #     # {
+            #     #     "title": "scalar_geom_norm",
+            #     #     "data": geom_norm[b0, 0],
+            #     #     "cmap": "viridis",
+            #     #     "vmin": 0.0,
+            #     # },
+            #     {
+            #         "title": "ray_x",
+            #         "data": ray_x[b0, 0],
+            #         "cmap": "coolwarm",
+            #         "vmin": -1.0,
+            #         "vmax": 1.0,
+            #     },
+            #     {
+            #         "title": "ray_y",
+            #         "data": ray_y[b0, 0],
+            #         "cmap": "coolwarm",
+            #         "vmin": -1.0,
+            #         "vmax": 1.0,
+            #     },
+            #     {
+            #         "title": "ray_z",
+            #         "data": ray_z[b0, 0],
+            #         "cmap": "viridis",
+            #         "vmin": 0.0,
+            #         "vmax": 1.0,
+            #     },
+            # ])
+            
+            # if depth_feat_norm is not None:
+            #     grid_items.append({
+            #         "title": "sensor_depth_feat_norm",
+            #         "data": depth_feat_norm[b0, 0],
+            #         "cmap": "viridis",
+            #         "vmin": 0.0,
+            #     })
 
-            self._save_summary_grid(
-                grid_items,
-                os.path.join(out_dir, f"{prefix}_summary.png"),
-                cols=4,
-            )
+            # if sensor_depth_vis is not None:
+            #     grid_items.extend([
+            #         {
+            #             "title": "sensor_depth",
+            #             "data": sensor_depth_vis[b0, 0],
+            #             "cmap": "viridis",
+            #             "vmin": self.min_depth,
+            #             "vmax": self.max_depth,
+            #         },
+            #         {
+            #             "title": "sensor_valid",
+            #             "data": sensor_valid_vis[b0, 0],
+            #             "cmap": "gray",
+            #             "vmin": 0.0,
+            #             "vmax": 1.0,
+            #         },
+            #         {
+            #             "title": "|pred_z - sensor_z|",
+            #             "data": pred_sensor_absdiff[b0, 0],
+            #             "cmap": "magma",
+            #             "vmin": 0.0,
+            #         },
+            #         {
+            #             "title": "pred_z - sensor_z",
+            #             "data": pred_sensor_signed[b0, 0],
+            #             "cmap": "coolwarm",
+            #         },
+            #     ])
+                                                
+            # self._save_summary_grid(
+            #     grid_items,
+            #     os.path.join(out_dir, f"{prefix}_summary.png"),
+            #     cols=4,
+            # )
 
             # ------------------------------------------------------------------
             # Individual maps
@@ -872,6 +985,46 @@ class GraspSpatialEnhancer(nn.Module):
                     vmin=0.0,
                 )
 
+            if sensor_depth_vis is not None:
+                self._save_map_png(
+                    sensor_depth_vis[b0, 0],
+                    os.path.join(out_dir, f"{prefix}_sensor_depth.png"),
+                    title="sensor depth",
+                    cmap="viridis",
+                    vmin=self.min_depth,
+                    vmax=self.max_depth,
+                )
+                self._save_map_png(
+                    sensor_valid_vis[b0, 0],
+                    os.path.join(out_dir, f"{prefix}_sensor_valid.png"),
+                    title="sensor depth valid mask",
+                    cmap="gray",
+                    vmin=0.0,
+                    vmax=1.0,
+                )
+                self._save_map_png(
+                    pred_sensor_absdiff[b0, 0],
+                    os.path.join(out_dir, f"{prefix}_pred_sensor_absdiff.png"),
+                    title="|predicted mean_z - sensor depth|",
+                    cmap="magma",
+                    vmin=0.0,
+                )
+                self._save_map_png(
+                    pred_sensor_signed[b0, 0],
+                    os.path.join(out_dir, f"{prefix}_pred_sensor_signeddiff.png"),
+                    title="predicted mean_z - sensor depth",
+                    cmap="coolwarm",
+                )
+
+                if depth_feat_norm is not None:
+                    self._save_map_png(
+                        depth_feat_norm[b0, 0],
+                        os.path.join(out_dir, f"{prefix}_sensor_depth_feat_norm.png"),
+                        title="sensor depth feature norm",
+                        cmap="viridis",
+                        vmin=0.0,
+                    )
+                    
             # ------------------------------------------------------------------
             # Feature PCA maps
             # ------------------------------------------------------------------
@@ -879,7 +1032,7 @@ class GraspSpatialEnhancer(nn.Module):
             pca_after = self._feature_pca_rgb(out[b0])
             pca_delta = self._feature_pca_rgb(delta[b0])
             pca_ipe = self._feature_pca_rgb(ipe[b0])
-            pca_geom = self._feature_pca_rgb(scalar_geom_feat[b0])
+            # pca_geom = self._feature_pca_rgb(scalar_geom_feat[b0])
 
             if pca_before is not None:
                 self._save_rgb_png(
@@ -905,12 +1058,12 @@ class GraspSpatialEnhancer(nn.Module):
                     os.path.join(out_dir, f"{prefix}_ipe_pca.png"),
                     title="IPE PCA",
                 )
-            if pca_geom is not None:
-                self._save_rgb_png(
-                    pca_geom,
-                    os.path.join(out_dir, f"{prefix}_scalar_geom_pca.png"),
-                    title="scalar geometry feature PCA",
-                )
+            # if pca_geom is not None:
+            #     self._save_rgb_png(
+            #         pca_geom,
+            #         os.path.join(out_dir, f"{prefix}_scalar_geom_pca.png"),
+            #         title="scalar geometry feature PCA",
+            #     )
 
             # ------------------------------------------------------------------
             # Histograms
@@ -964,7 +1117,7 @@ class GraspSpatialEnhancer(nn.Module):
                     feat_norm=self._to_numpy(feat_norm[b0, 0]),
                     out_norm=self._to_numpy(out_norm[b0, 0]),
                     ipe_norm=self._to_numpy(ipe_norm[b0, 0]),
-                    scalar_geom_norm=self._to_numpy(geom_norm[b0, 0]),
+                    # scalar_geom_norm=self._to_numpy(geom_norm[b0, 0]),
                     ray_x=self._to_numpy(ray_x[b0, 0]),
                     ray_y=self._to_numpy(ray_y[b0, 0]),
                     ray_z=self._to_numpy(ray_z[b0, 0]),
@@ -979,6 +1132,7 @@ class GraspSpatialEnhancer(nn.Module):
         depth_prob: torch.Tensor,
         K: torch.Tensor,
         image_hw: Optional[Tuple[int, int]] = None,
+        sensor_depth: Optional[torch.Tensor] = None,
         return_maps: bool = False,
         img: Optional[torch.Tensor] = None,
         vis_prefix: Optional[str] = None,
@@ -1026,22 +1180,47 @@ class GraspSpatialEnhancer(nn.Module):
             mean_xyz.permute(0, 2, 3, 1).contiguous()
         ).permute(0, 3, 1, 2).contiguous()
 
-        z_range = max(self.max_depth - self.min_depth, 1e-6)
-        mean_z_norm = ((mean_z - self.min_depth) / z_range).clamp(0.0, 1.0)
-        std_z_norm = (std_z / z_range).clamp(0.0, 1.0)
+        # z_range = max(self.max_depth - self.min_depth, 1e-6)
+        # mean_z_norm = ((mean_z - self.min_depth) / z_range).clamp(0.0, 1.0)
+        # std_z_norm = (std_z / z_range).clamp(0.0, 1.0)
 
-        scalar_geom = torch.cat(
-            [
-                ray_unit,
-                mean_z_norm,
-                std_z_norm,
-                entropy,
-            ],
-            dim=1,
-        )
-        scalar_geom_feat = self.scalar_geom_fc(scalar_geom)
+        # scalar_geom = torch.cat(
+        #     [
+        #         ray_unit,
+        #         mean_z_norm,
+        #         std_z_norm,
+        #         entropy,
+        #     ],
+        #     dim=1,
+        # )
+        # scalar_geom_feat = self.scalar_geom_fc(scalar_geom)
+        # fuse_list = [feat_2d, ipe]
 
-        fuse_list = [feat_2d, ipe, scalar_geom_feat]
+        # ------------------------------------------------------------------
+        # Sensor depth feature only.
+        # IPE still comes from predicted depth_prob.
+        # Sensor depth does NOT generate depth distribution or depth prior.
+        # ------------------------------------------------------------------
+        depth_feat = None
+        if self.use_sensor_depth_feat:
+            if sensor_depth is None:
+                raise ValueError(
+                    "use_sensor_depth_feat=True, but sensor_depth is None. "
+                    "Please pass sensor_depth to GraspSpatialEnhancer.forward()."
+                )
+
+            if sensor_depth.dim() == 3:
+                sensor_depth = sensor_depth.unsqueeze(1)
+
+            depth_feat = self.depth_adapter(
+                sensor_depth=sensor_depth,
+                out_hw=(Hf, Wf),
+            )  # (B, depth_feat_dim, Hf, Wf)
+
+        fuse_list = [feat_2d, ipe]
+
+        if depth_feat is not None:
+            fuse_list.append(depth_feat)
 
         if self.use_prob_embedding:
             # Keep this off for the first run. It is more expensive and can overfit.
@@ -1064,10 +1243,12 @@ class GraspSpatialEnhancer(nn.Module):
             entropy=entropy,
             ray_unit=ray_unit,
             ipe=ipe,
-            scalar_geom_feat=scalar_geom_feat,
+            # scalar_geom_feat=scalar_geom_feat,
             gate=gate,
             delta=delta,
             out=out,
+            depth_feat=depth_feat,
+            sensor_depth=sensor_depth,   # add this
             img=img,
             vis_prefix=vis_prefix,
         )
@@ -1080,6 +1261,10 @@ class GraspSpatialEnhancer(nn.Module):
             "D: GSE gate_mean": gate.detach().mean(),
             "D: GSE delta_abs": delta.detach().abs().mean(),
         }
+
+        if depth_feat is not None:
+            aux["D: GSE depth_feat_abs"] = depth_feat.detach().abs().mean()
+            aux["D: GSE depth_feat_norm"] = depth_feat.detach().norm(dim=1).mean()
 
         if return_maps:
             prob_peak = prob.max(dim=1, keepdim=True).values
@@ -1095,5 +1280,271 @@ class GraspSpatialEnhancer(nn.Module):
             aux["spatial_gate_mean_map"] = gate.detach().mean(dim=1, keepdim=True)
             aux["spatial_delta_abs_map"] = delta.detach().abs().mean(dim=1, keepdim=True)
             aux["spatial_update_abs_map"] = (gate * delta).detach().abs().mean(dim=1, keepdim=True)
+            if depth_feat is not None:
+                aux["spatial_depth_feat_norm_map"] = depth_feat.detach().norm(dim=1, keepdim=True)
 
+            if sensor_depth is not None:
+                sd = sensor_depth.detach()
+                if sd.dim() == 3:
+                    sd = sd.unsqueeze(1)
+                sd = sd.to(device=mean_z.device, dtype=mean_z.dtype)
+
+                sensor_valid = (
+                    (sd > self.min_depth)
+                    & (sd < self.max_depth)
+                    & torch.isfinite(sd)
+                ).float()
+                sensor_depth_vis = torch.where(
+                    sensor_valid > 0.5,
+                    sd.clamp(self.min_depth, self.max_depth),
+                    torch.zeros_like(sd),
+                )
+
+                sensor_depth_feat_rs = F.interpolate(
+                    sensor_depth_vis,
+                    size=mean_z.shape[-2:],
+                    mode="nearest",
+                )
+                sensor_valid_feat = F.interpolate(
+                    sensor_valid,
+                    size=mean_z.shape[-2:],
+                    mode="nearest",
+                )
+
+                aux["spatial_sensor_depth_map"] = sensor_depth_vis
+                aux["spatial_sensor_valid_map"] = sensor_valid
+                aux["spatial_pred_sensor_absdiff_map"] = (
+                    (mean_z.detach() - sensor_depth_feat_rs).abs() * sensor_valid_feat
+                )
+                
         return out, aux
+
+
+class ResidualBlock(nn.Module):
+    def __init__(self, in_planes, planes, norm_fn='group', stride=1):
+        super(ResidualBlock, self).__init__()
+  
+        self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=3, padding=1, stride=stride)
+        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, padding=1)
+        self.relu = nn.ReLU(inplace=True)
+
+        num_groups = planes // 8
+
+        if norm_fn == 'group':
+            self.norm1 = nn.GroupNorm(num_groups=num_groups, num_channels=planes)
+            self.norm2 = nn.GroupNorm(num_groups=num_groups, num_channels=planes)
+            if not (stride == 1 and in_planes == planes):
+                self.norm3 = nn.GroupNorm(num_groups=num_groups, num_channels=planes)
+        
+        elif norm_fn == 'batch':
+            self.norm1 = nn.BatchNorm2d(planes)
+            self.norm2 = nn.BatchNorm2d(planes)
+            if not (stride == 1 and in_planes == planes):
+                self.norm3 = nn.BatchNorm2d(planes)
+        
+        elif norm_fn == 'instance':
+            self.norm1 = nn.InstanceNorm2d(planes)
+            self.norm2 = nn.InstanceNorm2d(planes)
+            if not (stride == 1 and in_planes == planes):
+                self.norm3 = nn.InstanceNorm2d(planes)
+
+        elif norm_fn == 'layer':
+            self.norm1 = LayerNorm2d(planes)
+            self.norm2 = LayerNorm2d(planes)
+            if not (stride == 1 and in_planes == planes):
+                self.norm3 = LayerNorm2d(planes)
+
+        elif norm_fn == 'none':
+            self.norm1 = nn.Sequential()
+            self.norm2 = nn.Sequential()
+            if not (stride == 1 and in_planes == planes):
+                self.norm3 = nn.Sequential()
+
+        if stride == 1 and in_planes == planes:
+            self.downsample = None
+        
+        else:    
+            self.downsample = nn.Sequential(
+                nn.Conv2d(in_planes, planes, kernel_size=1, stride=stride), self.norm3)
+            
+    def forward(self, x):
+        y = x
+        y = self.conv1(y)
+        y = self.norm1(y)
+        y = self.relu(y)
+        y = self.conv2(y)
+        y = self.norm2(y)
+        y = self.relu(y)
+
+        if self.downsample is not None:
+            x = self.downsample(x)
+
+        return self.relu(x+y)
+    
+    
+class MultiBasicEncoder(nn.Module):
+    def __init__(self, input_dim=1, output_dim=[128], norm_fn='batch', dropout=0.0, downsample=3):
+        super(MultiBasicEncoder, self).__init__()
+        self.norm_fn = norm_fn
+        self.downsample = downsample
+
+        if self.norm_fn == 'group':
+            self.norm1 = nn.GroupNorm(num_groups=8, num_channels=64)
+
+        elif self.norm_fn == 'batch':
+            self.norm1 = nn.BatchNorm2d(64)
+
+        elif self.norm_fn == 'instance':
+            self.norm1 = nn.InstanceNorm2d(64)
+
+        elif self.norm_fn=='layer':
+            self.norm1 = LayerNorm2d(64)
+
+        elif self.norm_fn == 'none':
+            self.norm1 = nn.Sequential()
+
+        self.conv1 = nn.Conv2d(input_dim, 64, kernel_size=7, stride=1 + (downsample > 2), padding=3)
+        self.relu1 = nn.ReLU(inplace=True)
+
+        self.in_planes = 64
+        self.layer1 = self._make_layer(64, stride=1)
+        self.layer2 = self._make_layer(96, stride=1 + (downsample > 1))
+        self.layer3 = self._make_layer(128, stride=1 + (downsample > 0))
+        self.layer4 = self._make_layer(128, stride=2)
+        self.layer5 = self._make_layer(128, stride=2)
+
+        output_list = []
+
+        for dim in output_dim:
+            conv_out = nn.Sequential(
+                ResidualBlock(128, 128, self.norm_fn, stride=1),
+                nn.Conv2d(128, dim[2], 3, padding=1))
+            output_list.append(conv_out)
+
+        self.outputs04 = nn.ModuleList(output_list)
+
+        output_list = []
+        for dim in output_dim:
+            conv_out = nn.Sequential(
+                ResidualBlock(128, 128, self.norm_fn, stride=1),
+                nn.Conv2d(128, dim[1], 3, padding=1))
+            output_list.append(conv_out)
+
+        self.outputs08 = nn.ModuleList(output_list)
+
+        output_list = []
+        for dim in output_dim:
+            conv_out = nn.Conv2d(128, dim[0], 3, padding=1)
+            output_list.append(conv_out)
+
+        self.outputs16 = nn.ModuleList(output_list)
+
+        if dropout > 0:
+            self.dropout = nn.Dropout2d(p=dropout)
+        else:
+            self.dropout = None
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, (nn.BatchNorm2d, nn.InstanceNorm2d, nn.GroupNorm)):
+                if m.weight is not None:
+                    nn.init.constant_(m.weight, 1)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def _make_layer(self, dim, stride=1):
+        layer1 = ResidualBlock(self.in_planes, dim, self.norm_fn, stride=stride)
+        layer2 = ResidualBlock(dim, dim, self.norm_fn, stride=1)
+        layers = (layer1, layer2)
+
+        self.in_planes = dim
+        return nn.Sequential(*layers)
+
+    def forward(self, x, dual_inp=False, num_layers=3):
+
+        x = self.conv1(x)
+        x = self.norm1(x)
+        x = self.relu1(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        if dual_inp:
+            v = x
+            x = x[:(x.shape[0]//2)]
+
+        outputs04 = [f(x) for f in self.outputs04]
+        if num_layers == 1:
+            return (outputs04, v) if dual_inp else (outputs04,)
+
+        y = self.layer4(x)
+        outputs08 = [f(y) for f in self.outputs08]
+
+        if num_layers == 2:
+            return (outputs04, outputs08, v) if dual_inp else (outputs04, outputs08)
+
+        z = self.layer5(y)
+        outputs16 = [f(z) for f in self.outputs16]
+
+        return (outputs04, outputs08, outputs16, v) if dual_inp else (outputs04, outputs08, outputs16)
+    
+
+class SensorDepthAdapter(nn.Module):
+    """
+    Use MultiBasicEncoder and only take the largest-resolution feature map.
+
+    Input:
+        sensor_depth: (B,1,H,W), metric depth in meters
+    Output:
+        depth_feat:   (B,Cd,Hf,Wf)
+    """
+    def __init__(
+        self,
+        feature_3d_dim: int = 128,
+        min_depth: float = 0.2,
+        max_depth: float = 1.0,
+        norm_fn: str = "group",
+        downsample: int = 2,
+    ):
+        super().__init__()
+        self.feature_3d_dim = int(feature_3d_dim)
+        self.min_depth = float(min_depth)
+        self.max_depth = float(max_depth)
+        # output_dim must be tuple-like because MultiBasicEncoder uses dim[0/1/2].
+        self.encoder = MultiBasicEncoder(
+            input_dim=1,
+            output_dim=[(feature_3d_dim, feature_3d_dim, feature_3d_dim)],
+            norm_fn=norm_fn,
+            dropout=0.0,
+            downsample=downsample,
+        )
+
+    def forward(self, sensor_depth: torch.Tensor, out_hw):
+        if sensor_depth.dim() == 3:
+            sensor_depth = sensor_depth.unsqueeze(1)
+        assert sensor_depth.dim() == 4 and sensor_depth.size(1) == 1
+
+        valid = (
+            (sensor_depth > self.min_depth)
+            & (sensor_depth < self.max_depth)
+            & torch.isfinite(sensor_depth)
+        ).float()
+
+        z = sensor_depth.clamp(self.min_depth, self.max_depth)
+        # 朴素处理：invalid 直接置 0，不额外输入 valid mask。
+        x = z * valid
+
+        outputs04, outputs08, outputs16 = self.encoder(x, num_layers=3)
+
+        # 最大空间分辨率 feature map
+        depth_feat = outputs04[0]
+
+        if depth_feat.shape[-2:] != tuple(out_hw):
+            depth_feat = F.interpolate(
+                depth_feat,
+                size=out_hw,
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        return depth_feat

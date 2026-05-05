@@ -69,4 +69,6 @@ parser.add_argument("--save_root", type=str)
 # parser.add_argument("--object_only", action="store_true",
                     # help="If set, compute depth metrics only on object foreground area from objectness_label_tok.")
 parser.add_argument("--oracle_mode", type=str,)
+parser.add_argument("--use_obs_depth", action='store_true')
+parser.add_argument("--vis_dir", type=str)
 cfgs = parser.parse_args()

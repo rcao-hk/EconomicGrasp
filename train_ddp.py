@@ -239,7 +239,8 @@ class Trainer:
             max_depth=cfgs.max_depth,
             bin_num=cfgs.bin_num,
             is_training=True,
-            vis_dir=os.path.join('vis', 'dpt_enhancer') if self.main else None,
+            use_obs_depth=cfgs.use_obs_depth,
+            vis_dir=cfgs.vis_dir,
             vis_every=1000,
         )
         # self.net = economicgrasp_dpt_direct(
