@@ -5873,7 +5873,7 @@ class MetricRegionCropGrouping(nn.Module):
         view_ctx = self.view_mlp(top_view_rot.reshape(B, M, 9).to(seed_ctx.dtype))  # (B,M,256)
 
         if self.use_view_conditioned_pool:
-            pooled, pool_attn_map, pool_entropy, pool_maxprob = self._simple_view_conditioned_pool(
+            pooled, pool_attn_map, pool_entropy, pool_maxprob = self._view_conditioned_pool(
                 patch_feat=patch_feat,
                 valid_flat=valid_flat,
                 view_ctx=view_ctx,
