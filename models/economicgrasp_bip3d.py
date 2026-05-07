@@ -5117,8 +5117,6 @@ def get_model(cfgs):
     )
 
 
-
-
 class MetricRegionCropGrouping(nn.Module):
     """
     E3GNet-style depth-adaptive local region crop for economicgrasp_dpt.
@@ -5169,10 +5167,6 @@ class MetricRegionCropGrouping(nn.Module):
         detach_aux_maps: bool = True,
         # pooling / fusion
         use_view_conditioned_pool: bool = False,
-        seed_scale_init: float = 1.0,
-        roi_scale_init: float = 1.0,
-        view_scale_init: float = 1.0,
-        use_output_norm: bool = True,
         # visualization / debug
         vis_dir: Optional[str] = None,
         vis_every: int = 500,
@@ -5200,7 +5194,6 @@ class MetricRegionCropGrouping(nn.Module):
         self.detach_depth = bool(detach_depth)
         self.detach_aux_maps = bool(detach_aux_maps)
         self.use_view_conditioned_pool = bool(use_view_conditioned_pool)
-        self.use_output_norm = bool(use_output_norm)
 
         self.vis_dir = vis_dir
         self.vis_every = int(vis_every)
@@ -5244,21 +5237,22 @@ class MetricRegionCropGrouping(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        # Simple fusion, no group_delta MLP.
-        self.seed_scale = nn.Parameter(torch.tensor(float(seed_scale_init), dtype=torch.float32))
-        self.roi_scale = nn.Parameter(torch.tensor(float(roi_scale_init), dtype=torch.float32))
-        self.view_scale = nn.Parameter(torch.tensor(float(view_scale_init), dtype=torch.float32))
-        self.output_norm = nn.LayerNorm(out_dim) if self.use_output_norm else nn.Identity()
-
-        # Optional view-conditioned pooling.
-        self.pool_q = nn.Sequential(
-            nn.Linear(out_dim * 2, out_dim),
+        self.output_mlp = nn.Sequential(
+            nn.Linear(out_dim * 3, out_dim),
             nn.ReLU(inplace=True),
             nn.Linear(out_dim, out_dim),
         )
-        self.pool_k = nn.Linear(out_dim, out_dim)
-        self.pool_v = nn.Linear(out_dim, out_dim)
-        self.pool_norm = nn.LayerNorm(out_dim)
+
+        if self.use_view_conditioned_pool:
+            self.view_pool_score = nn.Sequential(
+                nn.Conv2d(out_dim * 2, hidden_dim, kernel_size=1, bias=False),
+                nn.GroupNorm(8, hidden_dim),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(hidden_dim, 1, kernel_size=1, bias=True),
+            )
+
+            self.view_pool_norm = nn.LayerNorm(out_dim)
+
         self._iter = 0
 
     # ------------------------------------------------------------------
@@ -5371,45 +5365,49 @@ class MetricRegionCropGrouping(nn.Module):
 
     def _view_conditioned_pool(
         self,
-        patch_feat: torch.Tensor,      # (B*M,C,P,P)
-        valid_flat: torch.Tensor,      # (B*M,1,P,P), bool
-        seed_ctx: torch.Tensor,        # (B,M,C)
-        view_ctx: torch.Tensor,        # (B,M,C)
-        local_xy_b: torch.Tensor,      # (B,2,M,P,P)
-        depth_residual: torch.Tensor,  # (B,1,M,P,P)
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        B, M, C = seed_ctx.shape
-        _, _, P, _ = patch_feat.shape
+        patch_feat: torch.Tensor,  # (B*M, C, P, P)
+        valid_flat: torch.Tensor,  # (B*M, 1, P, P), bool
+        view_ctx: torch.Tensor,    # (B, M, C)
+        B: int,
+        M: int,
+    ):
+        BM, C, P, _ = patch_feat.shape
         S = P * P
-        BM = B * M
 
-        tokens = patch_feat.flatten(2).transpose(1, 2).contiguous()  # (BM,S,C)
-        q_in = torch.cat([seed_ctx, view_ctx], dim=-1).reshape(BM, 2 * C)
-        q = self.pool_q(q_in).unsqueeze(1)                           # (BM,1,C)
-        k = self.pool_k(tokens)                                       # (BM,S,C)
-        v = self.pool_v(tokens)                                       # (BM,S,C)
+        # Broadcast selected-view feature to every ROI cell.
+        view_bmcpp = view_ctx.reshape(BM, C, 1, 1).to(patch_feat.dtype)
+        view_bmcpp = view_bmcpp.expand(-1, -1, P, P)
 
-        logits = (q * k).sum(dim=-1) / math.sqrt(float(max(C, 1)))    # (BM,S)
+        # Spatial logits from [patch feature, view feature].
+        score_in = torch.cat([patch_feat, view_bmcpp], dim=1)  # (BM,2C,P,P)
+        logits = self.view_pool_score(score_in).reshape(BM, S) # (BM,S)
 
-        valid_tok = valid_flat.flatten(2).squeeze(1).bool()           # (BM,S)
+        valid_tok = valid_flat.reshape(BM, S).bool()
         logits = logits.masked_fill(~valid_tok, -1e4)
 
         attn = F.softmax(logits, dim=-1)
         attn = attn * valid_tok.float()
         attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-6)
 
-        pooled = (attn.unsqueeze(-1) * v).sum(dim=1)                  # (BM,C)
-        pooled = self.pool_norm(pooled)
+        tokens = patch_feat.flatten(2).transpose(1, 2).contiguous()  # (BM,S,C)
+
+        # Use original patch_feat as value, no value projection.
+        pooled = (attn.unsqueeze(-1) * tokens).sum(dim=1)  # (BM,C)
 
         empty = ~valid_tok.any(dim=-1)
         pooled = torch.where(empty.unsqueeze(-1), torch.zeros_like(pooled), pooled)
-        attn = torch.where(empty.unsqueeze(-1), torch.zeros_like(attn), attn)
 
+        pooled = self.view_pool_norm(pooled)
+        pooled = pooled.view(B, M, C)
+
+        # Debug stats.
         p = attn.clamp_min(1e-8)
-        entropy = (-(p * p.log()).sum(dim=-1) / math.log(max(S, 2))).mean()
-        maxprob = attn.max(dim=-1).values.mean()
+        pool_entropy = -(p * p.log()).sum(dim=-1) / math.log(max(S, 2))
+        pool_maxprob = attn.max(dim=-1).values
 
-        return pooled.view(B, M, C), attn.view(B, M, P, P), entropy, maxprob
+        pool_attn_map = attn.view(B, M, P, P)
+
+        return pooled, pool_attn_map, pool_entropy.view(B, M), pool_maxprob.view(B, M)
 
     # ------------------------------------------------------------------
     # visualization helpers
@@ -5758,7 +5756,6 @@ class MetricRegionCropGrouping(nn.Module):
                 f"dz_abs={float(stats['depth_abs_mean']):.3f} "
                 f"pool_ent={float(stats['pool_entropy']):.3f} "
                 f"pool_maxp={float(stats['pool_maxprob']):.3f} "
-                f"scales=({float(stats['seed_scale']):.3f},{float(stats['roi_scale']):.3f},{float(stats['view_scale']):.3f})"
             )
             print(msg)
         except Exception:
@@ -5876,13 +5873,12 @@ class MetricRegionCropGrouping(nn.Module):
         view_ctx = self.view_mlp(top_view_rot.reshape(B, M, 9).to(seed_ctx.dtype))  # (B,M,256)
 
         if self.use_view_conditioned_pool:
-            pooled, pool_attn_map, pool_entropy, pool_maxprob = self._view_conditioned_pool(
+            pooled, pool_attn_map, pool_entropy, pool_maxprob = self._simple_view_conditioned_pool(
                 patch_feat=patch_feat,
                 valid_flat=valid_flat,
-                seed_ctx=seed_ctx,
                 view_ctx=view_ctx,
-                local_xy_b=local_xy_b,
-                depth_residual=depth_residual,
+                B=B,
+                M=M,
             )
         else:
             pooled, pool_attn_map, pool_entropy, pool_maxprob = self._valid_aware_max_pool(
@@ -5892,13 +5888,10 @@ class MetricRegionCropGrouping(nn.Module):
                 M=M,
             )
 
-        grouped = (
-            self.seed_scale.to(seed_ctx.dtype) * seed_ctx +
-            self.roi_scale.to(seed_ctx.dtype) * pooled.to(seed_ctx.dtype) +
-            self.view_scale.to(seed_ctx.dtype) * view_ctx
-        )
-        grouped = self.output_norm(grouped).transpose(1, 2).contiguous()  # (B,256,M)
-
+        grouped = self.output_mlp(
+            torch.cat([seed_ctx, pooled.to(seed_ctx.dtype), view_ctx], dim=-1)
+        ).transpose(1, 2).contiguous()
+            
         # Debug stats.
         with torch.no_grad():
             valid_ratio = valid.float().mean()
@@ -5915,9 +5908,6 @@ class MetricRegionCropGrouping(nn.Module):
                 "depth_abs_mean": depth_abs.detach(),
                 "pool_entropy": pool_entropy.detach(),
                 "pool_maxprob": pool_maxprob.detach(),
-                "seed_scale": self.seed_scale.detach(),
-                "roi_scale": self.roi_scale.detach(),
-                "view_scale": self.view_scale.detach(),
             }
 
         if end_points is not None:
@@ -5930,10 +5920,7 @@ class MetricRegionCropGrouping(nn.Module):
             end_points["D: LR depth rel abs mean"] = stats["depth_abs_mean"].reshape(())
             end_points["D: LR pool entropy"] = stats["pool_entropy"].reshape(())
             end_points["D: LR pool maxprob"] = stats["pool_maxprob"].reshape(())
-            end_points["D: LR seed scale"] = stats["seed_scale"].reshape(())
-            end_points["D: LR roi scale"] = stats["roi_scale"].reshape(())
-            end_points["D: LR view scale"] = stats["view_scale"].reshape(())
-
+            
         self._maybe_debug_print(stats)
 
         self._maybe_visualize(
@@ -6181,10 +6168,6 @@ class economicgrasp_dpt(nn.Module):
             detach_aux_maps=True,
 
             use_view_conditioned_pool=True,
-            seed_scale_init=1.0,
-            roi_scale_init=1.0,
-            view_scale_init=1.0,
-            use_output_norm=True,
 
             vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'local_region_crop'),
             vis_every=self.vis_every,
