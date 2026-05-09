@@ -31,6 +31,18 @@ EPOCH_CNT = 0
 CHECKPOINT_PATH = cfgs.checkpoint_path if cfgs.checkpoint_path is not None and cfgs.resume else None
 
 
+def get_rank():
+    return dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+
+
+def sync_print(tag, t0):
+    """CUDA-synchronized timing print for debugging only."""
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    print(f"[rank{get_rank()}][time] {tag}: {time.time() - t0:.3f}s", flush=True)
+    return time.time()
+
+
 def setup_distributed():
     """Initialize single-node multi-GPU distributed training via torchrun.
 
@@ -65,7 +77,8 @@ def setup_distributed():
 
 def cleanup_distributed(distributed: bool):
     if distributed and dist.is_initialized():
-        dist.barrier()
+        # Do not call barrier here. If one rank exits due to an error,
+        # a cleanup barrier can create a second hang and hide the original issue.
         dist.destroy_process_group()
 
 
@@ -87,6 +100,7 @@ def my_worker_init_fn(worker_id):
 
 
 def _sync(distributed: bool):
+    """Explicit global sync; do not use inside the normal training loop."""
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     if distributed and dist.is_initialized():
@@ -98,14 +112,19 @@ def move_batch_to_device(batch_data_label, device, non_blocking=False):
         if 'list' in key:
             for i in range(len(batch_data_label[key])):
                 for j in range(len(batch_data_label[key][i])):
-                    batch_data_label[key][i][j] = batch_data_label[key][i][j].to(device, non_blocking=non_blocking)
+                    batch_data_label[key][i][j] = batch_data_label[key][i][j].to(
+                        device, non_blocking=non_blocking
+                    )
         else:
             if torch.is_tensor(batch_data_label[key]):
-                batch_data_label[key] = batch_data_label[key].to(device, non_blocking=non_blocking)
+                batch_data_label[key] = batch_data_label[key].to(
+                    device, non_blocking=non_blocking
+                )
     return batch_data_label
 
 
 def reduce_scalar(value, device, distributed: bool, average: bool = True):
+    """Reduce a fixed scalar. Every rank must call this in the same order."""
     if not torch.is_tensor(value):
         value = torch.tensor(float(value), device=device, dtype=torch.float32)
     else:
@@ -117,11 +136,82 @@ def reduce_scalar(value, device, distributed: bool, average: bool = True):
     return value
 
 
+def reduce_metric_dict(metrics: dict, device, distributed: bool, average: bool = True):
+    """Safely reduce a dynamic scalar-metric dict across DDP ranks.
+
+    DO NOT iterate over each rank's local metrics and call all_reduce per key:
+    label/loss debug keys can be data-dependent, so ranks can have different
+    key sets and enter different collective sequences.
+
+    This function first gathers the union of keys, then reduces one fixed-shape
+    tensor [num_keys, 2] = [sum, count]. Every rank executes the same collectives.
+    """
+    if (not distributed) or (not dist.is_available()) or (not dist.is_initialized()):
+        return dict(metrics)
+
+    local_keys = sorted(metrics.keys())
+    gathered_keys = [None for _ in range(dist.get_world_size())]
+    dist.all_gather_object(gathered_keys, local_keys)
+
+    all_keys = sorted(set(k for ks in gathered_keys for k in ks))
+    if len(all_keys) == 0:
+        return {}
+
+    buf = torch.zeros((len(all_keys), 2), device=device, dtype=torch.float64)
+    for j, key in enumerate(all_keys):
+        if key in metrics:
+            val = float(metrics[key])
+            if math.isfinite(val):
+                buf[j, 0] = val
+                buf[j, 1] = 1.0
+
+    dist.all_reduce(buf, op=dist.ReduceOp.SUM)
+
+    reduced = {}
+    for j, key in enumerate(all_keys):
+        count = float(buf[j, 1].item())
+        if count > 0:
+            reduced[key] = float((buf[j, 0] / count).item()) if average else float(buf[j, 0].item())
+    return reduced
+
+
 def reduce_sum_and_count(local_sum: float, local_count: int, device, distributed: bool):
     buf = torch.tensor([float(local_sum), float(local_count)], device=device, dtype=torch.float64)
     if distributed and dist.is_initialized():
         dist.all_reduce(buf, op=dist.ReduceOp.SUM)
     return float(buf[0].item()), int(buf[1].item())
+
+
+def reduce_metric_sums_counts(stat_sums: dict, stat_counts: dict, device, distributed: bool):
+    """Reduce epoch-level metric sums/counts safely when key sets differ by rank."""
+    if (not distributed) or (not dist.is_available()) or (not dist.is_initialized()):
+        return {
+            k: float(stat_sums[k]) / max(int(stat_counts.get(k, 0)), 1)
+            for k in sorted(stat_sums.keys())
+        }
+
+    local_keys = sorted(stat_sums.keys())
+    gathered_keys = [None for _ in range(dist.get_world_size())]
+    dist.all_gather_object(gathered_keys, local_keys)
+
+    all_keys = sorted(set(k for ks in gathered_keys for k in ks))
+    if len(all_keys) == 0:
+        return {}
+
+    buf = torch.zeros((len(all_keys), 2), device=device, dtype=torch.float64)
+    for j, key in enumerate(all_keys):
+        if key in stat_sums:
+            buf[j, 0] = float(stat_sums[key])
+            buf[j, 1] = float(stat_counts.get(key, 0))
+
+    dist.all_reduce(buf, op=dist.ReduceOp.SUM)
+
+    reduced = {}
+    for j, key in enumerate(all_keys):
+        count = float(buf[j, 1].item())
+        if count > 0:
+            reduced[key] = float((buf[j, 0] / count).item())
+    return reduced
 
 
 class MetricAverager:
@@ -239,8 +329,8 @@ class Trainer:
             max_depth=cfgs.max_depth,
             bin_num=cfgs.bin_num,
             is_training=True,
-            use_obs_depth=cfgs.use_obs_depth,
-            vis_dir=cfgs.vis_dir,
+            use_obs_depth=getattr(cfgs, 'use_obs_depth', False),
+            vis_dir=getattr(cfgs, 'vis_dir', None),
             vis_every=1000,
         )
         # self.net = economicgrasp_dpt_direct(
@@ -251,7 +341,7 @@ class Trainer:
         #     vis_dir=os.path.join('vis', 'dpt_view_attn_direct') if self.main else None,
         #     vis_every=1000,
         # )
-        
+
         # self.net = economicgrasp_query(
         #     min_depth=cfgs.min_depth,
         #     max_depth=cfgs.max_depth,
@@ -344,49 +434,60 @@ class Trainer:
         data_start_time = time.perf_counter()
 
         for batch_idx, batch_data_label in enumerate(self.TRAIN_DATALOADER):
-            batch_data_label = move_batch_to_device(batch_data_label, self.device, non_blocking=cfgs.pin_memory)
+            t = time.time()
 
-            _sync(self.distributed)
+            batch_data_label = move_batch_to_device(
+                batch_data_label,
+                self.device,
+                non_blocking=cfgs.pin_memory,
+            )
+
             data_end_time = time.perf_counter()
             interval_data_time += (data_end_time - data_start_time)
 
-            _sync(self.distributed)
             model_start_time = time.perf_counter()
             end_points = self.net(batch_data_label)
-            _sync(self.distributed)
             model_end_time = time.perf_counter()
             interval_model_time += (model_end_time - model_start_time)
 
             end_points['epoch'] = epoch
 
-            _sync(self.distributed)
             loss_start_time = time.perf_counter()
             loss, end_points = get_loss_economicgrasp(end_points)
-            _sync(self.distributed)
             loss_end_time = time.perf_counter()
             interval_loss_time += (loss_end_time - loss_start_time)
 
             self.optimizer.zero_grad(set_to_none=True)
             bwdopt_start_time = time.perf_counter()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)
+            # torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)
             self.optimizer.step()
-            _sync(self.distributed)
+
             bwdopt_end_time = time.perf_counter()
             interval_opt_time += (bwdopt_end_time - bwdopt_start_time)
 
+            # IMPORTANT: dynamic metric keys must be reduced with a fixed collective pattern.
             metrics = self.extract_scalar_metrics(end_points)
+            metrics = reduce_metric_dict(metrics, self.device, self.distributed, average=True)
             for key, val in metrics.items():
-                reduced_val = reduce_scalar(val, self.device, self.distributed, average=True).item()
-                stat_interval.update_scalar(key, reduced_val)
+                stat_interval.update_scalar(key, val)
 
-            grasp_loss_val = reduce_scalar(end_points['A: Grasp Loss'], self.device, self.distributed, average=True).item()
+            # Use the safely reduced metric if present; otherwise reduce this fixed scalar once.
+            if 'A: Grasp Loss' in metrics:
+                grasp_loss_val = metrics['A: Grasp Loss']
+            else:
+                grasp_loss_val = reduce_scalar(
+                    end_points['A: Grasp Loss'],
+                    self.device,
+                    self.distributed,
+                    average=True,
+                ).item()
+
             overall_loss_local += grasp_loss_val
             local_batches += 1
 
             if (batch_idx + 1) % batch_interval == 0:
                 remain_batches_local = (cfgs.max_epoch - epoch) * num_batches_local - batch_idx - 1
-                _sync(self.distributed)
                 interval_time = time.perf_counter() - interval_start_time
                 avg_batch_time = interval_time / batch_interval
                 remain_time_h = remain_batches_local * avg_batch_time / 3600.0
@@ -421,10 +522,14 @@ class Trainer:
                 interval_opt_time = 0.0
                 interval_start_time = time.perf_counter()
 
-            _sync(self.distributed)
             data_start_time = time.perf_counter()
 
-        overall_sum, overall_count = reduce_sum_and_count(overall_loss_local, local_batches, self.device, self.distributed)
+        overall_sum, overall_count = reduce_sum_and_count(
+            overall_loss_local,
+            local_batches,
+            self.device,
+            self.distributed,
+        )
         overall_loss = overall_sum / max(overall_count, 1)
         self.log_string(f'overall grasp loss per batch: {overall_loss}, batch num:{overall_count}')
         return overall_loss
@@ -443,7 +548,11 @@ class Trainer:
             if self.main and batch_idx % 10 == 0:
                 self.log_string(f'Eval batch: {batch_idx}')
 
-            batch_data_label = move_batch_to_device(batch_data_label, self.device, non_blocking=cfgs.pin_memory)
+            batch_data_label = move_batch_to_device(
+                batch_data_label,
+                self.device,
+                non_blocking=cfgs.pin_memory,
+            )
 
             with torch.no_grad():
                 end_points = self.net(batch_data_label)
@@ -457,14 +566,19 @@ class Trainer:
             overall_loss_local += float(end_points['A: Grasp Loss'].detach().item())
             local_batches += 1
 
-        reduced_metrics = {}
-        for key in sorted(stat_sums_local.keys()):
-            total_sum, total_count = reduce_sum_and_count(
-                stat_sums_local[key], stat_counts_local[key], self.device, self.distributed
-            )
-            reduced_metrics[key] = total_sum / max(total_count, 1)
+        reduced_metrics = reduce_metric_sums_counts(
+            stat_sums_local,
+            stat_counts_local,
+            self.device,
+            self.distributed,
+        )
 
-        overall_sum, overall_count = reduce_sum_and_count(overall_loss_local, local_batches, self.device, self.distributed)
+        overall_sum, overall_count = reduce_sum_and_count(
+            overall_loss_local,
+            local_batches,
+            self.device,
+            self.distributed,
+        )
         overall_loss = overall_sum / max(overall_count, 1)
 
         if self.main:
