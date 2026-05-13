@@ -19,7 +19,7 @@ from utils.arguments import cfgs
 
 # Local Libraries
 from models.economicgrasp_bip3d import economicgrasp_bip3d, economicgrasp_dpt, economicgrasp_dpt_direct
-from models.loss_economicgrasp_depth_c1 import get_loss_c2_1 as get_loss_economicgrasp
+from models.loss_economicgrasp_depth_c1 import get_loss_c2_2 as get_loss_economicgrasp
 
 # from models.economicgrasp_query import economicgrasp_query
 # from models.loss_economicgrasp_query import get_loss_query as get_loss_economicgrasp
@@ -255,6 +255,7 @@ class Trainer:
             remove_outlier=True,
             augment=False,
             use_gt_depth=cfgs.use_gt_depth,
+            use_fuse_depth=cfgs.use_fuse_depth,
             min_depth=cfgs.min_depth,
             max_depth=cfgs.max_depth,
             bin_num=cfgs.bin_num,
@@ -269,6 +270,7 @@ class Trainer:
             augment=False,
             voxel_size=cfgs.voxel_size,
             use_gt_depth=False,
+            use_fuse_depth=cfgs.use_fuse_depth,
             min_depth=cfgs.min_depth,
             max_depth=cfgs.max_depth,
             bin_num=cfgs.bin_num,
@@ -331,7 +333,7 @@ class Trainer:
             is_training=True,
             use_obs_depth=getattr(cfgs, 'use_obs_depth', False),
             vis_dir=getattr(cfgs, 'vis_dir', None),
-            vis_every=1000,
+            vis_every=getattr(cfgs, 'vis_every', 1000),
         )
         # self.net = economicgrasp_dpt_direct(
         #     min_depth=cfgs.min_depth,
@@ -460,7 +462,7 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
             bwdopt_start_time = time.perf_counter()
             loss.backward()
-            # torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)
             self.optimizer.step()
 
             bwdopt_end_time = time.perf_counter()

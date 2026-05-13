@@ -70,16 +70,9 @@ class GraspSpatialEnhancer(nn.Module):
         min_depth: float = 0.2,
         max_depth: float = 1.0,
         num_depth: int = 256,
-        detach_depth_prob: bool = True,
-        use_prob_embedding: bool = False,
+        detach_depth_grad: bool = True,
         use_post_norm: bool = False,
         prob_eps: float = 1e-6,
-        
-        # sensor depth feature
-        use_sensor_depth_feat: bool = True,
-        depth_feat_dim: int = 128,
-        depth_norm_fn: str = "layer",
-        depth_downsample: int = 2,
         
         # visualization
         vis_dir: Optional[str] = None,
@@ -94,14 +87,10 @@ class GraspSpatialEnhancer(nn.Module):
         self.min_depth = float(min_depth)
         self.max_depth = float(max_depth)
         self.num_depth = int(num_depth)
-        self.detach_depth_prob = bool(detach_depth_prob)
-        self.use_prob_embedding = bool(use_prob_embedding)
+        self.detach_depth_grad = bool(detach_depth_grad)
         self.use_post_norm = bool(use_post_norm)
         self.prob_eps = float(prob_eps)
 
-        self.use_sensor_depth_feat = bool(use_sensor_depth_feat)
-        self.depth_feat_dim = int(depth_feat_dim)
-        
         self.vis_dir = vis_dir
         self.vis_every = int(vis_every)
         self.vis_dpi = int(vis_dpi)
@@ -124,17 +113,6 @@ class GraspSpatialEnhancer(nn.Module):
         # Because it is linear, we can use E[xyz] instead of enumerating all xyz_k.
         self.pts_fc = nn.Linear(3, self.feature_3d_dim)
 
-        if self.use_sensor_depth_feat:
-            self.depth_adapter = SensorDepthAdapter(
-                feature_3d_dim=self.depth_feat_dim,
-                min_depth=self.min_depth,
-                max_depth=self.max_depth,
-                norm_fn=depth_norm_fn,
-                downsample=depth_downsample,
-            )
-        else:
-            self.depth_adapter = None
-
         # Extra grasp-friendly scalar geometry:
         # ray_unit(3), normalized mean depth(1), normalized std depth(1), entropy(1)
         # scalar_in_dim = 6
@@ -147,23 +125,9 @@ class GraspSpatialEnhancer(nn.Module):
 
         fusion_in_dim = (
             self.embed_dims
-            + self.feature_3d_dim  # probabilistic 3D position embedding from predicted depth
+            + self.feature_3d_dim  # IPE from final depth
         )
 
-        if self.use_sensor_depth_feat:
-            fusion_in_dim += self.depth_feat_dim
-            
-        if self.use_prob_embedding:
-            # Optional. More expressive, but heavier at 448x448 and D=256.
-            self.prob_fc = nn.Sequential(
-                nn.Conv2d(self.num_depth, self.feature_3d_dim, kernel_size=1, bias=False),
-                _make_group_norm(self.feature_3d_dim),
-                nn.GELU(),
-                nn.Conv2d(self.feature_3d_dim, self.feature_3d_dim, kernel_size=1),
-            )
-            fusion_in_dim += self.feature_3d_dim
-        else:
-            self.prob_fc = None
 
         self.delta_fc = nn.Sequential(
             nn.Conv2d(fusion_in_dim, self.embed_dims, kernel_size=1, bias=False),
@@ -275,6 +239,52 @@ class GraspSpatialEnhancer(nn.Module):
         entropy = entropy.clamp(0.0, 1.0)
 
         return mean_z.to(out_dtype), std_z.to(out_dtype), entropy.to(out_dtype)
+
+    def _depth_map_moments(
+        self,
+        depth_map: torch.Tensor,
+        size_hw: Tuple[int, int],
+        out_dtype: torch.dtype,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Regression-depth version.
+
+        depth_map:
+            (B,1,H,W), final depth map already constructed outside:
+            RGB:  direct depth
+            RGBD: sensor depth + residual depth
+
+        Returns:
+            mean_z:  (B,1,Hf,Wf)
+            std_z:   zeros, no distribution uncertainty
+            entropy: zeros, no distribution uncertainty
+        """
+        if depth_map.dim() == 3:
+            depth_map = depth_map.unsqueeze(1)
+        assert depth_map.dim() == 4 and depth_map.size(1) == 1, \
+            f"depth_map should be B1HW, got {tuple(depth_map.shape)}"
+
+        if depth_map.shape[-2:] != tuple(size_hw):
+            mean_z = F.interpolate(
+                depth_map,
+                size=size_hw,
+                mode="bilinear",
+                align_corners=False,
+            )
+        else:
+            mean_z = depth_map
+
+        mean_z = torch.nan_to_num(
+            mean_z,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp_min(1e-6)
+        
+        mean_z = mean_z.to(out_dtype)
+        std_z = torch.zeros_like(mean_z)
+        entropy = torch.zeros_like(mean_z)
+        return mean_z, std_z, entropy
 
     # -------------------------------------------------------------------------
     # visualization helpers
@@ -605,12 +615,9 @@ class GraspSpatialEnhancer(nn.Module):
         entropy: torch.Tensor,
         ray_unit: torch.Tensor,
         ipe: torch.Tensor,
-        # scalar_geom_feat: torch.Tensor,
         gate: torch.Tensor,
         delta: torch.Tensor,
         out: torch.Tensor,
-        depth_feat: Optional[torch.Tensor] = None,
-        sensor_depth: Optional[torch.Tensor] = None,
         img: Optional[torch.Tensor] = None,
         vis_prefix: Optional[str] = None,
     ):
@@ -640,16 +647,32 @@ class GraspSpatialEnhancer(nn.Module):
             # ------------------------------------------------------------------
             # Derived maps
             # ------------------------------------------------------------------
-            prob_peak = prob.max(dim=1, keepdim=True).values  # (B,1,Hf,Wf)
+            if prob is not None:
+                prob_peak = prob.max(dim=1, keepdim=True).values  # (B,1,Hf,Wf)
 
-            top_idx = prob.argmax(dim=1, keepdim=True)        # (B,1,Hf,Wf)
-            bins = self.depth_bins.to(device=prob.device, dtype=prob.dtype).view(1, self.num_depth, 1, 1)
-            top_z = bins.expand(prob.shape[0], -1, prob.shape[-2], prob.shape[-1]).gather(1, top_idx)
+                top_idx = prob.argmax(dim=1, keepdim=True)        # (B,1,Hf,Wf)
+                bins = self.depth_bins.to(
+                    device=prob.device,
+                    dtype=prob.dtype,
+                ).view(1, self.num_depth, 1, 1)
+
+                top_z = bins.expand(
+                    prob.shape[0],
+                    -1,
+                    prob.shape[-2],
+                    prob.shape[-1],
+                ).gather(1, top_idx)
+
+            else:
+                # Regression-depth mode: no depth distribution.
+                # Use final depth map at feature resolution as top_z,
+                # and set prob_peak to zero for visualization compatibility.
+                prob_peak = torch.zeros_like(mean_z)
+                top_z = mean_z.detach()
 
             feat_norm = feat_2d.detach().float().norm(dim=1, keepdim=True)
             out_norm = out.detach().float().norm(dim=1, keepdim=True)
             ipe_norm = ipe.detach().float().norm(dim=1, keepdim=True)
-            # geom_norm = scalar_geom_feat.detach().float().norm(dim=1, keepdim=True)
 
             gate_mean = gate.detach().float().mean(dim=1, keepdim=True)
             delta_abs = delta.detach().float().abs().mean(dim=1, keepdim=True)
@@ -661,53 +684,6 @@ class GraspSpatialEnhancer(nn.Module):
             ray_y = ray_unit[:, 1:2]
             ray_z = ray_unit[:, 2:3]
 
-            # ------------------------------------------------------------------
-            # Sensor depth visualization maps
-            # ------------------------------------------------------------------
-            sensor_depth_vis = None          # raw/resized sensor depth map, invalid = 0
-            sensor_valid_vis = None          # raw valid mask
-            sensor_depth_feat_rs = None      # sensor depth resized to feature map resolution
-            sensor_valid_feat = None         # valid mask resized to feature map resolution
-            pred_sensor_absdiff = None       # |DPT mean_z - sensor depth| at feature resolution
-            pred_sensor_signed = None        # DPT mean_z - sensor depth
-
-            if sensor_depth is not None:
-                sd = sensor_depth.detach()
-                if sd.dim() == 3:
-                    sd = sd.unsqueeze(1)
-                sd = sd.to(device=mean_z.device, dtype=mean_z.dtype)
-
-                sensor_valid_vis = (
-                    (sd > self.min_depth)
-                    & (sd < self.max_depth)
-                    & torch.isfinite(sd)
-                ).float()
-
-                sd_clamped = sd.clamp(self.min_depth, self.max_depth)
-                sensor_depth_vis = torch.where(
-                    sensor_valid_vis > 0.5,
-                    sd_clamped,
-                    torch.zeros_like(sd_clamped),
-                )
-
-                if sensor_depth_vis.shape[-2:] != mean_z.shape[-2:]:
-                    sensor_depth_feat_rs = F.interpolate(
-                        sensor_depth_vis,
-                        size=mean_z.shape[-2:],
-                        mode="nearest",
-                    )
-                    sensor_valid_feat = F.interpolate(
-                        sensor_valid_vis,
-                        size=mean_z.shape[-2:],
-                        mode="nearest",
-                    )
-                else:
-                    sensor_depth_feat_rs = sensor_depth_vis
-                    sensor_valid_feat = sensor_valid_vis
-
-                pred_sensor_signed = (mean_z - sensor_depth_feat_rs) * sensor_valid_feat
-                pred_sensor_absdiff = pred_sensor_signed.abs()
-                
             # ------------------------------------------------------------------
             # Save compact summary grid
             # ------------------------------------------------------------------
@@ -724,162 +700,7 @@ class GraspSpatialEnhancer(nn.Module):
                 grid_items.append({"title": "RGB", "data": rgb_np, "rgb": True})
             else:
                 img_b0 = None
-                
-            if depth_feat is not None:
-                depth_feat_norm = depth_feat.detach().float().norm(dim=1, keepdim=True)
-            else:
-                depth_feat_norm = None
-
-            # grid_items.extend([
-            #     {
-            #         "title": "mean_z",
-            #         "data": mean_z[b0, 0],
-            #         "cmap": "viridis",
-            #         "vmin": self.min_depth,
-            #         "vmax": self.max_depth,
-            #     },
-            #     {
-            #         "title": "top_z(argmax prob)",
-            #         "data": top_z[b0, 0],
-            #         "cmap": "viridis",
-            #         "vmin": self.min_depth,
-            #         "vmax": self.max_depth,
-            #     },
-            #     {
-            #         "title": "std_z",
-            #         "data": std_z[b0, 0],
-            #         "cmap": "magma",
-            #         "vmin": 0.0,
-            #     },
-            #     {
-            #         "title": "entropy",
-            #         "data": entropy[b0, 0],
-            #         "cmap": "magma",
-            #         "vmin": 0.0,
-            #         "vmax": 1.0,
-            #     },
-            #     {
-            #         "title": "prob_peak",
-            #         "data": prob_peak[b0, 0],
-            #         "cmap": "viridis",
-            #         "vmin": 0.0,
-            #         "vmax": 1.0,
-            #     },
-            #     {
-            #         "title": "gate_mean",
-            #         "data": gate_mean[b0, 0],
-            #         "cmap": "viridis",
-            #         "vmin": 0.0,
-            #         "vmax": 1.0,
-            #     },
-            #     {
-            #         "title": "delta_abs",
-            #         "data": delta_abs[b0, 0],
-            #         "cmap": "plasma",
-            #         "vmin": 0.0,
-            #     },
-            #     {
-            #         "title": "update_abs=|gate*delta|",
-            #         "data": update_abs[b0, 0],
-            #         "cmap": "plasma",
-            #         "vmin": 0.0,
-            #     },
-            #     {
-            #         "title": "update_ratio",
-            #         "data": update_ratio[b0, 0],
-            #         "cmap": "plasma",
-            #         "vmin": 0.0,
-            #     },
-            #     {
-            #         "title": "feat_norm_before",
-            #         "data": feat_norm[b0, 0],
-            #         "cmap": "viridis",
-            #         "vmin": 0.0,
-            #     },
-            #     {
-            #         "title": "feat_norm_after",
-            #         "data": out_norm[b0, 0],
-            #         "cmap": "viridis",
-            #         "vmin": 0.0,
-            #     },
-            #     {
-            #         "title": "ipe_norm",
-            #         "data": ipe_norm[b0, 0],
-            #         "cmap": "viridis",
-            #         "vmin": 0.0,
-            #     },
-            #     # {
-            #     #     "title": "scalar_geom_norm",
-            #     #     "data": geom_norm[b0, 0],
-            #     #     "cmap": "viridis",
-            #     #     "vmin": 0.0,
-            #     # },
-            #     {
-            #         "title": "ray_x",
-            #         "data": ray_x[b0, 0],
-            #         "cmap": "coolwarm",
-            #         "vmin": -1.0,
-            #         "vmax": 1.0,
-            #     },
-            #     {
-            #         "title": "ray_y",
-            #         "data": ray_y[b0, 0],
-            #         "cmap": "coolwarm",
-            #         "vmin": -1.0,
-            #         "vmax": 1.0,
-            #     },
-            #     {
-            #         "title": "ray_z",
-            #         "data": ray_z[b0, 0],
-            #         "cmap": "viridis",
-            #         "vmin": 0.0,
-            #         "vmax": 1.0,
-            #     },
-            # ])
-            
-            # if depth_feat_norm is not None:
-            #     grid_items.append({
-            #         "title": "sensor_depth_feat_norm",
-            #         "data": depth_feat_norm[b0, 0],
-            #         "cmap": "viridis",
-            #         "vmin": 0.0,
-            #     })
-
-            # if sensor_depth_vis is not None:
-            #     grid_items.extend([
-            #         {
-            #             "title": "sensor_depth",
-            #             "data": sensor_depth_vis[b0, 0],
-            #             "cmap": "viridis",
-            #             "vmin": self.min_depth,
-            #             "vmax": self.max_depth,
-            #         },
-            #         {
-            #             "title": "sensor_valid",
-            #             "data": sensor_valid_vis[b0, 0],
-            #             "cmap": "gray",
-            #             "vmin": 0.0,
-            #             "vmax": 1.0,
-            #         },
-            #         {
-            #             "title": "|pred_z - sensor_z|",
-            #             "data": pred_sensor_absdiff[b0, 0],
-            #             "cmap": "magma",
-            #             "vmin": 0.0,
-            #         },
-            #         {
-            #             "title": "pred_z - sensor_z",
-            #             "data": pred_sensor_signed[b0, 0],
-            #             "cmap": "coolwarm",
-            #         },
-            #     ])
                                                 
-            # self._save_summary_grid(
-            #     grid_items,
-            #     os.path.join(out_dir, f"{prefix}_summary.png"),
-            #     cols=4,
-            # )
-
             # ------------------------------------------------------------------
             # Individual maps
             # ------------------------------------------------------------------
@@ -984,47 +805,7 @@ class GraspSpatialEnhancer(nn.Module):
                     cmap="plasma",
                     vmin=0.0,
                 )
-
-            if sensor_depth_vis is not None:
-                self._save_map_png(
-                    sensor_depth_vis[b0, 0],
-                    os.path.join(out_dir, f"{prefix}_sensor_depth.png"),
-                    title="sensor depth",
-                    cmap="viridis",
-                    vmin=self.min_depth,
-                    vmax=self.max_depth,
-                )
-                self._save_map_png(
-                    sensor_valid_vis[b0, 0],
-                    os.path.join(out_dir, f"{prefix}_sensor_valid.png"),
-                    title="sensor depth valid mask",
-                    cmap="gray",
-                    vmin=0.0,
-                    vmax=1.0,
-                )
-                self._save_map_png(
-                    pred_sensor_absdiff[b0, 0],
-                    os.path.join(out_dir, f"{prefix}_pred_sensor_absdiff.png"),
-                    title="|predicted mean_z - sensor depth|",
-                    cmap="magma",
-                    vmin=0.0,
-                )
-                self._save_map_png(
-                    pred_sensor_signed[b0, 0],
-                    os.path.join(out_dir, f"{prefix}_pred_sensor_signeddiff.png"),
-                    title="predicted mean_z - sensor depth",
-                    cmap="coolwarm",
-                )
-
-                if depth_feat_norm is not None:
-                    self._save_map_png(
-                        depth_feat_norm[b0, 0],
-                        os.path.join(out_dir, f"{prefix}_sensor_depth_feat_norm.png"),
-                        title="sensor depth feature norm",
-                        cmap="viridis",
-                        vmin=0.0,
-                    )
-                    
+    
             # ------------------------------------------------------------------
             # Feature PCA maps
             # ------------------------------------------------------------------
@@ -1032,7 +813,6 @@ class GraspSpatialEnhancer(nn.Module):
             pca_after = self._feature_pca_rgb(out[b0])
             pca_delta = self._feature_pca_rgb(delta[b0])
             pca_ipe = self._feature_pca_rgb(ipe[b0])
-            # pca_geom = self._feature_pca_rgb(scalar_geom_feat[b0])
 
             if pca_before is not None:
                 self._save_rgb_png(
@@ -1129,37 +909,56 @@ class GraspSpatialEnhancer(nn.Module):
     def forward(
         self,
         feat_2d: torch.Tensor,
-        depth_prob: torch.Tensor,
-        K: torch.Tensor,
+        depth_prob: Optional[torch.Tensor] = None,
+        K: Optional[torch.Tensor] = None,
         image_hw: Optional[Tuple[int, int]] = None,
-        sensor_depth: Optional[torch.Tensor] = None,
+        depth_map: Optional[torch.Tensor] = None,
         return_maps: bool = False,
         img: Optional[torch.Tensor] = None,
         vis_prefix: Optional[str] = None,
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         assert feat_2d.dim() == 4, f"feat_2d should be BCHW, got {feat_2d.shape}"
-        assert depth_prob.dim() == 4, f"depth_prob should be BDHW, got {depth_prob.shape}"
 
         B, C, Hf, Wf = feat_2d.shape
         if C != self.embed_dims:
             raise ValueError(f"feat channel C={C} does not match embed_dims={self.embed_dims}")
 
-        if depth_prob.size(1) != self.num_depth:
-            raise ValueError(
-                f"depth_prob has D={depth_prob.size(1)}, but enhancer expects num_depth={self.num_depth}"
-            )
-
-        if image_hw is None:
-            image_hw = depth_prob.shape[-2:]
+        if K is None:
+            raise ValueError("GraspSpatialEnhancer requires K.")
 
         dtype = feat_2d.dtype
         device = feat_2d.device
 
-        prob = self._resize_and_normalize_prob(depth_prob, (Hf, Wf), self.prob_eps)
-        if self.detach_depth_prob:
-            prob = prob.detach()
+        prob = None
 
-        mean_z, std_z, entropy = self._depth_moments(prob, out_dtype=dtype)
+        # New path: final depth map from economicgrasp_dpt
+        if depth_map is not None:
+            depth_map = depth_map.to(device=device, dtype=dtype)
+            if image_hw is None:
+                image_hw = depth_map.shape[-2:]
+
+            mean_z, std_z, entropy = self._depth_map_moments(
+                depth_map=depth_map,
+                size_hw=(Hf, Wf),
+                out_dtype=dtype,
+            )
+
+        # Old path: depth distribution, kept only for compatibility
+        else:
+            if depth_prob is None:
+                raise ValueError("Either depth_map or depth_prob must be provided.")
+
+            assert depth_prob.dim() == 4, f"depth_prob should be BDHW, got {depth_prob.shape}"
+            if depth_prob.size(1) != self.num_depth:
+                raise ValueError(
+                    f"depth_prob has D={depth_prob.size(1)}, but enhancer expects num_depth={self.num_depth}"
+                )
+
+            if image_hw is None:
+                image_hw = depth_prob.shape[-2:]
+
+            prob = self._resize_and_normalize_prob(depth_prob, (Hf, Wf), self.prob_eps)
+            mean_z, std_z, entropy = self._depth_moments(prob, out_dtype=dtype)
 
         ray, ray_unit = self._camera_rays(
             B=B,
@@ -1171,6 +970,11 @@ class GraspSpatialEnhancer(nn.Module):
             dtype=dtype,
         )
 
+        if self.detach_depth_grad:
+            mean_z = mean_z.detach()
+            std_z = std_z.detach()
+            entropy = entropy.detach()
+            
         # E[xyz] = ray * E[z]
         mean_xyz = ray * mean_z  # (B,3,Hf,Wf)
 
@@ -1180,53 +984,7 @@ class GraspSpatialEnhancer(nn.Module):
             mean_xyz.permute(0, 2, 3, 1).contiguous()
         ).permute(0, 3, 1, 2).contiguous()
 
-        # z_range = max(self.max_depth - self.min_depth, 1e-6)
-        # mean_z_norm = ((mean_z - self.min_depth) / z_range).clamp(0.0, 1.0)
-        # std_z_norm = (std_z / z_range).clamp(0.0, 1.0)
-
-        # scalar_geom = torch.cat(
-        #     [
-        #         ray_unit,
-        #         mean_z_norm,
-        #         std_z_norm,
-        #         entropy,
-        #     ],
-        #     dim=1,
-        # )
-        # scalar_geom_feat = self.scalar_geom_fc(scalar_geom)
-        # fuse_list = [feat_2d, ipe]
-
-        # ------------------------------------------------------------------
-        # Sensor depth feature only.
-        # IPE still comes from predicted depth_prob.
-        # Sensor depth does NOT generate depth distribution or depth prior.
-        # ------------------------------------------------------------------
-        depth_feat = None
-        if self.use_sensor_depth_feat:
-            if sensor_depth is None:
-                raise ValueError(
-                    "use_sensor_depth_feat=True, but sensor_depth is None. "
-                    "Please pass sensor_depth to GraspSpatialEnhancer.forward()."
-                )
-
-            if sensor_depth.dim() == 3:
-                sensor_depth = sensor_depth.unsqueeze(1)
-
-            depth_feat = self.depth_adapter(
-                sensor_depth=sensor_depth,
-                out_hw=(Hf, Wf),
-            )  # (B, depth_feat_dim, Hf, Wf)
-
         fuse_list = [feat_2d, ipe]
-
-        if depth_feat is not None:
-            fuse_list.append(depth_feat)
-
-        if self.use_prob_embedding:
-            # Keep this off for the first run. It is more expensive and can overfit.
-            prob_feat = self.prob_fc(prob.to(dtype))
-            fuse_list.append(prob_feat)
-
         fused = torch.cat(fuse_list, dim=1)
 
         delta = self.delta_fc(fused)
@@ -1243,12 +1001,9 @@ class GraspSpatialEnhancer(nn.Module):
             entropy=entropy,
             ray_unit=ray_unit,
             ipe=ipe,
-            # scalar_geom_feat=scalar_geom_feat,
             gate=gate,
             delta=delta,
             out=out,
-            depth_feat=depth_feat,
-            sensor_depth=sensor_depth,   # add this
             img=img,
             vis_prefix=vis_prefix,
         )
@@ -1262,15 +1017,17 @@ class GraspSpatialEnhancer(nn.Module):
             "D: GSE delta_abs": delta.detach().abs().mean(),
         }
 
-        if depth_feat is not None:
-            aux["D: GSE depth_feat_abs"] = depth_feat.detach().abs().mean()
-            aux["D: GSE depth_feat_norm"] = depth_feat.detach().norm(dim=1).mean()
-
         if return_maps:
-            prob_peak = prob.max(dim=1, keepdim=True).values
-            top_idx = prob.argmax(dim=1, keepdim=True)
-            bins = self.depth_bins.to(device=prob.device, dtype=prob.dtype).view(1, self.num_depth, 1, 1)
-            top_z = bins.expand(prob.shape[0], -1, prob.shape[-2], prob.shape[-1]).gather(1, top_idx)
+            if prob is not None:
+                prob_peak = prob.max(dim=1, keepdim=True).values
+
+                top_idx = prob.argmax(dim=1, keepdim=True)
+                bins = self.depth_bins.to(device=prob.device, dtype=prob.dtype).view(1, self.num_depth, 1, 1)
+                top_z = bins.expand(prob.shape[0], -1, prob.shape[-2], prob.shape[-1]).gather(1, top_idx)
+            else:
+                # regression-depth mode: no probability distribution
+                prob_peak = torch.zeros_like(mean_z)
+                top_z = mean_z
 
             aux["spatial_mean_z_map"] = mean_z.detach()
             aux["spatial_std_z_map"] = std_z.detach()
@@ -1280,42 +1037,6 @@ class GraspSpatialEnhancer(nn.Module):
             aux["spatial_gate_mean_map"] = gate.detach().mean(dim=1, keepdim=True)
             aux["spatial_delta_abs_map"] = delta.detach().abs().mean(dim=1, keepdim=True)
             aux["spatial_update_abs_map"] = (gate * delta).detach().abs().mean(dim=1, keepdim=True)
-            if depth_feat is not None:
-                aux["spatial_depth_feat_norm_map"] = depth_feat.detach().norm(dim=1, keepdim=True)
-
-            if sensor_depth is not None:
-                sd = sensor_depth.detach()
-                if sd.dim() == 3:
-                    sd = sd.unsqueeze(1)
-                sd = sd.to(device=mean_z.device, dtype=mean_z.dtype)
-
-                sensor_valid = (
-                    (sd > self.min_depth)
-                    & (sd < self.max_depth)
-                    & torch.isfinite(sd)
-                ).float()
-                sensor_depth_vis = torch.where(
-                    sensor_valid > 0.5,
-                    sd.clamp(self.min_depth, self.max_depth),
-                    torch.zeros_like(sd),
-                )
-
-                sensor_depth_feat_rs = F.interpolate(
-                    sensor_depth_vis,
-                    size=mean_z.shape[-2:],
-                    mode="nearest",
-                )
-                sensor_valid_feat = F.interpolate(
-                    sensor_valid,
-                    size=mean_z.shape[-2:],
-                    mode="nearest",
-                )
-
-                aux["spatial_sensor_depth_map"] = sensor_depth_vis
-                aux["spatial_sensor_valid_map"] = sensor_valid
-                aux["spatial_pred_sensor_absdiff_map"] = (
-                    (mean_z.detach() - sensor_depth_feat_rs).abs() * sensor_valid_feat
-                )
                 
         return out, aux
 

@@ -272,7 +272,7 @@ from torchvision import transforms
 class GraspNetMultiDataset(Dataset):
     def __init__(self, root, camera='kinect', split='train', num_points=20000, voxel_size=0.005, remove_outlier=False, remove_invisible=True,
                  augment=False, load_label=True, use_gt_depth=False,
-                 min_depth=0.2, max_depth=1.0, bin_num=256, depth_strides=2):
+                 use_fuse_depth=False, min_depth=0.2, max_depth=1.0, bin_num=256, depth_strides=2):
         self.root = root
         self.split = split
         self.voxel_size = voxel_size
@@ -283,6 +283,7 @@ class GraspNetMultiDataset(Dataset):
         self.augment = augment
         self.load_label = load_label
         self.use_gt_depth = use_gt_depth
+        self.use_fuse_depth = use_fuse_depth
         self.collision_labels = {}
 
         if split == 'train':
@@ -316,6 +317,7 @@ class GraspNetMultiDataset(Dataset):
         self.colorpath = []
         self.depthpath = []
         self.gtdepthpath = []
+        self.fusedepthpath = []
         self.labelpath = []
         self.metapath = []
         self.scenename = []
@@ -329,6 +331,8 @@ class GraspNetMultiDataset(Dataset):
                 self.colorpath.append(os.path.join(root, 'scenes', x, camera, 'rgb', str(img_num).zfill(4) + '.png'))
                 self.depthpath.append(os.path.join(root, 'scenes', x, camera, 'depth', str(img_num).zfill(4) + '.png'))
                 self.gtdepthpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4) + '_depth.png'))
+                self.fusedepthpath.append(os.path.join(root, 'tsdf_depth', x, camera, str(img_num).zfill(4) + '_depth.png')
+                )
                 self.labelpath.append(os.path.join(root, 'scenes', x, camera, 'label', str(img_num).zfill(4) + '.png'))
                 self.metapath.append(os.path.join(root, 'scenes', x, camera, 'meta', str(img_num).zfill(4) + '.mat'))
                 self.graspnesspath.append(os.path.join(root, 'graspness', x, camera, str(img_num).zfill(4) + '.npy'))
@@ -531,6 +535,50 @@ class GraspNetMultiDataset(Dataset):
 
         return prob[None].astype(np.float32), vratio[None].astype(np.float32)
 
+    def build_fused_gt_depth_m(self, gt_depth_raw, index, factor_depth):
+        """
+        Compose depth supervision target:
+        object region: virtual/object GT depth
+        background: fused TSDF-rendered depth
+
+        gt_depth_raw: virtual_scenes depth png, uint16
+        fused depth png: saved as depth_m * fuse_depth_factor, default mm uint16
+
+        return:
+        gt_depth_m: (H,W) float32, meters
+        """
+        fd = float(self.gt_factor_depth) if (self.gt_factor_depth is not None) else float(factor_depth)
+
+        # object-only virtual GT
+        gt_depth_m = gt_depth_raw.astype(np.float32) / fd
+
+        if not self.use_fuse_depth:
+            return gt_depth_m
+
+        fuse_path = self.fusedepthpath[index]
+        if not os.path.exists(fuse_path):
+            raise FileNotFoundError(
+                f"use_fuse_depth=True but fused depth not found: {fuse_path}"
+            )
+
+        fuse_depth_raw = np.array(Image.open(fuse_path))
+        fuse_depth_m = fuse_depth_raw.astype(np.float32) / fd
+
+        if fuse_depth_m.shape != gt_depth_m.shape:
+            raise ValueError(
+                f"Fused depth shape mismatch: fuse={fuse_depth_m.shape}, "
+                f"gt={gt_depth_m.shape}, path={fuse_path}"
+            )
+
+        # virtual/object GT has depth only on object region.
+        obj_valid = gt_depth_m > 0
+        bg_valid = (~obj_valid) & (fuse_depth_m > 0)
+
+        gt_depth_m = gt_depth_m.copy()
+        gt_depth_m[bg_valid] = fuse_depth_m[bg_valid]
+
+        return gt_depth_m
+
     def _mask_and_sample(self, depth, seg, cloud, mask):
         """return sampled cloud/color/seg + sampled pixel flatten indices in original image"""
         H, W = depth.shape
@@ -604,8 +652,7 @@ class GraspNetMultiDataset(Dataset):
 
         # ---- GT depth (virtual) -> meters -> resize to 448x448 ----
         # 注意：gt_depth 可能是 uint16 (mm / factor_depth)
-        fd = float(self.gt_factor_depth) if (self.gt_factor_depth is not None) else float(factor_depth)
-        gt_depth_m = gt_depth.astype(np.float32) / fd
+        gt_depth_m = self.build_fused_gt_depth_m(gt_depth, index, factor_depth)
         K_resized = self.resize_intrinsics_with_crop(intrinsic, crop_box, out_hw=self.resize_shape)
         
         Hr, Wr = self.resize_shape
@@ -714,8 +761,7 @@ class GraspNetMultiDataset(Dataset):
         )
         
         # GT depth meters: crop -> resize
-        fd = float(self.gt_factor_depth) if (self.gt_factor_depth is not None) else float(factor_depth)
-        gt_depth_m = gt_depth.astype(np.float32) / fd
+        gt_depth_m = self.build_fused_gt_depth_m(gt_depth, index, factor_depth)
         gt_depth_crop = gt_depth_m[y0:y1, x0:x1].copy()
         gt_depth_m_resized = cv2.resize(
             gt_depth_crop, (Wr, Hr), interpolation=cv2.INTER_NEAREST
