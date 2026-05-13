@@ -535,21 +535,16 @@ class GraspNetMultiDataset(Dataset):
 
         return prob[None].astype(np.float32), vratio[None].astype(np.float32)
 
-    def build_fused_gt_depth_m(self, gt_depth_raw, index, factor_depth):
+    def build_fused_gt_depth_m(self, gt_depth_raw, seg_raw, index, factor_depth):
         """
         Compose depth supervision target:
-        object region: virtual/object GT depth
+        object region: virtual/rendered GT depth
         background: fused TSDF-rendered depth
 
-        gt_depth_raw: virtual_scenes depth png, uint16
-        fused depth png: saved as depth_m * fuse_depth_factor, default mm uint16
-
-        return:
-        gt_depth_m: (H,W) float32, meters
         """
         fd = float(self.gt_factor_depth) if (self.gt_factor_depth is not None) else float(factor_depth)
 
-        # object-only virtual GT
+        # virtual / rendered GT depth, meters
         gt_depth_m = gt_depth_raw.astype(np.float32) / fd
 
         if not self.use_fuse_depth:
@@ -570,14 +565,28 @@ class GraspNetMultiDataset(Dataset):
                 f"gt={gt_depth_m.shape}, path={fuse_path}"
             )
 
-        # virtual/object GT has depth only on object region.
-        obj_valid = gt_depth_m > 0
-        bg_valid = (~obj_valid) & (fuse_depth_m > 0)
+        if seg_raw.shape != gt_depth_m.shape:
+            raise ValueError(
+                f"Seg shape mismatch: seg={seg_raw.shape}, "
+                f"gt={gt_depth_m.shape}, path={self.labelpath[index]}"
+            )
 
-        gt_depth_m = gt_depth_m.copy()
-        gt_depth_m[bg_valid] = fuse_depth_m[bg_valid]
+        # GraspNet label: 0 = background, >0 = object instance id
+        obj_region = seg_raw > 0
+        bg_region = ~obj_region
 
-        return gt_depth_m
+        # avoid leaking original full-scene rendered background
+        target_depth_m = np.zeros_like(gt_depth_m, dtype=np.float32)
+
+        # object: use virtual/rendered object GT
+        obj_valid = obj_region & (gt_depth_m > 0)
+        target_depth_m[obj_valid] = gt_depth_m[obj_valid]
+
+        # background: use fused TSDF depth
+        bg_valid = bg_region & (fuse_depth_m > 0)
+        target_depth_m[bg_valid] = fuse_depth_m[bg_valid]
+
+        return target_depth_m
 
     def _mask_and_sample(self, depth, seg, cloud, mask):
         """return sampled cloud/color/seg + sampled pixel flatten indices in original image"""
@@ -652,7 +661,7 @@ class GraspNetMultiDataset(Dataset):
 
         # ---- GT depth (virtual) -> meters -> resize to 448x448 ----
         # 注意：gt_depth 可能是 uint16 (mm / factor_depth)
-        gt_depth_m = self.build_fused_gt_depth_m(gt_depth, index, factor_depth)
+        gt_depth_m = self.build_fused_gt_depth_m(gt_depth, seg, index, factor_depth)
         K_resized = self.resize_intrinsics_with_crop(intrinsic, crop_box, out_hw=self.resize_shape)
         
         Hr, Wr = self.resize_shape
@@ -761,7 +770,7 @@ class GraspNetMultiDataset(Dataset):
         )
         
         # GT depth meters: crop -> resize
-        gt_depth_m = self.build_fused_gt_depth_m(gt_depth, index, factor_depth)
+        gt_depth_m = self.build_fused_gt_depth_m(gt_depth, seg, index, factor_depth)
         gt_depth_crop = gt_depth_m[y0:y1, x0:x1].copy()
         gt_depth_m_resized = cv2.resize(
             gt_depth_crop, (Wr, Hr), interpolation=cv2.INTER_NEAREST
