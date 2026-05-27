@@ -18,7 +18,7 @@ from torch.utils.tensorboard import SummaryWriter
 from utils.arguments import cfgs
 
 # Local Libraries
-from models.economicgrasp_bip3d import economicgrasp_bip3d, economicgrasp_dpt, economicgrasp_dpt_direct
+from models.economicgrasp_bip3d import economicgrasp_bip3d, economicgrasp_dpt
 from models.loss_economicgrasp_depth_c1 import get_loss_c2_2 as get_loss_economicgrasp
 
 # from models.economicgrasp_query import economicgrasp_query
@@ -332,6 +332,7 @@ class Trainer:
             bin_num=cfgs.bin_num,
             is_training=True,
             use_obs_depth=getattr(cfgs, 'use_obs_depth', False),
+            use_depth_comp=getattr(cfgs, 'use_depth_comp', False),
             vis_dir=getattr(cfgs, 'vis_dir', None),
             vis_every=getattr(cfgs, 'vis_every', 1000),
         )

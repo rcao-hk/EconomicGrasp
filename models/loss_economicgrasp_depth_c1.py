@@ -88,7 +88,8 @@ def get_loss_c2_2(end_points):
     depth_loss, end_points = compute_depth_loss(end_points)
     score_loss, end_points = compute_score_loss_cls(end_points)
     width_loss, end_points = compute_width_loss(end_points)
-
+    collision_loss, end_points = compute_collision_loss(end_points, True)
+    
     obj_loss = cfgs.objectness_loss_weight * objectness_loss
     grasp_loss = (
         cfgs.graspness_loss_weight * graspness_loss +
@@ -100,10 +101,13 @@ def get_loss_c2_2(end_points):
     )
 
     depth_reg_loss = cfgs.depth_prob_loss_weight * depth_reg_loss
+    collision_loss = cfgs.collision_loss_weight  * collision_loss
+    grasp_loss = grasp_loss + collision_loss
     loss = obj_loss + grasp_loss + depth_reg_loss
 
     end_points['A: Objectness Loss'] = objectness_loss
     end_points['A: Grasp Loss'] = grasp_loss
+    end_points['A: Collision Loss'] = collision_loss
     end_points['A: DepthReg Loss'] = depth_reg_loss
     end_points['A: Overall Loss'] = loss
     return loss, end_points
@@ -214,10 +218,14 @@ def compute_depth_reg_loss(
             end_points["D: z_pred_mean(valid)"] = pred_valid.mean()
             end_points["D: z_gt_mean(valid)"] = gt_valid.mean()
             abs_err = (pred - gt).abs()
-            end_points["D: Depth MAE"] = abs_err[valid].mean() if valid.any() else torch.zeros((), device=pred.device)
+            end_points["D: Depth MAE"] = abs_err[valid].mean()
         else:
-            end_points["D: z_pred_std(valid)"] = torch.zeros((), device=pred.device)
-            end_points["D: z_gt_std(valid)"] = torch.zeros((), device=pred.device)
+            zero = pred.sum() * 0.0
+            end_points["D: z_pred_std(valid)"] = zero
+            end_points["D: z_gt_std(valid)"] = zero
+            end_points["D: z_pred_mean(valid)"] = zero
+            end_points["D: z_gt_mean(valid)"] = zero
+            end_points["D: Depth MAE"] = zero
 
     return loss, end_points
 
@@ -357,4 +365,73 @@ def compute_width_loss(end_points):
         loss = loss[valid_mask].mean()
 
     end_points['B: Width Loss'] = loss
+    return loss, end_points
+
+
+def compute_collision_loss(end_points, balanced=True):
+    """
+    Strict selected collision loss.
+
+    Required:
+      - grasp_collision_pred: [B,1,M]
+      - batch_grasp_collision: [B,M]
+      - batch_valid_mask: [B,M]
+    """
+    if "grasp_collision_pred" not in end_points:
+        dev = end_points["batch_valid_mask"].device
+        loss = torch.zeros((), device=dev)
+        end_points["B: Collision Loss"] = loss
+        return loss, end_points
+
+    pred = end_points["grasp_collision_pred"]
+    if pred.dim() == 3:
+        pred = pred.squeeze(1)  # [B,M]
+
+    label = end_points["batch_grasp_collision"].to(device=pred.device, dtype=pred.dtype)
+    valid_mask = end_points["batch_valid_mask"].bool().to(pred.device)
+
+    loss_map = F.binary_cross_entropy_with_logits(pred, label, reduction="none")
+
+    if valid_mask.sum() == 0:
+        loss = 0.0 * loss_map.sum()
+        acc = 0.0 * loss_map.sum()
+        pos_ratio = 0.0 * loss_map.sum()
+        pred_pos_ratio = 0.0 * loss_map.sum()
+        precision = 0.0 * loss_map.sum()
+        recall = 0.0 * loss_map.sum()
+    else:
+        if balanced:
+            pos_mask = valid_mask & (label > 0.5)
+            neg_mask = valid_mask & (label <= 0.5)
+
+            if pos_mask.any() and neg_mask.any():
+                loss = 0.5 * (loss_map[pos_mask].mean() + loss_map[neg_mask].mean())
+            else:
+                loss = loss_map[valid_mask].mean()
+        else:
+            loss = loss_map[valid_mask].mean()
+
+        with torch.no_grad():
+            prob = torch.sigmoid(pred)
+            pred_label = prob > 0.5
+            label_bool = label > 0.5
+
+            acc = (pred_label[valid_mask] == label_bool[valid_mask]).float().mean()
+            pos_ratio = label_bool[valid_mask].float().mean()
+            pred_pos_ratio = pred_label[valid_mask].float().mean()
+
+            tp = (pred_label & label_bool & valid_mask).float().sum()
+            fp = (pred_label & (~label_bool) & valid_mask).float().sum()
+            fn = ((~pred_label) & label_bool & valid_mask).float().sum()
+
+            precision = tp / (tp + fp + 1e-6)
+            recall = tp / (tp + fn + 1e-6)
+
+    end_points["B: Collision Loss"] = loss
+    end_points["D: Collision Label PosRatio"] = pos_ratio
+    end_points["D: Collision Pred PosRatio"] = pred_pos_ratio
+    end_points["D: Collision Acc"] = acc
+    end_points["D: Collision Precision"] = precision
+    end_points["D: Collision Recall"] = recall
+
     return loss, end_points

@@ -38,6 +38,7 @@ if __name__ == "__main__":
         scene_pointid = []
         scene_scores = []
         scene_width = []
+        scene_collisions = []
         for i, obj_idx in enumerate(obj_idxs):
             object_labels = np.load(os.path.join(obj_data_folders, f"{str(obj_idx - 1).zfill(3)}_labels.npz"))
             points = torch.from_numpy(object_labels['points'])
@@ -51,11 +52,14 @@ if __name__ == "__main__":
             scene_pointid.append(pointid)
             scene_scores.append(scores)
             scene_width.append(width)
+            scene_collisions.append(collision)
+            
         scene_points = torch.cat(scene_points, dim=0)
         scene_pointid = torch.cat(scene_pointid, dim=0)
         scene_scores = torch.cat(scene_scores, dim=0)
         scene_width = torch.cat(scene_width, dim=0)
-
+        scene_collisions = torch.cat(scene_collisions, dim=0)
+        
         # filtering labels in bad points
         threshold = 0.4
         Ns, V, A, D = scene_scores.size()
@@ -70,6 +74,7 @@ if __name__ == "__main__":
         scene_pointid = scene_pointid[filter_mask]
         scene_scores = scene_scores[filter_mask]
         scene_width = scene_width[filter_mask]
+        scene_collisions = scene_collisions[filter_mask]
         result_number = scene_points.shape[0]
         print(result_number, ori_number)
 
@@ -104,12 +109,28 @@ if __name__ == "__main__":
         scene_scores = grasp_score_label_max_angle
         scene_width = grasp_width_label.gather(-1, grasp_score_label_max_angle_idx.unsqueeze(-1)).squeeze(-1)
 
+
+        collision_max_depth = scene_collisions.gather(
+            -1,
+            grasp_score_label_max_depth_idx.unsqueeze(-1)
+        ).squeeze(-1)  # [Ns,V,A]
+
+        scene_collision_selected = collision_max_depth.gather(
+            -1,
+            grasp_score_label_max_angle_idx.unsqueeze(-1)
+        ).squeeze(-1)  # [Ns,V]
+
         # further view filtering
         values, index = torch.topk(grasp_view_graspness, k=keeping_views_numbers)
         scene_rotations = torch.gather(scene_rotations, 1, index)
         scene_depth = torch.gather(scene_depth, 1, index)
         scene_scores = torch.gather(scene_scores, 1, index)
         scene_width = torch.gather(scene_width, 1, index)
+        scene_collision_selected = torch.gather(
+            scene_collision_selected.to(torch.uint8),
+            1,
+            index
+        ).bool()
         scene_top_view_index = index
 
         # save the results
@@ -121,7 +142,8 @@ if __name__ == "__main__":
         scene_pointid = scene_pointid.numpy().astype(np.uint8)
         grasp_view_graspness = grasp_view_graspness.numpy()
         grasp_top_view_index = scene_top_view_index.numpy().astype(np.uint16)
-
+        grasp_collisions = scene_collision_selected.numpy().astype(np.uint8)
+        
         np.savez(os.path.join(save_data_folders, f"{label_path}_labels.npz"),
                  points=scene_points,
                  rotations=grasp_rotations,
@@ -130,7 +152,8 @@ if __name__ == "__main__":
                  widths=grasp_widths,
                  pointid=scene_pointid,
                  vgraspness=grasp_view_graspness,
-                 topview=grasp_top_view_index)
+                 topview=grasp_top_view_index,
+                 collisions=grasp_collisions)
 
         number = number + 1
 

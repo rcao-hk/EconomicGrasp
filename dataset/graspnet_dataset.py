@@ -908,7 +908,8 @@ class GraspNetMultiDataset(Dataset):
         topview = grasp_labels['topview'].astype(np.int32)
         view_graspness = grasp_labels['vgraspness'].astype(np.float32)
         pointid = grasp_labels['pointid']
-
+        collisions = grasp_labels['collisions'].astype(np.float32)
+        
         object_poses_list = []
         grasp_points_list = []
         grasp_rotations_list = []
@@ -917,7 +918,8 @@ class GraspNetMultiDataset(Dataset):
         grasp_scores_list = []
         view_graspness_list = []
         top_view_index_list = []
-
+        grasp_collision_list = []
+        
         for i, obj_idx in enumerate(obj_idxs):
             object_poses_list.append(poses[:, :, i])
             grasp_points_list.append(points[pointid == i])
@@ -927,7 +929,8 @@ class GraspNetMultiDataset(Dataset):
             grasp_widths_list.append(widths[pointid == i])
             view_graspness_list.append(view_graspness[pointid == i])
             top_view_index_list.append(topview[pointid == i])
-
+            grasp_collision_list.append(collisions[pointid == i])
+            
         if self.augment:
             cloud_sampled, object_poses_list = self.augment_data(cloud_sampled, object_poses_list)
 
@@ -964,7 +967,8 @@ class GraspNetMultiDataset(Dataset):
             'grasp_scores_list': grasp_scores_list,
             'view_graspness_list': view_graspness_list,
             'top_view_index_list': top_view_index_list,
-
+            'grasp_collision_list': grasp_collision_list,
+            
             # debug / bookkeeping
             'sampled_masked_idxs': idxs.astype(np.int64),
             'pix_flat': pix_flat.astype(np.int64),
@@ -978,7 +982,7 @@ class GraspNetMultiDataset(Dataset):
 
             # 'depth': sensor_depth_m_resized[None].astype(np.float32),
             'sensor_depth_m': sensor_depth_m_resized.astype(np.float32),
-
+            
             'scene_idx': np.int64(scene_idx),
             'anno_idx': np.int64(anno_idx),
             'dataset_idx': np.int64(index),
