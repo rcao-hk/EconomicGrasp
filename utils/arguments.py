@@ -31,6 +31,7 @@ parser.add_argument('--depth_loss_weight', type=float, default=1, help='Loss wei
 parser.add_argument('--score_loss_weight', type=float, default=1, help='Loss weight of the score term')
 parser.add_argument('--width_loss_weight', type=float, default=10, help='Loss weight of the width term')
 parser.add_argument('--depth_prob_loss_weight', type=float, default=10, help='Loss weight of the depth distribution term')
+parser.add_argument('--collision_loss_weight', type=float, default=1, help='Loss weight of the collision term')
 
 # training setting
 parser.add_argument('--checkpoint_path', default=None, help='Model checkpoint path [default: None]')
@@ -71,6 +72,7 @@ parser.add_argument("--save_root", type=str)
                     # help="If set, compute depth metrics only on object foreground area from objectness_label_tok.")
 parser.add_argument("--oracle_mode", type=str,)
 parser.add_argument("--use_obs_depth", action='store_true')
+parser.add_argument("--use_depth_comp", action='store_true')
 parser.add_argument("--vis_dir", type=str)
 parser.add_argument("--vis_every", type=int, default=1000)
 cfgs = parser.parse_args()

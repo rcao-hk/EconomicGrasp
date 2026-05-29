@@ -16,57 +16,6 @@ import open3d as o3d
 import os
 
 
-def _tstats(name, t: torch.Tensor):
-    td = t.detach()
-    numel = td.numel()
-
-    tmin = float(td.min().item()) if numel else float("nan")
-    tmax = float(td.max().item()) if numel else float("nan")
-
-    # mean/std 统一用 float 计算，避免 Long 报错
-    tf = td.float() if (numel and not td.is_floating_point()) else td
-    mean = float(tf.mean().item()) if numel else float("nan")
-    std  = float(tf.std().item()) if numel else float("nan")
-
-    return (f"{name}: shape={tuple(td.shape)} dtype={str(td.dtype).replace('torch.','')} dev={td.device} "
-            f"min={tmin:.6f} max={tmax:.6f} mean={mean:.6f} std={std:.6f}")
-
-
-def _dist_stats(name, logits_bdhw: torch.Tensor, anchors_1d: torch.Tensor, sample_xy=((0,0),)):
-    """
-    logits_bdhw: (B,D,H,W)
-    anchors_1d:  (D,)
-    """
-    with torch.no_grad():
-        B, D, H, W = logits_bdhw.shape
-        prob = logits_bdhw.softmax(dim=1)
-        # 1) 空间变化：logits 在 H,W 上的 std（对每个 bin 统计，再平均）
-        spatial_std = logits_bdhw.std(dim=(2,3)).mean().item()
-        # 2) “bin 维度”的尖锐程度：max prob 平均、entropy 平均
-        pmax = prob.max(dim=1).values.mean().item()
-        ent = (-(prob.clamp_min(1e-9) * prob.clamp_min(1e-9).log()).sum(dim=1)).mean().item()  # (B,H,W) -> mean
-        # 3) 期望深度范围
-        anchors = anchors_1d.view(1, D, 1, 1).to(prob)
-        depth_exp = (prob * anchors).sum(dim=1)  # (B,H,W)
-        dmin = depth_exp.min().item()
-        dmax = depth_exp.max().item()
-        dstd = depth_exp.std().item()
-
-        msg = (f"[DBG][{name}] logits_spatial_std(mean over D)={spatial_std:.6f} | "
-               f"mean_maxprob={pmax:.6f} | mean_entropy={ent:.6f} (max~{np.log(D):.6f}) | "
-               f"E[depth] min={dmin:.6f} max={dmax:.6f} std={dstd:.6f}")
-        print(msg)
-
-        # 4) 打印几个像素点 top-k
-        for (yy, xx) in sample_xy:
-            yy = int(np.clip(yy, 0, H-1))
-            xx = int(np.clip(xx, 0, W-1))
-            topv, topi = prob[0, :, yy, xx].topk(5)
-            a = anchors_1d[topi.cpu()].numpy()
-            print(f"[DBG][{name}] (y={yy},x={xx}) top5 bins={topi.tolist()} "
-                  f"top5 p={topv.tolist()} top5 depth={a.tolist()}")
-            
-
 # -------------------------
 # utils: gather depth @ sampled pixels and backproject to 3D
 # -------------------------
@@ -119,7 +68,89 @@ def _make_coords_for_me(cloud: torch.Tensor, voxel_size: float):
     return coords_list
 
 
-from models.dinov2_dpt import DA2
+
+# -------------------------
+# RGB -> depth distribution (stride=2 => 224x224 tokens)
+# -------------------------
+class RGBDepthDistributionNet(nn.Module):
+    """
+    RGB-only depth distribution head:
+      img (B,3,448,448)
+        -> PSPNet feat (B,C,448,448)
+        -> avgpool(stride) -> (B,C,448/stride,448/stride)
+        -> 1x1 conv -> logits (B,D,Hr,Wr)
+        -> softmax -> depth_prob_map (B,D,Hr,Wr)
+        -> expected depth -> depth_map_448 (B,1,448,448)
+
+    Returns:
+      depth_prob_pred: (B,1,N,D)  where N=Hr*Wr, D=bin_num
+      spatial_shape:   (Hr,Wr)
+      depth_map_pred:  (B,1,448,448)
+    """
+
+    def __init__(self,
+                 img_feat_dim=64,
+                 stride=2,
+                 min_depth=0.2,
+                 max_depth=2.0,
+                 bin_num=256,
+                 psp_backend="resnet34"):
+        super().__init__()
+        assert stride in [1, 2, 4, 8], "keep it simple for now"
+        self.stride = int(stride)
+        self.min_depth = float(min_depth)
+        self.max_depth = float(max_depth)
+        self.bin_num = int(bin_num)
+
+        # PSPNet output keeps 448x448 resolution in your implementation
+        self.img_backbone = PSPNet(
+            sizes=(1, 2, 3, 6),
+            psp_size=512,
+            deep_features_size=img_feat_dim,
+            backend=psp_backend
+        )
+
+        self.depth_logits = nn.Conv2d(img_feat_dim, self.bin_num, kernel_size=1, bias=True)
+
+        # register depth anchors as buffer
+        anchors = torch.linspace(self.min_depth, self.max_depth, self.bin_num).view(1, self.bin_num, 1, 1)
+        self.register_buffer("depth_anchors", anchors, persistent=False)
+
+    def forward(self, img: torch.Tensor):
+        """
+        img: (B,3,448,448)
+        """
+        B, _, H, W = img.shape
+        assert (H, W) == (448, 448), "expect resized input 448x448"
+
+        feat = self.img_backbone(img)  # (B,C,448,448)
+        if self.stride > 1:
+            feat_s = F.avg_pool2d(feat, kernel_size=self.stride, stride=self.stride)  # (B,C,Hr,Wr)
+        else:
+            feat_s = feat
+
+        Hr, Wr = feat_s.shape[2], feat_s.shape[3]
+
+        logits = self.depth_logits(feat_s)              # (B,D,Hr,Wr)
+        prob = logits.softmax(dim=1)                    # (B,D,Hr,Wr)
+
+        # expected depth at token resolution
+        anchors = self.depth_anchors.to(prob.dtype)     # (1,D,1,1)
+        depth_tok = (prob * anchors).sum(dim=1, keepdim=True)  # (B,1,Hr,Wr)
+
+        # upsample to 448x448 for backprojection
+        if (Hr, Wr) != (448, 448):
+            depth_448 = F.interpolate(depth_tok, size=(448, 448), mode="bilinear", align_corners=True)
+        else:
+            depth_448 = depth_tok
+
+        # token layout: (B,1,N,D)
+        depth_prob_pred = prob.permute(0, 2, 3, 1).contiguous().view(B, 1, Hr * Wr, self.bin_num)
+
+        return depth_prob_pred, (Hr, Wr), depth_448
+    
+    
+# from models.dinov2_dpt import DA2
 # class DINOv2DepthDistributionNet(nn.Module):
 #     """
 #     使用 DA2 的 DPTHead 直接输出 bin logits（out_dim=bin_num），不额外加 conv。
@@ -242,6 +273,7 @@ from models.dinov2_dpt import DA2
 #         return depth_448, depth_tok, img_feat, depth_prob_448, depth_logits_448
     
 
+from models.dinov2_dpt import DA2
 class DINOv2DepthDistributionNet(nn.Module):
     """
     Depth distribution head based on Depth-Anything-V2 DINOv2 backbone.
@@ -350,86 +382,6 @@ class DINOv2DepthDistributionNet(nn.Module):
 
         return tuple(outputs)
 
-# -------------------------
-# RGB -> depth distribution (stride=2 => 224x224 tokens)
-# -------------------------
-class RGBDepthDistributionNet(nn.Module):
-    """
-    RGB-only depth distribution head:
-      img (B,3,448,448)
-        -> PSPNet feat (B,C,448,448)
-        -> avgpool(stride) -> (B,C,448/stride,448/stride)
-        -> 1x1 conv -> logits (B,D,Hr,Wr)
-        -> softmax -> depth_prob_map (B,D,Hr,Wr)
-        -> expected depth -> depth_map_448 (B,1,448,448)
-
-    Returns:
-      depth_prob_pred: (B,1,N,D)  where N=Hr*Wr, D=bin_num
-      spatial_shape:   (Hr,Wr)
-      depth_map_pred:  (B,1,448,448)
-    """
-
-    def __init__(self,
-                 img_feat_dim=64,
-                 stride=2,
-                 min_depth=0.2,
-                 max_depth=2.0,
-                 bin_num=256,
-                 psp_backend="resnet34"):
-        super().__init__()
-        assert stride in [1, 2, 4, 8], "keep it simple for now"
-        self.stride = int(stride)
-        self.min_depth = float(min_depth)
-        self.max_depth = float(max_depth)
-        self.bin_num = int(bin_num)
-
-        # PSPNet output keeps 448x448 resolution in your implementation
-        self.img_backbone = PSPNet(
-            sizes=(1, 2, 3, 6),
-            psp_size=512,
-            deep_features_size=img_feat_dim,
-            backend=psp_backend
-        )
-
-        self.depth_logits = nn.Conv2d(img_feat_dim, self.bin_num, kernel_size=1, bias=True)
-
-        # register depth anchors as buffer
-        anchors = torch.linspace(self.min_depth, self.max_depth, self.bin_num).view(1, self.bin_num, 1, 1)
-        self.register_buffer("depth_anchors", anchors, persistent=False)
-
-    def forward(self, img: torch.Tensor):
-        """
-        img: (B,3,448,448)
-        """
-        B, _, H, W = img.shape
-        assert (H, W) == (448, 448), "expect resized input 448x448"
-
-        feat = self.img_backbone(img)  # (B,C,448,448)
-        if self.stride > 1:
-            feat_s = F.avg_pool2d(feat, kernel_size=self.stride, stride=self.stride)  # (B,C,Hr,Wr)
-        else:
-            feat_s = feat
-
-        Hr, Wr = feat_s.shape[2], feat_s.shape[3]
-
-        logits = self.depth_logits(feat_s)              # (B,D,Hr,Wr)
-        prob = logits.softmax(dim=1)                    # (B,D,Hr,Wr)
-
-        # expected depth at token resolution
-        anchors = self.depth_anchors.to(prob.dtype)     # (1,D,1,1)
-        depth_tok = (prob * anchors).sum(dim=1, keepdim=True)  # (B,1,Hr,Wr)
-
-        # upsample to 448x448 for backprojection
-        if (Hr, Wr) != (448, 448):
-            depth_448 = F.interpolate(depth_tok, size=(448, 448), mode="bilinear", align_corners=True)
-        else:
-            depth_448 = depth_tok
-
-        # token layout: (B,1,N,D)
-        depth_prob_pred = prob.permute(0, 2, 3, 1).contiguous().view(B, 1, Hr * Wr, self.bin_num)
-
-        return depth_prob_pred, (Hr, Wr), depth_448
-
 
 class DINOv2DepthRegressionNet(nn.Module):
     """
@@ -473,13 +425,14 @@ class DINOv2DepthRegressionNet(nn.Module):
             self._freeze_backbone()
         return self
 
-    def forward(self, img):
+    def forward(self, img, return_feats: bool = False, return_raw: bool = False):
         """
-        img: (B,3,448,448) (你 dataloader 已经 Normalize 了)
         return:
-          depth_reg_448: (B,1,448,448) meters in [min_depth, max_depth]
-          depth_reg_tok: (B,1,Hr,Wr) (Hr=Wr=224 when stride=2)
-          img_feat:      (B,C,?,?) 你 DPTHead 的 path_1
+        depth_448: bounded direct depth, used when use_obs_depth=False
+        depth_tok: bounded direct depth token map
+        img_feat:  dense feature from DA2 depth head
+        raw_448:   raw 1-channel output, used as residual when use_obs_depth=True
+        feats:     raw DINO intermediate features for proposal_head
         """
         B, _, H, W = img.shape
         assert (H, W) == (448, 448)
@@ -490,28 +443,218 @@ class DINOv2DepthRegressionNet(nn.Module):
             self.depthnet.intermediate_layer_idx[self.depthnet.encoder],
             return_class_token=True
         )
-        img_feat, depth_logits_448 = self.depthnet.depth_head(feats, patch_h, patch_w)   # (B,1,448,448)
 
-        # ✅ 把输出约束到 [min_depth, max_depth]，避免爆炸 / 无意义尺度
-        depth_448 = F.sigmoid(depth_logits_448) * self.max_depth
-        # depth_448 = self.min_depth + torch.sigmoid(depth_logits_448) * (self.max_depth - self.min_depth)
-        # depth_448 = depth_448 * self.max_depth
+        img_feat, raw_448 = self.depthnet.depth_head(feats, patch_h, patch_w)  # (B,1,448,448)
 
-        # token 级别
+        # RGB mode uses this as direct metric depth.
+        depth_448 = F.sigmoid(raw_448) * self.max_depth
+        # depth_448 = self.min_depth + F.sigmoid(raw_448) * (self.max_depth - self.min_depth)
+        # depth_448 = depth_448.clamp(self.min_depth, self.max_depth)
+
         if self.stride > 1:
             depth_tok = F.interpolate(depth_448, size=(H // self.stride, W // self.stride), mode='nearest')
         else:
             depth_tok = depth_448
 
+        if img_feat.shape[-2:] != (H, W):
+            img_feat = F.interpolate(
+                img_feat,
+                size=(H, W),
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        if return_feats and return_raw:
+            return depth_448, depth_tok, img_feat, raw_448, feats
+        if return_feats:
+            return depth_448, depth_tok, img_feat, feats
+        if return_raw:
+            return depth_448, depth_tok, img_feat, raw_448
+
         return depth_448, depth_tok, img_feat
     
+from models.grasp_spatial_enhancer import MultiBasicEncoder
+class ObsDepthAdapter(nn.Module):
+    """
+    Observed depth encoder using MultiBasicEncoder.
 
+    Input:
+        obs_depth: (B,1,H,W), meter
+    Output:
+        obs_feat:  (B,C,Hf,Wf)
+        obs_valid: (B,1,H,W), valid mask at original obs-depth resolution
+    """
+    def __init__(
+        self,
+        out_dim: int = 128,
+        min_depth: float = 0.2,
+        max_depth: float = 1.0,
+        norm_fn: str = "group",
+        downsample: int = 2,
+    ):
+        super().__init__()
+        self.out_dim = int(out_dim)
+        self.min_depth = float(min_depth)
+        self.max_depth = float(max_depth)
+
+        self.encoder = MultiBasicEncoder(
+            input_dim=2,
+            output_dim=[(out_dim, out_dim, out_dim)],
+            norm_fn=norm_fn,
+            dropout=0.0,
+            downsample=downsample,
+        )
+
+    def forward(self, obs_depth: torch.Tensor, out_hw):
+        if obs_depth.dim() == 3:
+            obs_depth = obs_depth.unsqueeze(1)
+        assert obs_depth.dim() == 4 and obs_depth.size(1) == 1
+
+        obs_mask = (
+            torch.isfinite(obs_depth)
+            & (obs_depth > self.min_depth)
+        ).float()
+
+        z = torch.nan_to_num(obs_depth, nan=0.0, posinf=0.0, neginf=0.0)
+        x = torch.cat([z, obs_mask], dim=1)  # (B,2,H,W)
+        
+        outputs04, outputs08, outputs16 = self.encoder(x, num_layers=3)
+
+        # 最大空间分辨率 feature map
+        obs_feat = outputs04[0]
+
+        if obs_feat.shape[-2:] != tuple(out_hw):
+            obs_feat = F.interpolate(
+                obs_feat,
+                size=out_hw,
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        return obs_feat, obs_mask
+    
+
+def _make_gn(num_channels: int, max_groups: int = 8):
+    g = min(max_groups, num_channels)
+    while g > 1 and num_channels % g != 0:
+        g -= 1
+    return nn.GroupNorm(g, num_channels)
+
+
+class DepthRefine(nn.Module):
+    """
+    Minimal depth fusion.
+
+    final_depth = C * net_depth + (1 - C) * obs_depth
+
+    C is the confidence of network-predicted depth.
+    """
+    def __init__(
+        self,
+        rgb_feat_dim: int,
+        obs_feat_dim: int = None,
+        hidden_dim: int = None,
+        min_depth: float = 0.2,
+        max_depth: float = 1.0,
+        norm_fn: str = "group",
+        downsample: int = 2,
+    ):
+        super().__init__()
+        self.rgb_feat_dim = int(rgb_feat_dim)
+        self.hidden_dim = int(hidden_dim or rgb_feat_dim)
+        self.obs_feat_dim = int(obs_feat_dim or self.hidden_dim)
+        self.min_depth = float(min_depth)
+        self.max_depth = float(max_depth)
+
+        self.obs_encoder = ObsDepthAdapter(
+            out_dim=self.obs_feat_dim,
+            min_depth=self.min_depth,
+            max_depth=self.max_depth,
+            norm_fn=norm_fn,
+            downsample=downsample,
+        )
+
+        self.rgb_proj = (
+            nn.Identity()
+            if self.rgb_feat_dim == self.hidden_dim
+            else nn.Conv2d(self.rgb_feat_dim, self.hidden_dim, kernel_size=1)
+        )
+
+        self.obs_proj = (
+            nn.Identity()
+            if self.obs_feat_dim == self.hidden_dim
+            else nn.Conv2d(self.obs_feat_dim, self.hidden_dim, kernel_size=1)
+        )
+
+        self.fuse = nn.Sequential(
+            nn.Conv2d(self.hidden_dim * 2, self.hidden_dim, kernel_size=3, padding=1, bias=False),
+            _make_gn(self.hidden_dim),
+            nn.GELU(),
+            nn.Conv2d(self.hidden_dim, self.hidden_dim, kernel_size=3, padding=1, bias=False),
+            _make_gn(self.hidden_dim),
+            nn.GELU(),
+        )
+
+        self.conf_head = nn.Conv2d(self.hidden_dim, 1, kernel_size=1)
+
+    def forward(
+        self,
+        rgb_feat: torch.Tensor,   # (B,C,Hf,Wf), e.g. depth_img_feat
+        net_depth: torch.Tensor,  # (B,1,H,W), network predicted absolute depth
+        obs_depth: torch.Tensor,  # (B,1,H,W), observed depth
+    ):  
+
+        obs_depth = obs_depth.to(device=net_depth.device, dtype=net_depth.dtype)
+
+        if net_depth.dim() == 3:
+            net_depth = net_depth.unsqueeze(1)
+        net_depth = net_depth[:, :1]
+
+        B, _, H, W = net_depth.shape
+
+        if obs_depth.shape[-2:] != (H, W):
+            obs_depth = F.interpolate(obs_depth, size=(H, W), mode="nearest")
+
+        obs_feat, obs_valid = self.obs_encoder(obs_depth, out_hw=rgb_feat.shape[-2:])
+
+        rgb_feat = self.rgb_proj(rgb_feat)
+        obs_feat = self.obs_proj(obs_feat)
+
+        fused_feat = self.fuse(torch.cat([rgb_feat, obs_feat], dim=1))
+
+        conf_feat = torch.sigmoid(self.conf_head(fused_feat))
+
+        if conf_feat.shape[-2:] != (H, W):
+            conf = F.interpolate(
+                conf_feat,
+                size=(H, W),
+                mode="bilinear",
+                align_corners=False,
+            )
+        else:
+            conf = conf_feat
+
+        obs_valid = obs_valid.to(device=net_depth.device, dtype=net_depth.dtype)
+        if obs_valid.shape[-2:] != (H, W):
+            obs_valid = F.interpolate(obs_valid, size=(H, W), mode="nearest")
+
+        obs_depth_clean = torch.nan_to_num(obs_depth, nan=0.0, posinf=0.0, neginf=0.0)
+        final_depth = conf * net_depth + (1.0 - conf) * obs_depth_clean
+
+        aux = {
+            "depth_confidence": conf,
+            "obs_depth_valid": obs_valid,
+            "obs_depth_feat_norm": obs_feat.detach().norm(dim=1, keepdim=True),
+            "rgbd_fused_depth_feat": fused_feat,
+        }
+        return final_depth, aux
+    
 # -------------------------
 # Wrapper: RGB -> depth -> backproject @ sampled pixels -> EcoGrasp3D
 # -------------------------
-class EconomicGrasp_RGBDepthProb(nn.Module):
+class economicgrasp_depth_baseline(nn.Module):
     """
-    RGB-only baseline (risk-reduced alignment):
+    RGB-only baseline:
       - dataloader provides img_idxs (B,20000): sampled pixels in 448x448
       - model predicts depth_map_pred_448
       - gather depth at img_idxs and backproject with K -> point_clouds (B,20000,3)
@@ -534,16 +677,20 @@ class EconomicGrasp_RGBDepthProb(nn.Module):
                  voxel_size=0.005,
                  num_points=20000,
                  is_training=True,
-                 img_feat_dim=64,
                  depth_stride=2,     # <-- your expectation: 224x224 tokens
                  min_depth=0.2,
                  max_depth=2.0,
-                 bin_num=256):
+                 use_obs_depth=False,
+                 vis_dir=None,
+                 vis_every=100):
         super().__init__()
         self.is_training = is_training
         self.voxel_size = float(voxel_size)
         self.num_points = int(num_points)
-
+        self.use_obs_depth = bool(use_obs_depth)
+        self.min_depth = float(min_depth)
+        self.max_depth = float(max_depth)
+        self.encoder = 'vitb'
         # self.depth_net = RGBDepthDistributionNet(
         #     img_feat_dim=img_feat_dim,
         #     stride=depth_stride,
@@ -561,12 +708,30 @@ class EconomicGrasp_RGBDepthProb(nn.Module):
         #     freeze_backbone=True,   # ✅ 训练时冻结 ViT backbone
         # )
         self.depth_net = DINOv2DepthRegressionNet(
-            encoder="vitb",
+            encoder=self.encoder,
             stride=depth_stride,     # 2 -> 224x224 token debug
             min_depth=min_depth,
             max_depth=max_depth,
             freeze_backbone=True
         )
+
+        if self.use_obs_depth:
+            depth_feat_dim_map = {
+                "vits": 64,
+                "vitb": 128,
+                "vitl": 256,
+                "vitg": 384,
+            }
+            self.depth_feat_dim = depth_feat_dim_map[self.encoder]
+            self.depth_refine = DepthRefine(
+                rgb_feat_dim=self.depth_feat_dim,
+                hidden_dim=self.depth_feat_dim,
+                min_depth=min_depth,
+                max_depth=max_depth,
+                downsample=depth_stride,
+            )
+        else:
+            self.depth_refine = None
 
         self.grasp_net = EconomicGrasp3D(
             cylinder_radius=cylinder_radius,
@@ -575,59 +740,387 @@ class EconomicGrasp_RGBDepthProb(nn.Module):
             voxel_size=voxel_size
         )
 
-        self.vis_dir = os.path.join('vis', 'reg')  # e.g. "vis_cloud"
-        self.vis_every = 100
+        self.vis_dir = vis_dir
+        self.vis_every = vis_every
         self._vis_iter = 0
         if self.vis_dir is not None:
             os.makedirs(self.vis_dir, exist_ok=True)
         self.debug_every = 50
         self._dbg_iter = 0
-                
+
     @torch.no_grad()
-    def _save_pred_gt_cloud_ply(self, cloud_pred: torch.Tensor, cloud_gt: torch.Tensor, end_points: dict):
+    def _save_map_png(
+        self,
+        x,
+        out_path,
+        vmin=None,
+        vmax=None,
+        cmap="Spectral",
+        title=None,
+    ):
+        if self.vis_dir is None:
+            return
+
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        if x is None:
+            return
+
+        if torch.is_tensor(x):
+            arr = x.detach().float().cpu().numpy()
+        else:
+            arr = np.asarray(x)
+
+        arr = np.squeeze(arr)
+
+        # If accidentally given BxCxHxW, take first map.
+        while arr.ndim > 2:
+            arr = arr[0]
+
+        if arr.ndim != 2:
+            return
+
+        finite = np.isfinite(arr)
+
+        if not finite.any():
+            return
+
+        if vmin is None:
+            vmin = float(np.percentile(arr[finite], 1))
+        if vmax is None:
+            vmax = float(np.percentile(arr[finite], 99))
+
+        if vmax <= vmin + 1e-6:
+            vmax = vmin + 1e-6
+
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+        plt.figure(figsize=(6, 6))
+        im = plt.imshow(arr, vmin=vmin, vmax=vmax, cmap=cmap)
+        plt.axis("off")
+        plt.colorbar(im, fraction=0.046, pad=0.04)
+        if title is not None:
+            plt.title(title)
+        plt.tight_layout(pad=0)
+        plt.savefig(out_path, dpi=150)
+        plt.close()
+
+
+    def _read_first_int(self, end_points, key, default=-1):
+        if key not in end_points:
+            return default
+        x = end_points[key]
+        if torch.is_tensor(x):
+            if x.numel() == 0:
+                return default
+            return int(x.reshape(-1)[0].detach().cpu().item())
+        try:
+            return int(x)
+        except Exception:
+            return default
+
+    def _force_vis_flag(self, end_points):
+        force_vis = end_points.get("force_vis", False)
+        if torch.is_tensor(force_vis):
+            if force_vis.numel() == 0:
+                return False
+            return bool(force_vis.reshape(-1)[0].detach().cpu().item())
+        return bool(force_vis)
+
+    @torch.no_grad()
+    def _save_depth_maps_vis(
+        self,
+        end_points,
+        img,
+        img_idxs,
+        depth_net_pred,
+        depth_map_pred,
+        depth_tok=None,
+        raw_depth=None,
+        obs_depth=None,
+        gt_depth=None,
+        depth_confidence=None,
+        depth_correction=None,
+    ):
+        if self.vis_dir is None:
+            return
+
+        scene = self._read_first_int(end_points, "scene_idx", -1)
+        anno = self._read_first_int(end_points, "anno_idx", -1)
+
+        # fallback for older dataset keys
+        if scene < 0:
+            scene = self._read_first_int(end_points, "scene", -1)
+        if anno < 0:
+            anno = self._read_first_int(end_points, "frame", -1)
+
+        prefix = os.path.join(
+            self.vis_dir,
+            f"scene{scene:04d}_anno{anno:04d}_it{self._vis_iter:06d}",
+        )
+
+        B, _, H, W = img.shape
+
+        def _b1hw(x, name):
+            if x is None:
+                return None
+            if x.dim() == 3:
+                x = x.unsqueeze(1)
+            elif x.dim() == 4:
+                x = x[:, :1]
+            else:
+                raise ValueError(f"Unexpected {name} shape: {tuple(x.shape)}")
+            if x.shape[-2:] != (H, W):
+                x = F.interpolate(x, size=(H, W), mode="nearest")
+            return x
+
+        depth_net_pred = _b1hw(depth_net_pred, "depth_net_pred")
+        depth_map_pred = _b1hw(depth_map_pred, "depth_map_pred")
+        obs_depth = _b1hw(obs_depth, "obs_depth") if obs_depth is not None else None
+        gt_depth = _b1hw(gt_depth, "gt_depth") if gt_depth is not None else None
+        raw_depth = _b1hw(raw_depth, "raw_depth") if raw_depth is not None else None
+        depth_confidence = _b1hw(depth_confidence, "depth_confidence") if depth_confidence is not None else None
+        depth_correction = _b1hw(depth_correction, "depth_correction") if depth_correction is not None else None
+
+        # ------------------------------------------------------------
+        # 1. Main depth maps
+        # ------------------------------------------------------------
+        self._save_map_png(
+            depth_net_pred[0, 0],
+            prefix + "_depth_net_pred.png",
+            vmin=self.min_depth,
+            vmax=self.max_depth,
+            cmap="Spectral",
+        )
+
+        self._save_map_png(
+            depth_map_pred[0, 0],
+            prefix + "_depth_final.png",
+            vmin=self.min_depth,
+            vmax=self.max_depth,
+            cmap="Spectral",
+        )
+
+        if depth_tok is not None:
+            self._save_map_png(
+                depth_tok[0, 0] if depth_tok.dim() == 4 else depth_tok[0],
+                prefix + "_depth_tok.png",
+                vmin=self.min_depth,
+                vmax=self.max_depth,
+                cmap="Spectral",
+            )
+
+        # raw_depth is not metric; use adaptive vmin/vmax.
+        if raw_depth is not None:
+            self._save_map_png(
+                raw_depth[0, 0],
+                prefix + "_depth_raw.png",
+                vmin=None,
+                vmax=None,
+                cmap="coolwarm",
+            )
+
+        if obs_depth is not None:
+            self._save_map_png(
+                obs_depth[0, 0],
+                prefix + "_obs_depth.png",
+                vmin=self.min_depth,
+                vmax=self.max_depth,
+                cmap="Spectral",
+            )
+
+        if depth_correction is not None:
+            corr0 = depth_correction[0, 0]
+            finite = torch.isfinite(corr0)
+            if bool(finite.any()):
+                abs_p = torch.quantile(corr0[finite].abs(), 0.99).detach()
+                vmax_corr = float(abs_p.cpu().item())
+                vmax_corr = max(vmax_corr, 1e-3)
+            else:
+                vmax_corr = 0.05
+
+            self._save_map_png(
+                corr0,
+                prefix + "_depth_correction.png",
+                vmin=-vmax_corr,
+                vmax=vmax_corr,
+                cmap="coolwarm",
+            )
+
+        if depth_confidence is not None:
+            self._save_map_png(
+                depth_confidence[0, 0],
+                prefix + "_depth_confidence.png",
+                vmin=0.0,
+                vmax=1.0,
+                cmap="viridis",
+            )
+
+        # ------------------------------------------------------------
+        # 2. GT and error maps
+        # ------------------------------------------------------------
+        if gt_depth is not None:
+            self._save_map_png(
+                gt_depth[0, 0],
+                prefix + "_gt_depth.png",
+                vmin=self.min_depth,
+                vmax=self.max_depth,
+                cmap="Spectral",
+            )
+
+            valid_gt = (
+                torch.isfinite(gt_depth)
+                & (gt_depth >= self.min_depth)
+                & (gt_depth <= self.max_depth)
+            )
+
+            err_final = (depth_map_pred - gt_depth).abs()
+            err_final = torch.where(valid_gt, err_final, torch.full_like(err_final, float("nan")))
+
+            err_net = (depth_net_pred - gt_depth).abs()
+            err_net = torch.where(valid_gt, err_net, torch.full_like(err_net, float("nan")))
+
+            self._save_map_png(
+                err_final[0, 0],
+                prefix + "_err_final_gt.png",
+                vmin=0.0,
+                vmax=0.10,
+                cmap="magma",
+            )
+
+            self._save_map_png(
+                err_net[0, 0],
+                prefix + "_err_net_gt.png",
+                vmin=0.0,
+                vmax=0.10,
+                cmap="magma",
+            )
+
+            if obs_depth is not None:
+                err_obs = (obs_depth - gt_depth).abs()
+                err_obs = torch.where(valid_gt, err_obs, torch.full_like(err_obs, float("nan")))
+
+                self._save_map_png(
+                    err_obs[0, 0],
+                    prefix + "_err_obs_gt.png",
+                    vmin=0.0,
+                    vmax=0.10,
+                    cmap="magma",
+                )
+
+        # ------------------------------------------------------------
+        # 3. img_idxs sampling maps
+        # ------------------------------------------------------------
+        if img_idxs is not None:
+            idx0 = img_idxs[0].detach().long().clamp(0, H * W - 1)
+
+            sampled_mask = torch.zeros((H * W,), device=img.device, dtype=torch.float32)
+            sampled_mask[idx0] = 1.0
+
+            self._save_map_png(
+                sampled_mask.view(H, W),
+                prefix + "_sampled_mask.png",
+                vmin=0.0,
+                vmax=1.0,
+                cmap="gray",
+            )
+
+            sparse_final = torch.full((H * W,), float("nan"), device=img.device, dtype=depth_map_pred.dtype)
+            final_flat = depth_map_pred[0, 0].reshape(-1)
+            sparse_final[idx0] = final_flat[idx0]
+
+            self._save_map_png(
+                sparse_final.view(H, W),
+                prefix + "_sampled_final_depth.png",
+                vmin=self.min_depth,
+                vmax=self.max_depth,
+                cmap="Spectral",
+            )
+        
+    def _as_b1hw(self, x, hw, device, dtype, name="depth"):
+        if x.dim() == 3:
+            x = x.unsqueeze(1)
+        elif x.dim() == 4:
+            x = x[:, :1]
+        else:
+            raise ValueError(f"Unexpected {name} shape: {tuple(x.shape)}")
+
+        x = x.to(device=device, dtype=dtype)
+
+        if x.shape[-2:] != hw:
+            x = F.interpolate(x, size=hw, mode="nearest")
+
+        return x.contiguous()
+     
+    @torch.no_grad()
+    def _save_pred_gt_cloud_ply(
+        self,
+        cloud_pred: torch.Tensor,
+        cloud_gt: torch.Tensor,
+        end_points: dict,
+        cloud_obs: torch.Tensor = None,
+    ):
         """
-        cloud_pred/cloud_gt: (B,20000,3) float32
-        save only batch[0] as ply, pred=red, gt=blue
+        pred=red, gt=blue, obs=green(optional)
         """
         if o3d is None:
             return
 
-        # pick first scene in batch
         p = cloud_pred[0].detach().float().cpu().numpy()
         g = cloud_gt[0].detach().float().cpu().numpy()
+        o = None if cloud_obs is None else cloud_obs[0].detach().float().cpu().numpy()
 
-        # filter invalid
         def _valid(x):
             m = np.isfinite(x).all(axis=1)
-            m &= (x[:, 2] > 0)  # z>0
+            m &= (x[:, 2] > 0)
             return x[m]
 
         p = _valid(p)
         g = _valid(g)
+        if o is not None:
+            o = _valid(o)
 
         if p.shape[0] == 0 or g.shape[0] == 0:
             return
 
-        # colors
-        p_col = np.zeros((p.shape[0], 3), dtype=np.float32); p_col[:, 0] = 1.0  # red
-        g_col = np.zeros((g.shape[0], 3), dtype=np.float32); g_col[:, 2] = 1.0  # blue
+        pts_list = []
+        col_list = []
 
-        pts = np.concatenate([p, g], axis=0)
-        cols = np.concatenate([p_col, g_col], axis=0)
+        p_col = np.zeros((p.shape[0], 3), dtype=np.float32)
+        p_col[:, 0] = 1.0  # red
+        pts_list.append(p)
+        col_list.append(p_col)
+
+        g_col = np.zeros((g.shape[0], 3), dtype=np.float32)
+        g_col[:, 2] = 1.0  # blue
+        pts_list.append(g)
+        col_list.append(g_col)
+
+        if o is not None and o.shape[0] > 0:
+            o_col = np.zeros((o.shape[0], 3), dtype=np.float32)
+            o_col[:, 1] = 1.0  # green
+            pts_list.append(o)
+            col_list.append(o_col)
+
+        pts = np.concatenate(pts_list, axis=0)
+        cols = np.concatenate(col_list, axis=0)
 
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(pts.astype(np.float64))
         pcd.colors = o3d.utility.Vector3dVector(cols.astype(np.float64))
 
-        # name tag (optional)
         tag = end_points.get("vis_tag", None)
         if tag is None:
-            # 尽量用 scene/frame 命名（若你 end_points 里有的话）
             scene = end_points.get("scene", "scene")
             frame = end_points.get("frame", "frame")
             tag = f"{scene}_{frame}"
 
-        out_path = os.path.join(self.vis_dir, f"pred_gt_cloud_{tag}_iter{self._vis_iter:06d}.ply")
+        out_path = os.path.join(
+            self.vis_dir,
+            f"pred_gt_obs_cloud_{tag}_iter{self._vis_iter:06d}.ply"
+        )
         o3d.io.write_point_cloud(out_path, pcd, write_ascii=False)
 
     def forward(self, end_points: dict):
@@ -635,10 +1128,86 @@ class EconomicGrasp_RGBDepthProb(nn.Module):
         K = end_points["K"]              # (B,3,3)
         img_idxs = end_points["img_idxs"]  # (B,20000) flatten idx in 448*448
 
-        depth_map_pred, depth_tok, img_feat = self.depth_net(img)
-        end_points["depth_map_pred"] = depth_map_pred      # (B,1,448,448)
-        end_points["depth_tok_pred"] = depth_tok           # (B,1,224,224) debug 用
+        # ------------------------------------------------------------
+        # 1) RGB depth prediction
+        # ------------------------------------------------------------
+        depth_net_pred, depth_tok, img_feat, depth_net_raw = self.depth_net(img, return_raw=True)
+
+        # Ensure shape: (B,1,448,448)
+        depth_net_pred = self._as_b1hw(
+            depth_net_pred,
+            hw=img.shape[-2:],
+            device=img.device,
+            dtype=img.dtype,
+            name="depth_net_pred",
+        )
+
+        depth_net_raw = self._as_b1hw(
+            depth_net_raw,
+            hw=img.shape[-2:],
+            device=img.device,
+            dtype=img.dtype,
+            name="depth_net_raw",
+        )
+        
+        obs_depth_448 = None
+        depth_confidence = None
+        depth_refined_correction = torch.zeros_like(depth_net_pred)
+
+        # ------------------------------------------------------------
+        # 2) Optional obs-depth branch
+        # ------------------------------------------------------------
+        if not self.use_obs_depth:
+            depth_map_pred = depth_net_pred
+        else:
+            obs_depth_448 = end_points.get("sensor_depth_m", None)
+
+            if obs_depth_448 is None:
+                raise ValueError(
+                    "use_obs_depth=True requires end_points['sensor_depth_m'] "
+                )
+
+            obs_depth_448 = self._as_b1hw(
+                obs_depth_448,
+                hw=img.shape[-2:],
+                device=img.device,
+                dtype=depth_net_pred.dtype,
+                name="sensor_depth_m",
+            )
+
+            depth_map_pred, fusion_aux = self.depth_refine(
+                rgb_feat=img_feat,
+                net_depth=depth_net_raw,
+                obs_depth=obs_depth_448,
+            )
+
+            depth_map_pred = self._as_b1hw(
+                depth_map_pred,
+                hw=img.shape[-2:],
+                device=img.device,
+                dtype=depth_net_pred.dtype,
+                name="depth_map_pred_refined",
+            )
+
+            depth_confidence = fusion_aux.get("depth_confidence", None)
+            depth_refined_correction = depth_map_pred - obs_depth_448
+
+        # ------------------------------------------------------------
+        # 3) Store depth outputs
+        # depth_map_pred is final depth used for depth loss and backprojection.
+        # depth_net_pred keeps raw RGB-only depth for debugging.
+        # ------------------------------------------------------------
+        end_points["depth_map_pred"] = depth_map_pred
+        end_points["depth_net_pred"] = depth_net_pred
+        # end_points["depth_tok_pred"] = depth_tok
         end_points["img_feat_dpt"] = img_feat
+        end_points["depth_refined_correction"] = depth_refined_correction
+
+        if self.use_obs_depth:
+            end_points["obs_depth_m_used"] = obs_depth_448
+            end_points["sensor_depth_m_used"] = obs_depth_448
+            if depth_confidence is not None:
+                end_points["depth_confidence_pred"] = depth_confidence
 
         # -------- depth classification (whole-image, patch-level loss) --------
         # depth_map_pred, depth_tok, img_feat, depth_prob_448, depth_logits_448 = self.depth_net(img, return_prob=True)
@@ -660,114 +1229,9 @@ class EconomicGrasp_RGBDepthProb(nn.Module):
         # eps = 1e-6
         # end_points["depth_prob_logits"] = prob_tok.clamp_min(eps).log()  # (B,1,Nfeat,256)
 
-
-        # if hasattr(self.depth_net, "depth_anchors"):
-        #     end_points["depth_anchors_1d"] = self.depth_net.depth_anchors.view(-1).detach()
-        # # ------------------ DEBUG BLOCK (dataset-key aligned) ------------------
-        # with torch.no_grad():
-        #     print("[DBG] ===== DepthHead (dataset-key aligned) =====")
-        #     print(_tstats("img", img))
-        #     print(_tstats("K", K))
-        #     print(_tstats("img_idxs", img_idxs))
-
-        #     # extra keys from dataloader (may exist only in train)
-        #     if "sampled_masked_idxs" in end_points:
-        #         print(_tstats("sampled_masked_idxs", end_points["sampled_masked_idxs"]))  # (B,20000) or (20000,)
-        #     if "pix_flat" in end_points:
-        #         print(_tstats("pix_flat(orig H*W)", end_points["pix_flat"]))              # (B,20000) or (20000,)
-
-        #     Hr, Wr = spatial_shape
-        #     print(f"[DBG] spatial_shape(Hr,Wr)=({Hr},{Wr})  (expect 224x224 when stride=2)")
-
-        #     # anchors sanity
-        #     if hasattr(self.depth_net, "depth_anchors"):
-        #         a = self.depth_net.depth_anchors.detach().view(-1).cpu()
-        #         print(f"[DBG] anchors: D={a.numel()} first={float(a[0]):.6f} last={float(a[-1]):.6f} mean={float(a.mean()):.6f}")
-
-        #     print(_tstats("depth_logits_tok", depth_logits_tok))  # (B,256,224,224)
-        #     print(_tstats("depth_map_pred", depth_map_pred))      # (B,1,448,448)
-
-        #     # -------- compare with GT depth (virtual) --------
-        #     if "gt_depth_m" in end_points:
-        #         gt_depth_m = end_points["gt_depth_m"]  # from dataset: (B,448,448) or (448,448)
-        #         if gt_depth_m.ndim == 2:
-        #             gt_depth_m = gt_depth_m.unsqueeze(0)  # (1,448,448)
-        #         # unify shape to (B,1,448,448) for stat
-        #         if gt_depth_m.ndim == 3:
-        #             gt_depth_m_ = gt_depth_m.unsqueeze(1)
-        #         else:
-        #             gt_depth_m_ = gt_depth_m
-        #         print(_tstats("gt_depth_m", gt_depth_m_))
-
-        #         # sample gt depth at the same img_idxs to compare z distribution directly
-        #         B0 = img.shape[0]
-        #         gt_flat = gt_depth_m_.view(B0, -1)  # (B,448*448)
-        #         z_gt = torch.gather(gt_flat, 1, img_idxs)  # (B,20000)
-        #         z_pred = torch.gather(depth_map_pred.view(B0, -1), 1, img_idxs)  # (B,20000)
-        #         print(_tstats("z_gt@img_idxs", z_gt[0]))
-        #         print(_tstats("z_pred@img_idxs", z_pred[0]))
-        #         print(f"[DBG] z_gt std={float(z_gt[0].std().item()):.6e} | z_pred std={float(z_pred[0].std().item()):.6e}")
-
-        #         # quick correlation check (batch0)
-        #         zg = z_gt[0].float()
-        #         zp = z_pred[0].float()
-        #         mask = (zg > 0) & torch.isfinite(zg) & torch.isfinite(zp)
-        #         if mask.sum() > 16:
-        #             zg0 = zg[mask] - zg[mask].mean()
-        #             zp0 = zp[mask] - zp[mask].mean()
-        #             corr = (zg0 * zp0).mean() / (zg0.std() * zp0.std() + 1e-12)
-        #             print(f"[DBG] corr(z_pred, z_gt) (batch0 valid) = {float(corr.item()):.4f} (expect >0 if learning)")
-
-        #     # -------- distribution diagnostics (pred logits) --------
-        #     if hasattr(self.depth_net, "depth_anchors"):
-        #         anchors_1d = self.depth_net.depth_anchors.view(-1).detach().cpu()
-        #         _dist_stats(
-        #             "pred",
-        #             depth_logits_tok,  # (B,D,Hr,Wr)
-        #             anchors_1d,
-        #             sample_xy=((Hr//2, Wr//2), (Hr//4, Wr//4), (3*Hr//4, 3*Wr//4)),
-        #         )
-
-        #     # -------- compare pred distribution with GT depth_prob_gt (soft label) --------
-        #     if "depth_prob_gt" in end_points:
-        #         gt_prob = end_points["depth_prob_gt"]           # dataset: (B,1,Nfeat,D) or (1,Nfeat,D)
-        #         gt_w    = end_points.get("depth_prob_weight")   # dataset: (B,1,Nfeat) or (1,Nfeat)
-
-        #         if torch.is_tensor(gt_prob):
-        #             print(_tstats("depth_prob_gt", gt_prob))
-        #         if torch.is_tensor(gt_w):
-        #             print(_tstats("depth_prob_weight", gt_w))
-
-        #         # reshape gt_prob -> (B,D,Hr,Wr) for local inspection, assuming stride=2 => Nfeat=Hr*Wr
-        #         try:
-        #             if gt_prob.ndim == 3:
-        #                 gt_prob_ = gt_prob.unsqueeze(0)  # (1,1,Nfeat,D) ? 这里可能不对，下面再判断
-        #             else:
-        #                 gt_prob_ = gt_prob
-
-        #             # handle (B,1,Nfeat,D)
-        #             if gt_prob_.ndim == 4 and gt_prob_.shape[1] == 1:
-        #                 B0 = gt_prob_.shape[0]
-        #                 Nfeat = gt_prob_.shape[2]
-        #                 D = gt_prob_.shape[3]
-        #                 if Nfeat == Hr * Wr and D == depth_logits_tok.shape[1]:
-        #                     gt_prob_hw = gt_prob_[0, 0].view(Hr, Wr, D).permute(2, 0, 1).unsqueeze(0)  # (1,D,Hr,Wr)
-        #                     # 直接看 GT 分布尖锐程度：maxprob / entropy
-        #                     anchors_1d = self.depth_net.depth_anchors.view(-1).detach().cpu() if hasattr(self.depth_net, "depth_anchors") else torch.arange(D)
-        #                     _dist_stats("gt_prob", gt_prob_hw.log().clamp_min(-50.0), anchors_1d, sample_xy=((Hr//2, Wr//2),))
-        #         except Exception as e:
-        #             print(f"[DBG][WARN] depth_prob_gt reshape failed: {repr(e)}")
-
-        #     # -------- verify backproject inputs (batch0) --------
-        #     # confirm img_idxs within [0, 448*448-1]
-        #     idx0 = img_idxs[0]
-        #     print(f"[DBG] img_idxs[0]: min={int(idx0.min().item())} max={int(idx0.max().item())} (expect within [0, {448*448-1}])")
-
-        # ---------------- END DEBUG BLOCK ------------------
-
         # ---- 2) backproject ONLY at sampled pixels (aligned to labels) ----
         # cloud: (B,20000,3)
-        cloud = depth_to_cloud_by_img_idxs(depth_map_pred, K, img_idxs)
+        cloud = depth_to_cloud_by_img_idxs(depth_map_pred.detach(), K, img_idxs)
         end_points["point_clouds"] = cloud
 
         if self.vis_dir is not None:
@@ -775,12 +1239,39 @@ class EconomicGrasp_RGBDepthProb(nn.Module):
             # 也可以手动触发：end_points["force_vis"]=True
             do_vis = do_vis or bool(end_points.get("force_vis", False))
             if do_vis and ("gt_depth_m" in end_points):
-                gt_depth_map = end_points["gt_depth_m"]  # (B,1,448,448)
-                # print('gt_depth_map shape:', gt_depth_map.shape)
-                print("cloud min/max:", cloud.min().item(), cloud.max().item())
-                cloud_gt = depth_to_cloud_by_img_idxs(gt_depth_map.unsqueeze(1), K, img_idxs)  # (B,20000,3)
-                self._save_pred_gt_cloud_ply(cloud, cloud_gt, end_points)
+                gt_depth_map = self._as_b1hw(
+                    end_points["gt_depth_m"],
+                    hw=img.shape[-2:],
+                    device=img.device,
+                    dtype=depth_map_pred.dtype,
+                    name="gt_depth_m",
+                )
+                cloud_gt = depth_to_cloud_by_img_idxs(gt_depth_map, K, img_idxs)
+                cloud_obs = None
+                if self.use_obs_depth and obs_depth_448 is not None:
+                    cloud_obs = depth_to_cloud_by_img_idxs(obs_depth_448, K, img_idxs)
 
+                self._save_pred_gt_cloud_ply(
+                    cloud_pred=cloud,
+                    cloud_gt=cloud_gt,
+                    end_points=end_points,
+                    cloud_obs=cloud_obs,
+                )
+                
+                self._save_depth_maps_vis(
+                    end_points=end_points,
+                    img=img,
+                    img_idxs=img_idxs,
+                    depth_net_pred=depth_net_pred,
+                    depth_map_pred=depth_map_pred,
+                    depth_tok=None,
+                    raw_depth=depth_net_raw,
+                    obs_depth=obs_depth_448,
+                    gt_depth=end_points.get("gt_depth_m", None),
+                    depth_confidence=None,
+                    depth_correction=depth_refined_correction,
+                )
+                
             self._vis_iter += 1
 
         # ---- 3) ME voxel coords ----

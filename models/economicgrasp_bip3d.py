@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 #   - Grasp_Head_Local_Interaction
 #   - process_grasp_labels
 # -----------------------------------------------------------------------------
-from .economicgrasp_depth import DINOv2DepthDistributionNet, DINOv2DepthRegressionNet
+from .economicgrasp_depth import DINOv2DepthDistributionNet, DINOv2DepthRegressionNet, DepthRefine
 from models.bip3d.models.modules.resnet import ResNet
 from models.bip3d.models.modules.channel_mapper import ChannelMapper
 from .economicgrasp_depth_c1 import TokGraspableHead2D
@@ -5967,184 +5967,6 @@ class MetricRegionCropGrouping(nn.Module):
         return grouped
 
 
-from models.dinov2_dpt import DPTHead
-from models.grasp_spatial_enhancer import GraspSpatialEnhancer, MultiBasicEncoder
-class ObsDepthAdapter(nn.Module):
-    """
-    Observed depth encoder using MultiBasicEncoder.
-
-    Input:
-        obs_depth: (B,1,H,W), meter
-    Output:
-        obs_feat:  (B,C,Hf,Wf)
-        obs_valid: (B,1,H,W), valid mask at original obs-depth resolution
-    """
-    def __init__(
-        self,
-        out_dim: int = 128,
-        min_depth: float = 0.2,
-        max_depth: float = 1.0,
-        norm_fn: str = "group",
-        downsample: int = 2,
-    ):
-        super().__init__()
-        self.out_dim = int(out_dim)
-        self.min_depth = float(min_depth)
-        self.max_depth = float(max_depth)
-
-        self.encoder = MultiBasicEncoder(
-            input_dim=2,
-            output_dim=[(out_dim, out_dim, out_dim)],
-            norm_fn=norm_fn,
-            dropout=0.0,
-            downsample=downsample,
-        )
-
-    def forward(self, obs_depth: torch.Tensor, out_hw):
-        if obs_depth.dim() == 3:
-            obs_depth = obs_depth.unsqueeze(1)
-        assert obs_depth.dim() == 4 and obs_depth.size(1) == 1
-
-        obs_mask = (
-            torch.isfinite(obs_depth)
-            & (obs_depth > self.min_depth)
-        ).float()
-
-        z = torch.nan_to_num(obs_depth, nan=0.0, posinf=0.0, neginf=0.0)
-        x = torch.cat([z, obs_mask], dim=1)  # (B,2,H,W)
-        
-        outputs04, outputs08, outputs16 = self.encoder(x, num_layers=3)
-
-        # 最大空间分辨率 feature map
-        obs_feat = outputs04[0]
-
-        if obs_feat.shape[-2:] != tuple(out_hw):
-            obs_feat = F.interpolate(
-                obs_feat,
-                size=out_hw,
-                mode="bilinear",
-                align_corners=False,
-            )
-
-        return obs_feat, obs_mask
-    
-
-def _make_gn(num_channels: int, max_groups: int = 8):
-    g = min(max_groups, num_channels)
-    while g > 1 and num_channels % g != 0:
-        g -= 1
-    return nn.GroupNorm(g, num_channels)
-
-
-class DepthRefine(nn.Module):
-    """
-    Minimal depth fusion.
-
-    final_depth = C * net_depth + (1 - C) * obs_depth
-
-    C is the confidence of network-predicted depth.
-    """
-    def __init__(
-        self,
-        rgb_feat_dim: int,
-        obs_feat_dim: int = None,
-        hidden_dim: int = None,
-        min_depth: float = 0.2,
-        max_depth: float = 1.0,
-        norm_fn: str = "group",
-        downsample: int = 2,
-    ):
-        super().__init__()
-        self.rgb_feat_dim = int(rgb_feat_dim)
-        self.hidden_dim = int(hidden_dim or rgb_feat_dim)
-        self.obs_feat_dim = int(obs_feat_dim or self.hidden_dim)
-        self.min_depth = float(min_depth)
-        self.max_depth = float(max_depth)
-
-        self.obs_encoder = ObsDepthAdapter(
-            out_dim=self.obs_feat_dim,
-            min_depth=self.min_depth,
-            max_depth=self.max_depth,
-            norm_fn=norm_fn,
-            downsample=downsample,
-        )
-
-        self.rgb_proj = (
-            nn.Identity()
-            if self.rgb_feat_dim == self.hidden_dim
-            else nn.Conv2d(self.rgb_feat_dim, self.hidden_dim, kernel_size=1)
-        )
-
-        self.obs_proj = (
-            nn.Identity()
-            if self.obs_feat_dim == self.hidden_dim
-            else nn.Conv2d(self.obs_feat_dim, self.hidden_dim, kernel_size=1)
-        )
-
-        self.fuse = nn.Sequential(
-            nn.Conv2d(self.hidden_dim * 2, self.hidden_dim, kernel_size=3, padding=1, bias=False),
-            _make_gn(self.hidden_dim),
-            nn.GELU(),
-            nn.Conv2d(self.hidden_dim, self.hidden_dim, kernel_size=3, padding=1, bias=False),
-            _make_gn(self.hidden_dim),
-            nn.GELU(),
-        )
-
-        self.conf_head = nn.Conv2d(self.hidden_dim, 1, kernel_size=1)
-
-    def forward(
-        self,
-        rgb_feat: torch.Tensor,   # (B,C,Hf,Wf), e.g. depth_img_feat
-        net_depth: torch.Tensor,  # (B,1,H,W), network predicted absolute depth
-        obs_depth: torch.Tensor,  # (B,1,H,W), observed depth
-    ):  
-
-        obs_depth = obs_depth.to(device=net_depth.device, dtype=net_depth.dtype)
-
-        if net_depth.dim() == 3:
-            net_depth = net_depth.unsqueeze(1)
-        net_depth = net_depth[:, :1]
-
-        B, _, H, W = net_depth.shape
-
-        if obs_depth.shape[-2:] != (H, W):
-            obs_depth = F.interpolate(obs_depth, size=(H, W), mode="nearest")
-
-        obs_feat, obs_valid = self.obs_encoder(obs_depth, out_hw=rgb_feat.shape[-2:])
-
-        rgb_feat = self.rgb_proj(rgb_feat)
-        obs_feat = self.obs_proj(obs_feat)
-
-        fused_feat = self.fuse(torch.cat([rgb_feat, obs_feat], dim=1))
-
-        conf_feat = torch.sigmoid(self.conf_head(fused_feat))
-
-        if conf_feat.shape[-2:] != (H, W):
-            conf = F.interpolate(
-                conf_feat,
-                size=(H, W),
-                mode="bilinear",
-                align_corners=False,
-            )
-        else:
-            conf = conf_feat
-
-        obs_valid = obs_valid.to(device=net_depth.device, dtype=net_depth.dtype)
-        if obs_valid.shape[-2:] != (H, W):
-            obs_valid = F.interpolate(obs_valid, size=(H, W), mode="nearest")
-
-        obs_depth_clean = torch.nan_to_num(obs_depth, nan=0.0, posinf=0.0, neginf=0.0)
-        final_depth = conf * net_depth + (1.0 - conf) * obs_depth_clean
-
-        aux = {
-            "depth_confidence": conf,
-            "obs_depth_valid": obs_valid,
-            "obs_depth_feat_norm": obs_feat.detach().norm(dim=1, keepdim=True),
-            "rgbd_fused_depth_feat": fused_feat,
-        }
-        return final_depth, aux
-    
-
 
 class Grasp_Head_Local_Interaction_Collision(nn.Module):
     """
@@ -6361,7 +6183,9 @@ class Grasp_Head_Local_Interaction_Collision(nn.Module):
 
         return end_points
     
-     
+    
+from models.dinov2_dpt import DPTHead
+from models.grasp_spatial_enhancer import GraspSpatialEnhancer
 class economicgrasp_dpt(nn.Module):
     """
     economicgrasp_dpt:
@@ -7561,3 +7385,50 @@ class economicgrasp_dpt(nn.Module):
 
         self._vis_iter += 1
         return end_points
+    
+
+def pred_decode_collision(end_points):
+    batch_size = len(end_points['point_clouds'])
+    grasp_preds = []
+    for i in range(batch_size):
+        grasp_center = end_points['xyz_graspable'][i].float()
+
+        # composite score estimation
+        grasp_score_prob = end_points['grasp_score_pred'][i].float()
+        score = torch.tensor([0, 0.2, 0.4, 0.6, 0.8, 1]).view(-1, 1).expand(-1, grasp_score_prob.shape[1]).to(grasp_score_prob)
+        score = torch.sum(score * grasp_score_prob, dim=0)
+        grasp_score = score.view(-1, 1)
+
+        if "grasp_collision_pred" in end_points:
+            collision_logit = end_points["grasp_collision_pred"][i].float()  # [1, M] or [M]
+            collision_prob = torch.sigmoid(collision_logit).view(-1, 1)      # [M, 1]
+            no_collision_prob = (1.0 - collision_prob).clamp(0.0, 1.0)
+
+            # collision_decode_weight = getattr(cfgs, "collision_decode_weight", 1.0)
+            # grasp_score = grasp_score * torch.pow(no_collision_prob, collision_decode_weight)
+            
+            grasp_score = grasp_score * no_collision_prob
+            
+        grasp_angle_pred = end_points['grasp_angle_pred'][i].float()
+        grasp_angle, grasp_angle_indxs = torch.max(grasp_angle_pred.squeeze(0), 0)
+        grasp_angle = grasp_angle_indxs * np.pi / 12
+
+        grasp_depth_pred = end_points['grasp_depth_pred'][i].float()
+        grasp_depth, grasp_depth_indxs = torch.max(grasp_depth_pred.squeeze(0), 0)
+        grasp_depth = (grasp_depth_indxs + 1) * 0.01
+        grasp_depth = grasp_depth.view(-1, 1)
+
+        grasp_width = 1.2 * end_points['grasp_width_pred'][i] / 10.
+        grasp_width = torch.clamp(grasp_width, min=0., max=cfgs.grasp_max_width)
+        grasp_width = grasp_width.view(-1, 1)
+
+        approaching = -end_points['grasp_top_view_xyz'][i].float()
+        grasp_rot = batch_viewpoint_params_to_matrix(approaching, grasp_angle)
+        grasp_rot = grasp_rot.view(cfgs.m_point, 9)
+
+        # merge preds
+        grasp_height = 0.02 * torch.ones_like(grasp_score)
+        obj_ids = -1 * torch.ones_like(grasp_score)
+        grasp_preds.append(
+            torch.cat([grasp_score, grasp_width, grasp_height, grasp_depth, grasp_rot, grasp_center, obj_ids], axis=-1))
+    return grasp_preds

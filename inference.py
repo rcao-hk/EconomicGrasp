@@ -104,12 +104,15 @@ if cfgs.multi_modal:
     # from models.economicgrasp import economicgrasp_multi, pred_decode
     # net = economicgrasp_multi(seed_feat_dim=512, fuse_type=cfgs.fuse_type, is_training=False, vis_dir=os.path.join('vis', 'eco_multi_{}_test'.format(cfgs.fuse_type)), vis_every=500)
     
-    # from models.economicgrasp_depth import EconomicGrasp_RGBDepthProb, pred_decode
-    # net = EconomicGrasp_RGBDepthProb(img_feat_dim=256,
-    #              depth_stride=2,     # <-- your expectation: 224x224 tokens
-    #              min_depth=cfgs.min_depth,
-    #              max_depth=cfgs.max_depth,
-    #              bin_num=cfgs.bin_num, is_training=False)
+    # from models.economicgrasp_depth import economicgrasp_depth_baseline, pred_decode
+    # net = economicgrasp_depth_baseline(seed_feat_dim=512, 
+    #                                    depth_stride=1, 
+    #                                    min_depth=cfgs.min_depth, 
+    #                                    max_depth=cfgs.max_depth, 
+    #                                    is_training=False,
+    #                                    use_obs_depth=cfgs.use_obs_depth, 
+    #                                    vis_dir=cfgs.vis_dir, 
+    #                                    vis_every=cfgs.vis_every)
     # from models.economicgrasp_depth_c1 import economicgrasp_c1, pred_decode
     # net = economicgrasp_c1(depth_stride=2,
     #                        min_depth=cfgs.min_depth,
@@ -193,24 +196,26 @@ if cfgs.multi_modal:
     #     is_training=False,
     #     vis_dir=os.path.join('vis', 'bip3d_no_enhancer_test'),
     #     vis_every=500)
-    # from models.economicgrasp_bip3d import economicgrasp_dpt
+    from models.economicgrasp_bip3d import economicgrasp_dpt
+    from models.economicgrasp_bip3d import pred_decode_collision as pred_decode
     # from models.economicgrasp_depth_c1 import pred_decode_c2_1 as pred_decode
-    # net = economicgrasp_dpt(
-    #     min_depth=cfgs.min_depth,
-    #     max_depth=cfgs.max_depth,
-    #     bin_num=cfgs.bin_num,
-    #     is_training=False,
-    #     vis_dir=os.path.join('vis', 'dpt_view_attn_depth_local_attn_group_test'),
-    #     vis_every=500)
-    from models.economicgrasp_bip3d import economicgrasp_dpt_direct
-    from models.economicgrasp_depth_c1 import pred_decode_c2_1 as pred_decode
-    net = economicgrasp_dpt_direct(
+    net = economicgrasp_dpt(
         min_depth=cfgs.min_depth,
         max_depth=cfgs.max_depth,
         bin_num=cfgs.bin_num,
         is_training=False,
-        vis_dir=os.path.join('vis', 'dpt_view_attn_direct_test'),
-        vis_every=500)
+        use_obs_depth=getattr(cfgs, 'use_obs_depth', False),
+        vis_dir=getattr(cfgs, 'vis_dir', None),
+        vis_every=getattr(cfgs, 'vis_every', 1000),)
+    # from models.economicgrasp_bip3d import economicgrasp_dpt_direct
+    # from models.economicgrasp_depth_c1 import pred_decode_c2_1 as pred_decode
+    # net = economicgrasp_dpt_direct(
+    #     min_depth=cfgs.min_depth,
+    #     max_depth=cfgs.max_depth,
+    #     bin_num=cfgs.bin_num,
+    #     is_training=False,
+    #     vis_dir=os.path.join('vis', 'dpt_view_attn_direct_test'),
+    #     vis_every=500)
 else:
     from models.economicgrasp import economicgrasp, pred_decode
     net = economicgrasp(seed_feat_dim=512, is_training=False)
