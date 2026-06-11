@@ -180,10 +180,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--method1-grasp-root", type=str, default="")
     parser.add_argument("--method2-grasp-root", type=str, default="")
     parser.add_argument("--skip-vis", action="store_true")
-    parser.add_argument("--vis-topk-scene-worst", type=int, default=3)
+    parser.add_argument(
+        "--vis-topk-scene-worst",
+        type=int,
+        default=3,
+        help=(
+            "Backward-compatible name. Number of samples per scene to save in each "
+            "visualization group. Prefer --vis-topk-scene-samples for new runs."
+        ),
+    )
+    parser.add_argument(
+        "--vis-topk-scene-samples",
+        type=int,
+        default=None,
+        help="Number of samples per scene to save for each visualization group.",
+    )
     parser.add_argument("--vis-topk-grasps", type=int, default=50)
     parser.add_argument("--grasp-mesh-sample-points", type=int, default=1000)
     parser.add_argument("--pcd-stride", type=int, default=2)
+    parser.add_argument(
+        "--save-pcd-num-points",
+        type=int,
+        default=0,
+        help=(
+            "If > 0, randomly downsample the RGB-D scene point cloud to at most this many "
+            "points for each side before saving the visualization PLY. Grasp mesh samples are "
+            "still controlled by --grasp-mesh-sample-points."
+        ),
+    )
+    parser.add_argument(
+        "--save-pcd-random-seed",
+        type=int,
+        default=0,
+        help="Random seed used by --save-pcd-num-points.",
+    )
     parser.add_argument("--depth-scale", type=float, default=1000.0)
     parser.add_argument("--depth-trunc", type=float, default=2.0)
     parser.add_argument("--side-by-side-gap", type=float, default=0.10)
@@ -534,6 +564,29 @@ def backproject_depth_to_pcd(
     return pcd
 
 
+def sample_pcd_points(pcd, num_points: int, seed: int = 0):
+    """Randomly keep at most num_points points from an Open3D point cloud."""
+    if o3d is None:
+        return pcd
+    num_points = int(num_points)
+    if num_points <= 0:
+        return pcd
+    n = len(pcd.points)
+    if n <= num_points:
+        return pcd
+    rng = np.random.default_rng(int(seed))
+    idx = rng.choice(n, size=num_points, replace=False)
+    return pcd.select_by_index(idx.astype(np.int64).tolist())
+
+
+def _json_float(x: Any) -> Optional[float]:
+    try:
+        v = float(x)
+    except Exception:
+        return None
+    return v if np.isfinite(v) else None
+
+
 def tint_pcd(pcd, tint_rgb: Tuple[float, float, float], strength: float = 0.35):
     if o3d is None:
         return pcd
@@ -547,7 +600,7 @@ def tint_pcd(pcd, tint_rgb: Tuple[float, float, float], strength: float = 0.35):
     return out
 
 
-def make_grasp_samples(arr: np.ndarray, sample_points: int, color: Optional[Tuple[float, float, float]] = None):
+def make_grasp_samples(arr: np.ndarray, sample_points: int):
     if o3d is None:
         raise RuntimeError("open3d is required for visualization but is not available.")
     pcd = o3d.geometry.PointCloud()
@@ -558,13 +611,18 @@ def make_grasp_samples(arr: np.ndarray, sample_points: int, color: Optional[Tupl
         gg = GraspGroup(arr)
         geoms = gg.to_open3d_geometry_list()
         for g in geoms:
+            # Keep the original GraspNetAPI geometry colors. In common GraspNetAPI
+            # visualizations, grasp color encodes grasp score, so do not repaint them.
             sampled = g.sample_points_uniformly(number_of_points=sample_points)
             pcd += sampled
         return pcd
 
+    # Fallback path when graspnetAPI is unavailable: keep the original behavior by
+    # visualizing grasp centers only. This path cannot recover GraspNetAPI's score
+    # color mapping.
     centers = arr[:, 13:16]
     pcd.points = o3d.utility.Vector3dVector(centers.astype(np.float64))
-    fallback = np.array(color if color is not None else (1.0, 0.0, 0.0), dtype=np.float64)[None, :]
+    fallback = np.array((1.0, 0.0, 0.0), dtype=np.float64)[None, :]
     colors = np.tile(fallback, (centers.shape[0], 1))
     pcd.colors = o3d.utility.Vector3dVector(colors)
     return pcd
@@ -589,6 +647,7 @@ def save_combined_visualization(
     m2_arr: np.ndarray,
     out_dir: Path,
     args: argparse.Namespace,
+    metric_info: Optional[Dict[str, Any]] = None,
 ) -> None:
     if o3d is None:
         raise RuntimeError("open3d is required for visualization but is not available.")
@@ -603,6 +662,10 @@ def save_combined_visualization(
         depth_trunc=args.depth_trunc,
         stride=args.pcd_stride,
     )
+    num_scene_points_before_sampling = int(len(base_pcd.points))
+    sample_seed = int(args.save_pcd_random_seed) + int(scene_id) * 100000 + int(ann_id)
+    base_pcd = sample_pcd_points(base_pcd, int(args.save_pcd_num_points), seed=sample_seed)
+    num_scene_points_after_sampling = int(len(base_pcd.points))
 
     bbox = base_pcd.get_axis_aligned_bounding_box()
     extent_x = max(float(bbox.get_extent()[0]), 1e-6)
@@ -618,7 +681,50 @@ def save_combined_visualization(
     combo_all = left_pcd + right_pcd + left_grasp + right_grasp
 
     tag = f"scene_{scene_id:04d}_ann_{ann_id:04d}_{m1_name}_vs_{m2_name}"
-    o3d.io.write_point_cloud(str(out_dir / f"{tag}_all_top{args.vis_topk_grasps}_nms.ply"), combo_all)
+    ply_path = out_dir / f"{tag}_all_top{args.vis_topk_grasps}_nms.ply"
+    o3d.io.write_point_cloud(str(ply_path), combo_all)
+
+    cfg = {
+        "ply_file": str(ply_path),
+        "scene_id": int(scene_id),
+        "ann_id": int(ann_id),
+        "camera": camera,
+        "selection": {
+            "group": (metric_info or {}).get("selection_group"),
+            "description": (metric_info or {}).get("selection_description"),
+            "delta_sort": (metric_info or {}).get("selection_delta_sort"),
+        },
+        "layout": "side_by_side_along_x",
+        "red_left_point_cloud": {
+            "method": m1_name,
+            "description": "scene point cloud tinted red; grasps preserve original GraspNetAPI score colors",
+            "translation_xyz": [0.0, 0.0, 0.0],
+            "point_cloud_tint_rgb": [1.0, 0.35, 0.35],
+        },
+        "blue_right_point_cloud": {
+            "method": m2_name,
+            "description": "same scene point cloud shifted along +x and tinted blue; grasps preserve original GraspNetAPI score colors",
+            "translation_xyz": [float(shift_x), 0.0, 0.0],
+            "point_cloud_tint_rgb": [0.35, 0.35, 1.0],
+        },
+        "grasp_color_policy": "preserve original colors from GraspGroup.to_open3d_geometry_list; no uniform red/blue repainting",
+        "ap_delta_definition": "blue/right method minus red/left method",
+        "metrics": metric_info or {},
+        "visualization_settings": {
+            "vis_topk_grasps_after_sort_nms": int(args.vis_topk_grasps),
+            "grasp_mesh_sample_points_per_grasp": int(args.grasp_mesh_sample_points),
+            "pcd_stride": int(args.pcd_stride),
+            "save_pcd_num_points_per_side": int(args.save_pcd_num_points),
+            "save_pcd_random_seed": int(args.save_pcd_random_seed),
+            "num_scene_points_before_sampling": num_scene_points_before_sampling,
+            "num_scene_points_after_sampling_per_side": num_scene_points_after_sampling,
+            "num_method1_grasps_visualized": int(m1_arr.shape[0]),
+            "num_method2_grasps_visualized": int(m2_arr.shape[0]),
+            "side_by_side_gap": float(args.side_by_side_gap),
+        },
+    }
+    with open(ply_path.with_suffix(".json"), "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
 
 
 # -----------------------------------------------------------------------------
@@ -626,6 +732,45 @@ def save_combined_visualization(
 # -----------------------------------------------------------------------------
 def split_to_scene_id(split: str, local_scene_index: int) -> int:
     return int(SPLIT_SCENE_START.get(split, 0) + local_scene_index)
+
+
+def build_original_anno_lookup(
+    anno_len: int,
+    sample_info: Dict[str, Any],
+    args: argparse.Namespace,
+) -> Tuple[List[int], str]:
+    """Map local anno indices in a parsed/evaluated AP array to original GraspNet anno ids.
+
+    Why this is needed:
+    - When sample_interval=0.1 is applied to a full 256-anno AP array, the parsed
+      per-anno table has local indices 0..25, but the corresponding original anno ids
+      are 0,10,20,...,250.
+    - When the AP file is already sampled, maybe_apply_sample_interval() intentionally
+      skips resampling. If the sampled length matches the requested sample interval,
+      we still infer the same original anno ids for visualization.
+    """
+    anno_len = int(anno_len)
+    if anno_len <= 0:
+        return [], "empty"
+
+    sample_indices = sample_info.get("sample_indices")
+    if bool(sample_info.get("sample_applied", False)) and isinstance(sample_indices, list):
+        lookup = [int(x) for x in sample_indices]
+        if len(lookup) >= anno_len:
+            return lookup[:anno_len], "sample_info.sample_indices"
+
+    # If the AP file appears to be already sampled, infer the mapping from the requested
+    # sample interval. This fixes the common case: local 0..25 -> original 0,10,...,250.
+    if float(args.sample_interval) < 1.0:
+        candidate = _build_sample_indices(
+            int(args.annos_per_scene),
+            float(args.sample_interval),
+            int(args.sample_offset),
+        )
+        if len(candidate) == anno_len:
+            return [int(x) for x in candidate], "inferred_from_sample_interval"
+
+    return list(range(anno_len)), "identity"
 
 
 def make_bar_plot(df: pd.DataFrame, method1: str, method2: str, out_path: Path) -> None:
@@ -704,6 +849,8 @@ def main() -> None:
         "scene_axis": int(args.scene_axis),
         "ap04_index": int(args.ap04_index),
         "ap08_index": int(args.ap08_index),
+        "save_pcd_num_points": int(args.save_pcd_num_points),
+        "save_pcd_random_seed": int(args.save_pcd_random_seed),
         "splits": {},
     }
 
@@ -765,7 +912,31 @@ def main() -> None:
             a.insert(0, "split", split)
             a.insert(1, "split_short", split_short)
             a["scene_id"] = [split_to_scene_id(split, int(x)) for x in a["local_scene_index"]]
-            a["ann_id"] = a["local_anno_index"].astype(np.int64)
+
+            anno_len_after_parse = int(a["local_anno_index"].max()) + 1 if len(a) else 0
+            orig_lookup1, lookup_source1 = build_original_anno_lookup(anno_len_after_parse, sample_info1, args)
+            orig_lookup2, lookup_source2 = build_original_anno_lookup(anno_len_after_parse, sample_info2, args)
+            if orig_lookup1 != orig_lookup2:
+                overview["splits"][split]["anno_mapping_warning"] = (
+                    "method1 and method2 inferred different original anno mappings; "
+                    "using method1 mapping for visualization."
+                )
+            overview["splits"][split]["original_anno_mapping"] = {
+                "method1_source": lookup_source1,
+                "method2_source": lookup_source2,
+                "lookup_used": orig_lookup1,
+            }
+
+            a["eval_local_anno_index"] = a["local_anno_index"].astype(np.int64)
+            a["orig_ann_id"] = [
+                int(orig_lookup1[int(x)]) if int(x) < len(orig_lookup1) else int(x)
+                for x in a["local_anno_index"]
+            ]
+            # ann_id is used to locate RGB/depth/grasp files, so it must be the original
+            # GraspNet annotation id, not the local index in the sampled AP array.
+            a["ann_id"] = a["orig_ann_id"].astype(np.int64)
+            a["anno_mapping_source"] = lookup_source1
+
             a["delta_AP_m2_minus_m1"] = a["AP_m2"] - a["AP_m1"]
             a["delta_AP0.8_m2_minus_m1"] = a["AP0.8_m2"] - a["AP0.8_m1"]
             a["delta_AP0.4_m2_minus_m1"] = a["AP0.4_m2"] - a["AP0.4_m1"]
@@ -824,7 +995,10 @@ def main() -> None:
     else:
         anno_df = pd.DataFrame()
 
-    # Optional visualization: for each scene, save the top-K annos where method1 is worst relative to method2.
+    # Optional visualization: for each scene, save two groups of samples:
+    #   1) top_method2_worse  : method2/blue/right is worse than method1/red/left, most negative delta first.
+    #   2) top_method2_better : method2/blue/right is better than method1/red/left, most positive delta first.
+    # Here delta means AP(method2) - AP(method1).
     vis_enabled = (
         (not args.skip_vis)
         and bool(args.dataset_root)
@@ -838,62 +1012,157 @@ def main() -> None:
         method1_grasp_root = Path(args.method1_grasp_root)
         method2_grasp_root = Path(args.method2_grasp_root)
         vis_root = out_root / "visualizations"
-        for scene_id, g in anno_df.groupby("scene_id"):
-            # delta > 0 means method2 better than method1.
-            worst = g.sort_values("delta_AP_m2_minus_m1", ascending=False).head(int(args.vis_topk_scene_worst))
-            for row in worst.itertuples(index=False):
-                ann_id = int(row.ann_id)
-                g1 = resolve_path(method1_grasp_root, int(scene_id), ann_id, args.camera, DEFAULT_GRASP_TEMPLATES)
-                g2 = resolve_path(method2_grasp_root, int(scene_id), ann_id, args.camera, DEFAULT_GRASP_TEMPLATES)
-                if g1 is None or g2 is None:
-                    vis_records.append({
-                        "scene_id": int(scene_id),
-                        "ann_id": ann_id,
-                        "status": "missing_grasp_file",
-                        "method1_grasp_path": str(g1) if g1 is not None else "",
-                        "method2_grasp_path": str(g2) if g2 is not None else "",
-                    })
+
+        vis_topk_per_scene = (
+            int(args.vis_topk_scene_samples)
+            if args.vis_topk_scene_samples is not None
+            else int(args.vis_topk_scene_worst)
+        )
+
+        selection_specs = [
+            {
+                "name": "top_method2_worse",
+                "description": "method2/blue/right AP is lower than method1/red/left; sorted by most negative delta_AP_m2_minus_m1",
+                "ascending": True,
+                "sign": "negative",
+            },
+            {
+                "name": "top_method2_better",
+                "description": "method2/blue/right AP is higher than method1/red/left; sorted by most positive delta_AP_m2_minus_m1",
+                "ascending": False,
+                "sign": "positive",
+            },
+        ]
+
+        for spec in selection_specs:
+            group_name = str(spec["name"])
+            group_records: List[Dict[str, Any]] = []
+            group_root = vis_root / group_name
+            for scene_id, g in anno_df.groupby("scene_id"):
+                if spec["sign"] == "negative":
+                    candidates = g[g["delta_AP_m2_minus_m1"] < 0].copy()
+                else:
+                    candidates = g[g["delta_AP_m2_minus_m1"] > 0].copy()
+                if candidates.empty:
                     continue
-                try:
-                    arr1 = sort_nms_topk_grasp_array(load_grasp_array(g1), int(args.vis_topk_grasps))
-                    arr2 = sort_nms_topk_grasp_array(load_grasp_array(g2), int(args.vis_topk_grasps))
-                    save_combined_visualization(
-                        dataset_root=dataset_root,
-                        scene_id=int(scene_id),
-                        ann_id=ann_id,
-                        camera=args.camera,
-                        m1_name=args.method1_name,
-                        m2_name=args.method2_name,
-                        m1_arr=arr1,
-                        m2_arr=arr2,
-                        out_dir=vis_root / f"scene_{int(scene_id):04d}",
-                        args=args,
-                    )
-                    vis_records.append({
+                selected = candidates.sort_values(
+                    "delta_AP_m2_minus_m1",
+                    ascending=bool(spec["ascending"]),
+                ).head(vis_topk_per_scene)
+
+                for _, row in selected.iterrows():
+                    ann_id = int(row.get("orig_ann_id", row.get("ann_id")))
+                    local_anno_index = int(row.get("eval_local_anno_index", row.get("local_anno_index", ann_id)))
+                    g1 = resolve_path(method1_grasp_root, int(scene_id), ann_id, args.camera, DEFAULT_GRASP_TEMPLATES)
+                    g2 = resolve_path(method2_grasp_root, int(scene_id), ann_id, args.camera, DEFAULT_GRASP_TEMPLATES)
+                    metric_info = {
+                        "selection_group": group_name,
+                        "selection_description": str(spec["description"]),
+                        "selection_delta_sort": "ascending" if bool(spec["ascending"]) else "descending",
+                        "red_left_method": args.method1_name,
+                        "blue_right_method": args.method2_name,
+                        "eval_local_anno_index": local_anno_index,
+                        "orig_ann_id": ann_id,
+                        "ann_id_used_for_files": ann_id,
+                        "anno_mapping_source": row.get("anno_mapping_source", ""),
+                        "AP_red_left": _json_float(row.get("AP_m1")),
+                        "AP_blue_right": _json_float(row.get("AP_m2")),
+                        "delta_AP_blue_minus_red": _json_float(row.get("delta_AP_m2_minus_m1")),
+                        "AP0.8_red_left": _json_float(row.get("AP0.8_m1")),
+                        "AP0.8_blue_right": _json_float(row.get("AP0.8_m2")),
+                        "delta_AP0.8_blue_minus_red": _json_float(row.get("delta_AP0.8_m2_minus_m1")),
+                        "AP0.4_red_left": _json_float(row.get("AP0.4_m1")),
+                        "AP0.4_blue_right": _json_float(row.get("AP0.4_m2")),
+                        "delta_AP0.4_blue_minus_red": _json_float(row.get("delta_AP0.4_m2_minus_m1")),
+                    }
+                    base_record = {
+                        "selection_group": group_name,
+                        "selection_description": str(spec["description"]),
                         "scene_id": int(scene_id),
+                        "local_anno_index": local_anno_index,
+                        "orig_ann_id": ann_id,
                         "ann_id": ann_id,
-                        "status": "ok",
-                        "method1_grasp_path": str(g1),
-                        "method2_grasp_path": str(g2),
-                        "delta_AP_m2_minus_m1": float(row.delta_AP_m2_minus_m1),
-                    })
-                except Exception as e:
-                    vis_records.append({
-                        "scene_id": int(scene_id),
-                        "ann_id": ann_id,
-                        "status": f"error: {repr(e)}",
-                        "method1_grasp_path": str(g1),
-                        "method2_grasp_path": str(g2),
-                    })
+                    }
+                    if g1 is None or g2 is None:
+                        rec = {
+                            **base_record,
+                            "status": "missing_grasp_file",
+                            "method1_grasp_path": str(g1) if g1 is not None else "",
+                            "method2_grasp_path": str(g2) if g2 is not None else "",
+                            **metric_info,
+                        }
+                        vis_records.append(rec)
+                        group_records.append(rec)
+                        continue
+                    try:
+                        arr1 = sort_nms_topk_grasp_array(load_grasp_array(g1), int(args.vis_topk_grasps))
+                        arr2 = sort_nms_topk_grasp_array(load_grasp_array(g2), int(args.vis_topk_grasps))
+                        save_combined_visualization(
+                            dataset_root=dataset_root,
+                            scene_id=int(scene_id),
+                            ann_id=ann_id,
+                            camera=args.camera,
+                            m1_name=args.method1_name,
+                            m2_name=args.method2_name,
+                            m1_arr=arr1,
+                            m2_arr=arr2,
+                            out_dir=group_root / f"scene_{int(scene_id):04d}",
+                            args=args,
+                            metric_info=metric_info,
+                        )
+                        rec = {
+                            **base_record,
+                            "status": "ok",
+                            "method1_grasp_path": str(g1),
+                            "method2_grasp_path": str(g2),
+                            **metric_info,
+                        }
+                        vis_records.append(rec)
+                        group_records.append(rec)
+                    except Exception as e:
+                        rec = {
+                            **base_record,
+                            "status": f"error: {repr(e)}",
+                            "method1_grasp_path": str(g1),
+                            "method2_grasp_path": str(g2),
+                            **metric_info,
+                        }
+                        vis_records.append(rec)
+                        group_records.append(rec)
+
+            if group_records:
+                pd.DataFrame(group_records).to_csv(out_root / f"visualization_records_{group_name}.csv", index=False)
+
         if vis_records:
-            pd.DataFrame(vis_records).to_csv(out_root / "visualization_records.csv", index=False)
+            vis_df = pd.DataFrame(vis_records)
+            vis_df.to_csv(out_root / "visualization_records.csv", index=False)
             overview["visualization"] = {
                 "enabled": True,
                 "dataset_root": str(dataset_root),
                 "method1_grasp_root": str(method1_grasp_root),
                 "method2_grasp_root": str(method2_grasp_root),
+                "delta_definition": "method2/blue/right minus method1/red/left",
+                "vis_topk_per_scene_per_group": int(vis_topk_per_scene),
+                "anno_id_mapping": "ann_id/orig_ann_id used for file IO; local_anno_index kept for eval-array index",
+                "groups": {
+                    name: {
+                        "num_records": int((vis_df["selection_group"] == name).sum()),
+                        "num_ok": int(((vis_df["selection_group"] == name) & (vis_df["status"] == "ok")).sum()),
+                    }
+                    for name in sorted(vis_df["selection_group"].unique().tolist())
+                },
                 "num_records": len(vis_records),
                 "num_ok": int(sum(1 for x in vis_records if x.get("status") == "ok")),
+            }
+        else:
+            overview["visualization"] = {
+                "enabled": True,
+                "dataset_root": str(dataset_root),
+                "method1_grasp_root": str(method1_grasp_root),
+                "method2_grasp_root": str(method2_grasp_root),
+                "num_records": 0,
+                "num_ok": 0,
+                "reason": "no positive/negative per-anno AP deltas found after sign filtering",
             }
     else:
         overview["visualization"] = {
