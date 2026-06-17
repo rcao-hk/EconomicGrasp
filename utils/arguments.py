@@ -73,6 +73,20 @@ parser.add_argument("--save_root", type=str)
 parser.add_argument("--oracle_mode", type=str,)
 parser.add_argument("--use_obs_depth", action='store_true')
 parser.add_argument("--use_depth_comp", action='store_true')
+parser.add_argument("--graspness_mode", type=str,)
+parser.add_argument("--kview_mode", type=str, default='A1')
+parser.add_argument(
+    "--use-pose-loss-mask",
+    action="store_true",
+    help="Use selected-view-GT mask for angle/depth/width losses.",
+)
+
+parser.add_argument(
+    "--pose-loss-view-gt-thresh",
+    type=float,
+    default=0.1,
+    help="Threshold on kview_query_selected_gt for pose losses.",
+)
 parser.add_argument("--vis_dir", type=str)
 parser.add_argument("--vis_every", type=int, default=1000)
 cfgs = parser.parse_args()

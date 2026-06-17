@@ -5970,18 +5970,136 @@ class MetricRegionCropGrouping(nn.Module):
 
 class Grasp_Head_Local_Interaction_Collision(nn.Module):
     """
-    Pose-conditioned score/width head + collision-risk head.
+    Clean version:
+      - original local interaction structure
+      - add collision prediction head
+      - add Dropout(0.15) before each output head
 
-    Kept original outputs:
+    Outputs:
+      grasp_angle_pred:     [B, num_angle + 1, M]
+      grasp_depth_pred:     [B, num_depth + 1, M]
+      grasp_score_pred:     [B, 6, M]
+      grasp_width_pred:     [B, 1, M]
+      grasp_collision_pred: [B, 1, M]
+    """
+
+    def __init__(self, num_angle, num_depth, dropout_p=0.1):
+        super().__init__()
+        self.num_angle = num_angle
+        self.num_depth = num_depth
+
+        self.hidden_dim = 64
+
+        self.conv_angle_feature = nn.Conv1d(256, self.hidden_dim, 1)
+        self.conv_depth_feature = nn.Conv1d(256, self.hidden_dim, 1)
+        self.conv_width_feature = nn.Conv1d(256, self.hidden_dim, 1)
+        self.conv_score_feature = nn.Conv1d(256, self.hidden_dim, 1)
+
+        # new: separate collision branch feature
+        self.conv_collision_feature = nn.Conv1d(256, self.hidden_dim, 1)
+
+        # local interaction module
+        # now interact among angle/depth/width/score/collision tokens
+        self.global_interaction_module = AttentionModule(
+            dim=self.hidden_dim,
+            n_head=1,
+            msa_dropout=0.05,
+        )
+
+        # output heads with dropout before the final Conv1d
+        self.conv_angle = nn.Sequential(
+            nn.Dropout(dropout_p),
+            nn.Conv1d(self.hidden_dim, num_angle + 1, 1),
+        )
+
+        self.conv_depth = nn.Sequential(
+            nn.Dropout(dropout_p),
+            nn.Conv1d(self.hidden_dim, num_depth + 1, 1),
+        )
+
+        self.conv_width = nn.Sequential(
+            nn.Dropout(dropout_p),
+            nn.Conv1d(self.hidden_dim, 1, 1),
+        )
+
+        self.conv_score = nn.Sequential(
+            nn.Dropout(dropout_p),
+            nn.Conv1d(self.hidden_dim, 6, 1),
+        )
+
+        self.conv_collision = nn.Sequential(
+            nn.Dropout(dropout_p),
+            nn.Conv1d(self.hidden_dim, 1, 1),
+        )
+
+    def forward(self, vp_features, end_points):
+        B, _, num_seed = vp_features.size()
+        C = self.hidden_dim
+
+        angle_features = self.conv_angle_feature(vp_features)          # [B, C, M]
+        depth_features = self.conv_depth_feature(vp_features)          # [B, C, M]
+        width_features = self.conv_width_feature(vp_features)          # [B, C, M]
+        score_features = self.conv_score_feature(vp_features)          # [B, C, M]
+        collision_features = self.conv_collision_feature(vp_features)  # [B, C, M]
+
+        angle_features = angle_features.permute(0, 2, 1).contiguous().view(B * num_seed, 1, C)
+        depth_features = depth_features.permute(0, 2, 1).contiguous().view(B * num_seed, 1, C)
+        width_features = width_features.permute(0, 2, 1).contiguous().view(B * num_seed, 1, C)
+        score_features = score_features.permute(0, 2, 1).contiguous().view(B * num_seed, 1, C)
+        collision_features = collision_features.permute(0, 2, 1).contiguous().view(B * num_seed, 1, C)
+
+        interaction_feature = torch.cat(
+            [
+                angle_features,
+                depth_features,
+                width_features,
+                score_features,
+                collision_features,
+            ],
+            dim=1,
+        )  # [B*M, 5, C]
+
+        interaction_feature = self.global_interaction_module(
+            interaction_feature,
+            interaction_feature,
+            interaction_feature,
+            mask=None,
+        )
+
+        angle_features = interaction_feature[:, 0, :].view(B, num_seed, C).permute(0, 2, 1).contiguous()
+        depth_features = interaction_feature[:, 1, :].view(B, num_seed, C).permute(0, 2, 1).contiguous()
+        width_features = interaction_feature[:, 2, :].view(B, num_seed, C).permute(0, 2, 1).contiguous()
+        score_features = interaction_feature[:, 3, :].view(B, num_seed, C).permute(0, 2, 1).contiguous()
+        collision_features = interaction_feature[:, 4, :].view(B, num_seed, C).permute(0, 2, 1).contiguous()
+
+        angle_pred = self.conv_angle(angle_features)          # [B, A+1, M]
+        depth_pred = self.conv_depth(depth_features)          # [B, D+1, M]
+        width_pred = self.conv_width(width_features)          # [B, 1, M]
+        score_pred = self.conv_score(score_features)          # [B, 6, M]
+        collision_pred = self.conv_collision(collision_features)  # [B, 1, M]
+
+        end_points['grasp_angle_pred'] = angle_pred
+        end_points['grasp_depth_pred'] = depth_pred
+        end_points['grasp_score_pred'] = score_pred
+        end_points['grasp_width_pred'] = width_pred
+        end_points['grasp_collision_pred'] = collision_pred
+
+        # lightweight debug
+        with torch.no_grad():
+            end_points['D: GH collision prob'] = torch.sigmoid(collision_pred).mean()
+
+        return end_points
+    
+
+class Grasp_Head_Local_Interaction_Dropout(nn.Module):
+    """
+    Pose-conditioned score/width head without collision head.
+
+    Outputs:
         grasp_angle_pred: [B, A+1, M]
         grasp_depth_pred: [B, D+1, M]
         grasp_score_pred: [B, 6,   M]
         grasp_width_pred: [B, 1,   M]
-
-    New output:
-        grasp_collision_pred: [B, 1, M]
-            logit for collision / invalid-grasp risk.
-            label is generated in loss from batch_grasp_score by default.
     """
 
     def __init__(
@@ -5990,6 +6108,7 @@ class Grasp_Head_Local_Interaction_Collision(nn.Module):
         num_depth,
         in_dim=256,
         hidden_dim=64,
+        dropout_p=0.15,
     ):
         super().__init__()
         self.num_angle = num_angle
@@ -6001,37 +6120,34 @@ class Grasp_Head_Local_Interaction_Collision(nn.Module):
         self.conv_width_feature = nn.Conv1d(in_dim, hidden_dim, 1)
         self.conv_score_feature = nn.Conv1d(in_dim, hidden_dim, 1)
 
-        # Original local interaction among angle/depth/width/score tokens.
+        # local interaction among angle/depth/width/score tokens
         self.global_interaction_module = AttentionModule(
             dim=hidden_dim,
             n_head=1,
             msa_dropout=0.05,
         )
 
+        # output-head dropout, same spirit as your DepthNet
+        self.angle_dropout = nn.Dropout(dropout_p)
+        self.depth_dropout = nn.Dropout(dropout_p)
+        self.width_dropout = nn.Dropout(dropout_p)
+        self.score_dropout = nn.Dropout(dropout_p)
+
         self.conv_angle = nn.Conv1d(hidden_dim, num_angle + 1, 1)
         self.conv_depth = nn.Conv1d(hidden_dim, num_depth + 1, 1)
 
-        # Pose posterior -> feature context.
+        # pose posterior -> feature context
         self.angle_ctx_proj = nn.Conv1d(num_angle + 1, hidden_dim, 1, bias=False)
         self.depth_ctx_proj = nn.Conv1d(num_depth + 1, hidden_dim, 1, bias=False)
 
-        # Pose-conditioned residual fusion.
-        # width sees: width feature + score feature + angle posterior context + depth posterior context.
+        # pose-conditioned residual fusion
         self.width_fuse = nn.Sequential(
             nn.Conv1d(hidden_dim * 4, hidden_dim, 1),
             nn.ReLU(inplace=True),
             nn.Conv1d(hidden_dim, hidden_dim, 1),
         )
 
-        # score sees updated width feature as well.
         self.score_fuse = nn.Sequential(
-            nn.Conv1d(hidden_dim * 4, hidden_dim, 1),
-            nn.ReLU(inplace=True),
-            nn.Conv1d(hidden_dim, hidden_dim, 1),
-        )
-
-        # collision sees score/width/pose context.
-        self.collision_fuse = nn.Sequential(
             nn.Conv1d(hidden_dim * 4, hidden_dim, 1),
             nn.ReLU(inplace=True),
             nn.Conv1d(hidden_dim, hidden_dim, 1),
@@ -6039,11 +6155,6 @@ class Grasp_Head_Local_Interaction_Collision(nn.Module):
 
         self.conv_width = nn.Conv1d(hidden_dim, 1, 1)
         self.conv_score = nn.Conv1d(hidden_dim, 6, 1)
-        self.conv_collision = nn.Conv1d(hidden_dim, 1, 1)
-
-        # Do not let collision branch suppress scores too aggressively at iteration 0.
-        nn.init.zeros_(self.conv_collision.weight)
-        nn.init.constant_(self.conv_collision.bias, -2.0)
 
     @staticmethod
     def _entropy(prob, dim=1, eps=1e-6):
@@ -6090,13 +6201,13 @@ class Grasp_Head_Local_Interaction_Collision(nn.Module):
         """
         B, _, M = vp_features.size()
 
-        # 1. Branch feature projection.
+        # 1. branch feature projection
         angle_features = self.conv_angle_feature(vp_features)
         depth_features = self.conv_depth_feature(vp_features)
         width_features = self.conv_width_feature(vp_features)
         score_features = self.conv_score_feature(vp_features)
 
-        # 2. Original local interaction among four branches.
+        # 2. local interaction among four branches
         angle_features, depth_features, width_features, score_features = (
             self._interact_four_branches(
                 angle_features,
@@ -6106,50 +6217,40 @@ class Grasp_Head_Local_Interaction_Collision(nn.Module):
             )
         )
 
-        # 3. Predict pose first.
-        angle_logits = self.conv_angle(angle_features)  # [B, A+1, M]
-        depth_logits = self.conv_depth(depth_features)  # [B, D+1, M]
+        # 3. predict pose first, with dropout before output heads
+        angle_logits = self.conv_angle(self.angle_dropout(angle_features))  # [B, A+1, M]
+        depth_logits = self.conv_depth(self.depth_dropout(depth_features))  # [B, D+1, M]
 
         angle_prob = F.softmax(angle_logits, dim=1)
         depth_prob = F.softmax(depth_logits, dim=1)
-        
+
+        # fixed prob pose context
         angle_ctx = self.angle_ctx_proj(angle_prob)  # [B, C, M]
         depth_ctx = self.depth_ctx_proj(depth_prob)  # [B, C, M]
 
-        # 4. Pose-conditioned width.
+        # 4. pose-conditioned width
         width_input = torch.cat(
             [width_features, score_features, angle_ctx, depth_ctx],
             dim=1,
         )
         width_features = width_features + self.width_fuse(width_input)
-        width_pred = self.conv_width(width_features)  # [B, 1, M]
+        width_pred = self.conv_width(self.width_dropout(width_features))  # [B, 1, M]
 
-        # 5. Pose-conditioned score.
+        # 5. pose-conditioned score
         score_input = torch.cat(
             [score_features, width_features, angle_ctx, depth_ctx],
             dim=1,
         )
         score_features = score_features + self.score_fuse(score_input)
-        score_pred = self.conv_score(score_features)  # [B, 6, M]
+        score_pred = self.conv_score(self.score_dropout(score_features))  # [B, 6, M]
 
-        # 6. Collision / invalid-grasp risk head.
-        collision_input = torch.cat(
-            [score_features, width_features, angle_ctx, depth_ctx],
-            dim=1,
-        )
-        collision_features = score_features + self.collision_fuse(collision_input)
-        collision_logits = self.conv_collision(collision_features)  # [B, 1, M]
-
-        # 7. Original outputs.
+        # outputs
         end_points["grasp_angle_pred"] = angle_logits
         end_points["grasp_depth_pred"] = depth_logits
         end_points["grasp_score_pred"] = score_pred
         end_points["grasp_width_pred"] = width_pred
 
-        # New output.
-        end_points["grasp_collision_pred"] = collision_logits
-
-        # Debug tensors/statistics.
+        # lightweight debug
         with torch.no_grad():
             score_bins = torch.tensor(
                 [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
@@ -6159,33 +6260,26 @@ class Grasp_Head_Local_Interaction_Collision(nn.Module):
 
             score_prob = F.softmax(score_pred, dim=1)
             score_expected = (score_prob * score_bins).sum(dim=1)  # [B, M]
-            collision_prob = torch.sigmoid(collision_logits).squeeze(1)  # [B, M]
-            score_collision_aware = score_expected * (1.0 - collision_prob).clamp(0.0, 1.0)
 
             angle_entropy = self._entropy(angle_prob, dim=1)  # [B, M]
             depth_entropy = self._entropy(depth_prob, dim=1)  # [B, M]
-
-            end_points["gh_angle_prob"] = angle_prob.detach()
-            end_points["gh_depth_prob"] = depth_prob.detach()
-            end_points["gh_score_expected"] = score_expected.detach()
-            end_points["gh_collision_prob"] = collision_prob.detach()
-            end_points["gh_score_collision_aware"] = score_collision_aware.detach()
-            end_points["gh_angle_entropy"] = angle_entropy.detach()
-            end_points["gh_depth_entropy"] = depth_entropy.detach()
 
             end_points["D: GH angle entropy"] = angle_entropy.mean()
             end_points["D: GH depth entropy"] = depth_entropy.mean()
             end_points["D: GH angle maxprob"] = angle_prob.max(dim=1).values.mean()
             end_points["D: GH depth maxprob"] = depth_prob.max(dim=1).values.mean()
-            end_points["D: GH collision prob"] = collision_prob.mean()
             end_points["D: GH score expected"] = score_expected.mean()
-            end_points["D: GH score coll-aware"] = score_collision_aware.mean()
 
         return end_points
     
-    
+     
 from models.dinov2_dpt import DPTHead
 from models.grasp_spatial_enhancer import GraspSpatialEnhancer
+from models.kview_query_transformer import (
+    KViewQueryTransformerConfig,
+    KViewQueryTransformerLocalGraspModule,
+)
+
 class economicgrasp_dpt(nn.Module):
     """
     economicgrasp_dpt:
@@ -6299,19 +6393,20 @@ class economicgrasp_dpt(nn.Module):
             save_vis_npz=True,
             )
         
-        # self.view = ViewNet(self.num_view, seed_feature_dim=self.seed_feature_dim, is_training=self.is_training)
+        self.view_dirs = generate_grasp_views(self.num_view)
+        # self.view_net = ViewNet(self.num_view, seed_feature_dim=self.seed_feature_dim, is_training=self.is_training)
         self.view = GeometryAwareDenseFieldViewNet(
             num_view=self.num_view,
             seed_feature_dim=self.seed_feature_dim,
             hidden_dim=self.seed_feature_dim,
             min_depth=self.min_depth,
             max_depth=self.max_depth,
-            view_dirs=generate_grasp_views(self.num_view),
+            view_dirs=self.view_dirs,
             vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'geom_viewnet'),
             vis_every=self.vis_every,
             is_training=self.is_training,
         )
-        # self.view = GeometryAwareDenseFieldAttnViewNet(
+        # self.view_net = GeometryAwareDenseFieldAttnViewNet(
         #     num_view=self.num_view,
         #     seed_feature_dim=self.seed_feature_dim,
         #     hidden_dim=self.seed_feature_dim,
@@ -6330,121 +6425,30 @@ class economicgrasp_dpt(nn.Module):
         #     cylinder_radius=cylinder_radius,
         #     seed_feature_dim=self.seed_feature_dim,
         # )
-        # self.pv_group = ProjectedViewGrouping(
-        #     seed_feature_dim=self.seed_feature_dim,
-        #     out_dim=256,
-        #     num_axial=4,
-        #     num_radial=8,
-        #     radius=cylinder_radius,
-        #     hmin=-0.02,
-        #     hmax=0.04,
-        #     residual_tau=0.02,
-        #     detach_depth=True,
-        #     use_local_attention=True,
-        #     vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'projected_view_group'),
-        #     vis_every=self.vis_every,
-        #     vis_num_seeds=4,
-        #     vis_seed_mode='valid_first',
-        #     save_npz=True,
-        #     save_ply=True,
-        # )
-        # self.pv_group = ProjectedSurfaceCylinderGrouping(
-        #     seed_feature_dim=self.seed_feature_dim,
-        #     out_dim=256,
-        #     nsample=32,
-        #     radius=cylinder_radius,
-        #     hmin=-0.02,
-        #     hmax=0.04,
-        #     grid_size=21,
-        #     dynamic_window=True,
-        #     window_radius_px_min=8.0,
-        #     window_radius_px_max=48.0,
-        #     window_radius_factor=1.5,
-        #     h_soft_tau=None,
-        #     min_group_weight=1e-4,
-        #     detach_depth=True,
-        #     use_local_attention=True,
-        #     residual_fusion=True,
-        #     init_group_scale=0.1,
-        #     debug_print_every=self.debug_print_every,
-        #     vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'projected_surface_cylinder_group'),
-        #     vis_every=self.vis_every,
-        #     vis_num_seeds=4,
-        #     vis_seed_mode='valid_first',
-        #     save_npz=True,
-        #     save_ply=False,
-        # )
-        # self.def2d_group = ViewConditionedDeformable2DGrouping(
-        #     seed_feature_dim=self.seed_feature_dim,
-        #     feat_dim=self.seed_feature_dim,
-        #     out_dim=256,
-        #     num_samples=32,
-        #     num_heads=4,
-        #     base_radius_px=24.0,
-        #     offset_scale_px=16.0,
-        #     dropout=0.05,
-        #     zero_init_offsets=True,
-        #     use_context_skip=True,
-        #     debug_print_every=self.debug_print_every,
-        #     vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'deform2d_group'),
-        #     vis_every=self.vis_every,
-        #     vis_num_seeds=4,
-        #     vis_seed_mode='first',  # first | high_entropy | high_offset
-        #     save_npz=True,
-        # )
-        # self.ddla_group = DepthDisLocalAttnGrouping(
-        #     seed_feature_dim=self.seed_feature_dim,
-        #     feat_dim=self.seed_feature_dim,
-        #     out_dim=256,
-        #     hidden_dim=128,
-        #     num_heads=4,
-        #     patch_size=7,
-        #     patch_stride=3.0,          # adaptive_radius=False 时使用
-        #     adaptive_radius=True,
-        #     physical_radius=0.04,
-        #     patch_radius_px_min=6.0,
-        #     patch_radius_px_max=32.0,
-        #     detach_depth_prob=True,
-        #     depth_topk=4,
-        #     min_depth=self.min_depth,
-        #     max_depth=self.max_depth,
-        #     bin_num=self.bin_num,
-        #     xyz_norm_scale=0.10,
-        #     depth_rel_norm_scale=0.10,
-        #     vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'ddla_group'),
-        #     vis_every=self.vis_every,
-        #     debug_print_every=self.debug_print_every,
-        # )
         self.local_region_group = MetricRegionCropGrouping(
             seed_feature_dim=self.seed_feature_dim,
             feat_dim=self.seed_feature_dim,
             out_dim=256,
             hidden_dim=128,
-
             patch_size=12,
             metric_radius=0.08,
             radius_px_min=8.0,
             radius_px_max=64.0,
-
             train_scale_min=0.80,
             train_scale_max=1.25,
-
             min_depth=self.min_depth,
             max_depth=self.max_depth,
             depth_norm_scale=0.08,
-
             detach_depth=True,
             detach_aux_maps=True,
-
             use_view_conditioned_pool=True,
-
             vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'local_region_crop'),
             vis_every=self.vis_every,
             vis_num_seeds=4,
             vis_seed_mode='first',
             save_npz=True,
         )
-
+        
         # self.grasp_head = Grasp_Head_Local_Interaction(
         #     num_angle=self.num_angle,
         #     num_depth=self.num_depth,
@@ -6453,7 +6457,50 @@ class economicgrasp_dpt(nn.Module):
             num_angle=self.num_angle,
             num_depth=self.num_depth,
         )
-        
+        # self.grasp_head = Grasp_Head_Local_Interaction_Dropout(
+        #     num_angle=self.num_angle,
+        #     num_depth=self.num_depth,
+        # )
+
+        # self.kview_grasp_module = KViewQueryTransformerLocalGraspModule(
+        #     view_net=self.view,
+        #     num_view=self.num_view,
+        #     num_angle=self.num_angle,
+        #     num_depth=self.num_depth,
+        #     seed_feature_dim=self.seed_feature_dim,
+        #     feat_dim=self.seed_feature_dim,  # feat_grid channel dim; change if proposal_path1_enh has different C
+        #     view_dirs=self.view_dirs,
+        #     batch_viewpoint_params_to_matrix_fn=batch_viewpoint_params_to_matrix,  # direct repo function, no fallback
+        #     config=KViewQueryTransformerConfig(
+        #         mode=getattr(cfgs, 'kview_mode', 'A1'),
+        #         num_query_views=getattr(cfgs, 'kview_k', 4),
+        #         sample_temperature=getattr(cfgs, 'kview_tau', 1.0),
+        #         sample_from=getattr(cfgs, 'kview_sample_from', 'minmax_norm'),
+
+        #         patch_size=getattr(cfgs, 'kview_patch_size', 8),
+        #         metric_radius=getattr(cfgs, 'kview_metric_radius', 0.08),
+        #         radius_px_min=getattr(cfgs, 'kview_radius_px_min', 8.0),
+        #         radius_px_max=getattr(cfgs, 'kview_radius_px_max', 64.0),
+        #         grouping_model_dim=getattr(cfgs, 'kview_group_dim', 256),
+        #         grouping_num_heads=getattr(cfgs, 'kview_group_heads', 4),
+        #         grouping_dropout=getattr(cfgs, 'kview_group_dropout', 0.05),
+        #         grouping_max_queries_per_chunk=getattr(cfgs, 'kview_group_chunk', 2048),
+        #         use_gripper_projected_axes=True,
+
+        #         head_model_dim=getattr(cfgs, 'kview_head_dim', 256),
+        #         head_hidden_dim=getattr(cfgs, 'kview_head_hidden_dim', 64),
+        #         head_num_layers=getattr(cfgs, 'kview_head_layers', 2),
+        #         head_num_heads=getattr(cfgs, 'kview_head_heads', 4),
+        #         head_attn_dropout=getattr(cfgs, 'kview_attn_dropout', 0.05),
+        #         head_dropout_p=getattr(cfgs, 'kview_head_dropout', 0.15),
+
+        #         vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'kview_query_grasp'),
+        #         vis_every=self.vis_every,
+        #         vis_num_queries=256,
+        #         save_npz=True,
+        #     ),
+        # )
+
     @staticmethod
     def _backproject_uvz(uv_b_n2, z_b_n1, K_b_33):
         fx = K_b_33[:, 0, 0].unsqueeze(1)
@@ -6894,7 +6941,7 @@ class economicgrasp_dpt(nn.Module):
 
             depth_448, fusion_aux = self.depth_refine(
                 rgb_feat=depth_img_feat,
-                net_depth=depth_net_pred_448,
+                net_depth=depth_head_raw_448,
                 obs_depth=obs_depth_448,
             )
 
@@ -7265,31 +7312,6 @@ class economicgrasp_dpt(nn.Module):
             grasp_top_views_rot = end_points["grasp_top_view_rot"]
 
         # group_features = self.cy_group(seed_xyz_graspable, seed_features_graspable, grasp_top_views_rot)
-        # group_features = self.pv_group(
-        #     seed_features=seed_features_graspable,
-        #     token_sel_idx=token_sel_idx,
-        #     top_view_rot=grasp_top_views_rot,
-        #     feat_map=feat_grid,
-        #     depth_map=depth_448,
-        #     K=K,
-        #     end_points=end_points,
-        # )
-        # group_features = self.def2d_group(
-        #     seed_features=seed_features_graspable,   # (B,C,M)
-        #     token_sel_idx=token_sel_idx,             # (B,M)
-        #     top_view_rot=grasp_top_views_rot,        # (B,M,3,3)
-        #     feat_map=feat_grid,                      # (B,C,H,W)
-        #     end_points=end_points,
-        # )
-        # group_features = self.ddla_group(
-        #     seed_features=seed_features_graspable,   # (B,C,M)
-        #     token_sel_idx=token_sel_idx,             # (B,M)
-        #     top_view_rot=grasp_top_views_rot,        # (B,M,3,3)
-        #     feat_map=feat_grid,                      # (B,C,H,W)
-        #     depth_prob=depth_prob_448,               # (B,D,H,W)
-        #     K=K,                                     # (B,3,3)
-        #     end_points=end_points,
-        # )
         group_features = self.local_region_group(
             seed_features=seed_features_graspable,
             token_sel_idx=token_sel_idx,
@@ -7305,6 +7327,43 @@ class economicgrasp_dpt(nn.Module):
         )
         
         end_points = self.grasp_head(group_features, end_points)
+
+        # if self.is_training:
+        #     if self.use_depth_comp:
+        #         process_fn = process_grasp_labels_depth_cls_compensated
+        #         process_kwargs = dict(
+        #             point_match_thresh=0.005,
+        #             tolerated_depth=0.03,
+        #             depth_start=0.01,
+        #             depth_interval=0.01,
+        #             approach_axis_col=0,
+        #             approach_axis_sign=1.0,
+        #             depth_adjust_sign=1.0,
+        #         )
+        #     else:
+        #         process_fn = process_grasp_labels
+        #         process_kwargs = {}
+        # else:
+        #     process_fn = None
+        #     process_kwargs = None
+
+        # end_points = self.kview_grasp_module(
+        #     seed_features=seed_features_graspable,  # [B,C,M]
+        #     seed_xyz=seed_xyz_graspable,            # [B,M,3]
+        #     token_sel_idx=token_sel_idx,            # [B,M]
+        #     feat_map=feat_grid,                     # [B,C,H,W]
+        #     depth_map=depth_448,                    # [B,1,H,W]
+        #     camera_K=K,                             # [B,3,3]
+        #     end_points=end_points,
+        #     is_training=self.is_training,
+        #     process_grasp_labels_fn=process_fn,
+        #     process_grasp_labels_kwargs=process_kwargs,
+        #     topview_debug_fn=self._add_topview_quality_logs if self.is_training else None,
+        #     depth_prob=None,
+        #     objectness_logits=objectness_logits_448,
+        #     graspness_map=grasp_sel.view(B, 1, H, W).contiguous(),
+        #     img=img,
+        # )
 
         with torch.no_grad():
             end_points["D: Depth final mean"] = depth_448.detach().mean()
@@ -7407,8 +7466,12 @@ def pred_decode_collision(end_points):
             # collision_decode_weight = getattr(cfgs, "collision_decode_weight", 1.0)
             # grasp_score = grasp_score * torch.pow(no_collision_prob, collision_decode_weight)
             
-            grasp_score = grasp_score * no_collision_prob
-            
+            # grasp_score = grasp_score * no_collision_prob
+
+            # hard veto: predicted collision grasps get zero score
+            collision_mask = collision_prob > 0.5
+            grasp_score = grasp_score.masked_fill(collision_mask, 0.0)
+    
         grasp_angle_pred = end_points['grasp_angle_pred'][i].float()
         grasp_angle, grasp_angle_indxs = torch.max(grasp_angle_pred.squeeze(0), 0)
         grasp_angle = grasp_angle_indxs * np.pi / 12
@@ -7431,4 +7494,78 @@ def pred_decode_collision(end_points):
         obj_ids = -1 * torch.ones_like(grasp_score)
         grasp_preds.append(
             torch.cat([grasp_score, grasp_width, grasp_height, grasp_depth, grasp_rot, grasp_center, obj_ids], axis=-1))
+    return grasp_preds
+
+
+def pred_decode_collision_filter(end_points):
+    batch_size = len(end_points['point_clouds'])
+    grasp_preds = []
+
+    for i in range(batch_size):
+        grasp_center = end_points['xyz_graspable'][i].float()
+
+        # composite score estimation
+        grasp_score_prob = end_points['grasp_score_pred'][i].float()
+        score_bins = torch.tensor(
+            [0, 0.2, 0.4, 0.6, 0.8, 1.0],
+            dtype=grasp_score_prob.dtype,
+            device=grasp_score_prob.device,
+        ).view(-1, 1).expand(-1, grasp_score_prob.shape[1])
+
+        grasp_score = torch.sum(score_bins * grasp_score_prob, dim=0).view(-1, 1)  # [M, 1]
+
+        # collision filter mask
+        keep_mask = None
+        if "grasp_collision_pred" in end_points:
+            collision_logit = end_points["grasp_collision_pred"][i].float()  # [1, M] or [M]
+            collision_prob = torch.sigmoid(collision_logit).view(-1)         # [M]
+
+            # Assumption: label=1 means collision.
+            # Keep predicted non-collision grasps.
+            keep_mask = collision_prob <= 0.5
+
+        grasp_angle_pred = end_points['grasp_angle_pred'][i].float()
+        _, grasp_angle_indxs = torch.max(grasp_angle_pred.squeeze(0), 0)
+        grasp_angle = grasp_angle_indxs * np.pi / 12
+
+        grasp_depth_pred = end_points['grasp_depth_pred'][i].float()
+        _, grasp_depth_indxs = torch.max(grasp_depth_pred.squeeze(0), 0)
+        grasp_depth = (grasp_depth_indxs + 1) * 0.01
+        grasp_depth = grasp_depth.view(-1, 1)
+
+        grasp_width = 1.2 * end_points['grasp_width_pred'][i] / 10.
+        grasp_width = torch.clamp(grasp_width, min=0., max=cfgs.grasp_max_width)
+        grasp_width = grasp_width.view(-1, 1)
+
+        approaching = -end_points['grasp_top_view_xyz'][i].float()
+        grasp_rot = batch_viewpoint_params_to_matrix(approaching, grasp_angle)
+        grasp_rot = grasp_rot.view(cfgs.m_point, 9)
+
+        grasp_height = 0.02 * torch.ones_like(grasp_score)
+        obj_ids = -1 * torch.ones_like(grasp_score)
+
+        pred = torch.cat(
+            [
+                grasp_score,
+                grasp_width,
+                grasp_height,
+                grasp_depth,
+                grasp_rot,
+                grasp_center,
+                obj_ids,
+            ],
+            dim=-1,
+        )  # [M, 17]
+
+        # Apply collision filter after full grasp array is assembled.
+        if keep_mask is not None:
+            if keep_mask.shape[0] != pred.shape[0]:
+                raise RuntimeError(
+                    f"collision keep_mask shape mismatch: keep_mask={keep_mask.shape}, pred={pred.shape}"
+                )
+
+            pred = pred[keep_mask]
+
+        grasp_preds.append(pred)
+
     return grasp_preds

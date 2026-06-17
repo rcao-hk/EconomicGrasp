@@ -3167,6 +3167,9 @@ def pred_decode_c2_1(end_points):
         score_prob = F.softmax(score_logits, dim=0)               # (6,M)
         grasp_score = (score_bins * score_prob).sum(dim=0, keepdim=True).transpose(0, 1)  # (M,1)
 
+        # grasp_score_prob = end_points['grasp_score_pred'][i].float()
+        # grasp_score = torch.sum(score_bins * grasp_score_prob, dim=0).view(-1, 1)
+
         # --- angle: (A+1,M) -> take max over first A bins ---
         angle_logits = end_points["grasp_angle_pred"][i].float()  # (A+1,M)
         A1 = angle_logits.shape[0]
