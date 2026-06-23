@@ -3,6 +3,7 @@ import sys
 import time
 import pdb
 
+import numpy as np
 import torch
 import os
 import sys
@@ -854,5 +855,402 @@ def process_grasp_labels_c5_1(end_points, valid_dist_thresh: float = 0.005):
         end_points['D: RayMix Valid Ratio'] = batch_valid_mask.float().mean()
         end_points['D: RayMix BestK Hist'] = hist
         end_points['D: RayMix BestDist'] = batch_best_dist.mean()
+
+    return batch_grasp_views_rot, end_points
+
+
+def _batch_get_key_points(centers: torch.Tensor, Rs: torch.Tensor, widths: torch.Tensor, depths: torch.Tensor):
+    """Same role as MMGNet keypoint matching; handles gripper y/z symmetry."""
+    height = 0.02
+    R_sym = torch.tensor(
+        [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
+        dtype=centers.dtype,
+        device=centers.device,
+    )
+    key_points = torch.zeros((centers.size(0), 4, 3), dtype=centers.dtype, device=centers.device)
+    key_points[:, :, 0] -= depths.unsqueeze(1)
+    key_points[:, 1:, 1] -= widths.unsqueeze(1) / 2
+    key_points[:, 2, 2] += height / 2
+    key_points[:, 3, 2] -= height / 2
+
+    key_points_sym = key_points.detach().clone()
+    key_points = torch.matmul(Rs, key_points.transpose(1, 2)).transpose(1, 2)
+    key_points_sym = torch.matmul(torch.matmul(Rs, R_sym), key_points_sym.transpose(1, 2)).transpose(1, 2)
+    key_points = key_points + centers.unsqueeze(1)
+    key_points_sym = key_points_sym + centers.unsqueeze(1)
+    return key_points, key_points_sym
+
+
+def _require_extended(name: str, x: torch.Tensor, num_angle: int) -> torch.Tensor:
+    if x.dim() != 3 or x.shape[-1] != num_angle:
+        raise RuntimeError(
+            f"{name} must be extended-angle label [P,K,A={num_angle}], got {tuple(x.shape)}. "
+            f"Regenerate labels with generate_economic.py --extend_angle and ensure dataloader keeps the angle dimension."
+        )
+    return x
+
+def _build_view_angle_rot_grid(num_view: int, num_angle: int, device, dtype) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return views [V,3] and canonical rotations [V,A,3,3]."""
+    views = generate_grasp_views(num_view).to(device=device, dtype=dtype)
+    # GraspNet/EconomicGrasp convention: in-plane angle samples in [0, pi).
+    angles = torch.arange(num_angle, device=device, dtype=dtype) * (np.pi / float(num_angle))
+    views_repeat = views.repeat_interleave(num_angle, dim=0)
+    angles_repeat = angles.repeat(num_view)
+    rot = batch_viewpoint_params_to_matrix(-views_repeat, angles_repeat).view(num_view, num_angle, 3, 3)
+    return views, rot
+
+
+def _build_angle_alignment_perm(
+    canonical_rot: torch.Tensor,
+    transformed_scene_rot: torch.Tensor,
+) -> torch.Tensor:
+    """Map scene canonical angle index -> transformed/object angle index.
+
+    Args:
+        canonical_rot:          [V,A,3,3], R(view_scene, angle_scene)
+        transformed_scene_rot:  [V,A,3,3], pose_R @ R(view_obj, angle_obj),
+                                already remapped to scene view order by view_inds.
+
+    Returns:
+        perm: [V,A], where aligned_label[..., scene_angle] =
+              original_label[..., perm[scene_view, scene_angle]].
+    """
+    if canonical_rot.shape != transformed_scene_rot.shape:
+        raise RuntimeError(
+            f"canonical_rot and transformed_scene_rot must have same shape, "
+            f"got {tuple(canonical_rot.shape)} and {tuple(transformed_scene_rot.shape)}"
+        )
+    V, A = canonical_rot.shape[:2]
+    device = canonical_rot.device
+    dtype = canonical_rot.dtype
+    N = V * A
+    centers = torch.zeros((N, 3), device=device, dtype=dtype)
+    widths = 0.02 * torch.ones((N,), device=device, dtype=dtype)
+    depths = 0.02 * torch.ones((N,), device=device, dtype=dtype)
+
+    pred_kp, _pred_kp_sym_unused = _batch_get_key_points(centers, canonical_rot.reshape(N, 3, 3), widths, depths)
+    trans_kp, trans_kp_sym = _batch_get_key_points(centers, transformed_scene_rot.reshape(N, 3, 3), widths, depths)
+
+    pred_kp = pred_kp.contiguous().view(V, A, -1)
+    trans_kp = trans_kp.contiguous().view(V, A, -1)
+    trans_kp_sym = trans_kp_sym.contiguous().view(V, A, -1)
+
+    dis, inds, _ = knn_points(pred_kp, trans_kp, K=1)
+    dis_sym, inds_sym, _ = knn_points(pred_kp, trans_kp_sym, K=1)
+    use_normal = dis <= dis_sym
+    perm = torch.where(use_normal, inds, inds_sym).squeeze(-1).long()  # [V,A]
+    return perm
+
+
+
+def _align_topk_angle_labels(label_topk: torch.Tensor, top_view_index_trans: torch.Tensor, angle_perm: torch.Tensor) -> torch.Tensor:
+    """Align [P,K,A] top-K-view angle labels to scene canonical angle indices.
+
+    top_view_index_trans[p,k] is the scene canonical view index of the k-th stored view.
+    angle_perm[v,a_scene] gives the original/transformed angle index to gather.
+    """
+    if label_topk.dim() != 3:
+        raise RuntimeError(f"extended angle label must be [P,K,A], got {tuple(label_topk.shape)}")
+    if top_view_index_trans.shape != label_topk.shape[:2]:
+        raise RuntimeError(
+            f"top_view_index_trans shape {tuple(top_view_index_trans.shape)} does not match "
+            f"label_topk[:2] {tuple(label_topk.shape[:2])}"
+        )
+    P, K, A = label_topk.shape
+    V = angle_perm.shape[0]
+    view_idx = top_view_index_trans.clamp(0, V - 1).long()
+    perm_slot = angle_perm[view_idx]  # [P,K,A]
+    aligned = torch.gather(label_topk, dim=2, index=perm_slot.to(label_topk.device))
+    # For invalid top-view slots, keep deterministic zero labels. They should never be selected.
+    invalid = top_view_index_trans < 0
+    if invalid.any():
+        aligned = aligned.clone()
+        aligned[invalid] = 0
+    return aligned
+
+
+def _compute_pointwise_dists(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """a, b: [N,3]. Return per-row Euclidean distances [N]."""
+    return torch.linalg.norm(a - b, dim=-1)
+
+
+# -----------------------------------------------------------------------------
+# Main function.
+# -----------------------------------------------------------------------------
+
+def process_grasp_labels_extend_angle(end_points):
+    """Process EconomicGrasp extended-angle labels.
+
+    This is a drop-in alternative to process_grasp_labels() for labels where each
+    stored top view has A angle entries. It keeps original outputs and adds
+    per-angle candidate labels for Center-View-Angle query training.
+    """
+    if cfgs is None:
+        raise RuntimeError("cfgs is not available. Import utils.arguments.cfgs or paste this function into your loss module.")
+
+    num_view = int(cfgs.num_view)
+    num_angle = int(cfgs.num_angle)
+    num_depth = int(cfgs.num_depth)
+    max_width = float(getattr(cfgs, "grasp_max_width", 0.1))
+
+    seed_xyzs = end_points["xyz_graspable"]            # [B,Q,3]
+    pred_top_view_inds = end_points["grasp_top_view_inds"].long()  # [B,Q]
+    batch_size, num_samples, _ = seed_xyzs.size()
+    device = seed_xyzs.device
+    dtype = seed_xyzs.dtype
+
+    valid_points_count = 0.0
+    valid_views_count = 0.0
+
+    batch_grasp_points = []
+    batch_grasp_views_rot = []
+    batch_view_graspness = []
+
+    # Backward-compatible best-angle labels.
+    batch_grasp_rotations = []
+    batch_grasp_depth = []
+    batch_grasp_scores = []
+    batch_grasp_widths = []
+    batch_grasp_collisions = []
+    batch_valid_mask = []
+
+    # Extended angle labels for candidate-query losses.
+    batch_grasp_depth_angle = []
+    batch_grasp_score_angle = []
+    batch_grasp_width_angle = []
+    batch_grasp_collision_angle = []
+    batch_grasp_angle_valid_mask = []
+    batch_grasp_angle_pos_mask = []
+
+    canonical_views, canonical_rot = _build_view_angle_rot_grid(
+        num_view=num_view,
+        num_angle=num_angle,
+        device=device,
+        dtype=dtype,
+    )
+    zero_angles = torch.zeros(num_view, dtype=dtype, device=device)
+    canonical_view_rot_zero = batch_viewpoint_params_to_matrix(-canonical_views, zero_angles)  # [V,3,3]
+
+    for i in range(batch_size):
+        seed_xyz = seed_xyzs[i]
+        pred_top_view = pred_top_view_inds[i]
+        poses = end_points["object_poses_list"][i]
+
+        grasp_points_merged = []
+        grasp_views_rot_merged = []
+        view_graspness_merged = []
+        top_view_index_merged = []
+        grasp_depth_angle_merged = []
+        grasp_score_angle_merged = []
+        grasp_width_angle_merged = []
+        grasp_collision_angle_merged = []
+
+        for obj_idx, pose in enumerate(poses):
+            grasp_points = end_points["grasp_points_list"][i][obj_idx].to(device=device, dtype=dtype)  # [P,3]
+            view_graspness = end_points["view_graspness_list"][i][obj_idx].to(device=device, dtype=dtype)  # [P,V]
+            top_view_index = end_points["top_view_index_list"][i][obj_idx].long().to(device=device)       # [P,K]
+
+            # Extended labels [P,K,A]. Strict by design.
+            grasp_depth_angle = _require_extended(
+                "grasp_depth_list", end_points["grasp_depth_list"][i][obj_idx].long().to(device=device), num_angle
+            )
+            grasp_score_angle = _require_extended(
+                "grasp_scores_list", end_points["grasp_scores_list"][i][obj_idx].to(device=device, dtype=dtype), num_angle
+            )
+            grasp_width_angle = _require_extended(
+                "grasp_widths_list", end_points["grasp_widths_list"][i][obj_idx].to(device=device, dtype=dtype), num_angle
+            )
+            grasp_collision_angle = _require_extended(
+                "grasp_collision_list", end_points["grasp_collision_list"][i][obj_idx].float().to(device=device), num_angle
+            )
+
+            num_grasp_points = grasp_points.size(0)
+            pose = pose.to(device=device, dtype=dtype)
+
+            # Transform points and views from object frame to scene frame.
+            grasp_points_trans = transform_point_cloud(grasp_points, pose, "3x4")
+            grasp_views_trans = transform_point_cloud(canonical_views, pose[:3, :3], "3x3")  # object view -> scene
+
+            # view_inds[scene_view] = object_view whose transformed direction is closest to scene_view.
+            _, view_inds, _ = knn_points(canonical_views.unsqueeze(0), grasp_views_trans.unsqueeze(0), K=1)
+            view_inds = view_inds.squeeze(-1).squeeze(0).long()  # [V]
+
+            # Remap view graspness and zero-angle view rotations to scene view order.
+            view_graspness_trans = torch.index_select(view_graspness, 1, view_inds)  # [P,V]
+            view_rot_zero_trans = torch.matmul(pose[:3, :3], canonical_view_rot_zero)  # object view order [V,3,3]
+            view_rot_zero_trans = torch.index_select(view_rot_zero_trans, 0, view_inds)  # scene view order [V,3,3]
+            view_rot_zero_trans = view_rot_zero_trans.unsqueeze(0).expand(num_grasp_points, -1, -1, -1)
+
+            # Map stored top-K object view indices to scene canonical view indices.
+            top_view_index_trans = -torch.ones_like(top_view_index, dtype=torch.long, device=device)
+            tpid, tvip, tids = torch.where(view_inds == top_view_index.unsqueeze(-1))
+            top_view_index_trans[tpid, tvip] = tids
+
+            # Build angle alignment permutation for this object pose.
+            # transformed_rot_scene[scene_view, angle_obj_trans] = pose_R @ R(object_view=view_inds[scene_view], angle_obj)
+            transformed_rot = torch.matmul(pose[:3, :3], canonical_rot.reshape(-1, 3, 3)).view(num_view, num_angle, 3, 3)
+            transformed_rot_scene = torch.index_select(transformed_rot, 0, view_inds)  # [V,A,3,3]
+            angle_perm = _build_angle_alignment_perm(canonical_rot, transformed_rot_scene)  # [V,A]
+
+            # Align [P,K,A] labels to scene canonical angle basis for each stored top-view slot.
+            grasp_depth_angle = _align_topk_angle_labels(grasp_depth_angle, top_view_index_trans, angle_perm).long()
+            grasp_score_angle = _align_topk_angle_labels(grasp_score_angle, top_view_index_trans, angle_perm).to(dtype)
+            grasp_width_angle = _align_topk_angle_labels(grasp_width_angle, top_view_index_trans, angle_perm).to(dtype)
+            grasp_collision_angle = _align_topk_angle_labels(grasp_collision_angle, top_view_index_trans, angle_perm).to(dtype)
+
+            grasp_points_merged.append(grasp_points_trans)
+            grasp_views_rot_merged.append(view_rot_zero_trans)
+            view_graspness_merged.append(view_graspness_trans)
+            top_view_index_merged.append(top_view_index_trans)
+            grasp_depth_angle_merged.append(grasp_depth_angle)
+            grasp_score_angle_merged.append(grasp_score_angle)
+            grasp_width_angle_merged.append(grasp_width_angle)
+            grasp_collision_angle_merged.append(grasp_collision_angle)
+
+        # Merge objects.
+        grasp_points_merged = torch.cat(grasp_points_merged, dim=0)             # [Pall,3]
+        grasp_views_rot_merged = torch.cat(grasp_views_rot_merged, dim=0)       # [Pall,V,3,3]
+        view_graspness_merged = torch.cat(view_graspness_merged, dim=0)         # [Pall,V]
+        top_view_index_merged = torch.cat(top_view_index_merged, dim=0)         # [Pall,K]
+        grasp_depth_angle_merged = torch.cat(grasp_depth_angle_merged, dim=0)   # [Pall,K,A]
+        grasp_score_angle_merged = torch.cat(grasp_score_angle_merged, dim=0)   # [Pall,K,A]
+        grasp_width_angle_merged = torch.cat(grasp_width_angle_merged, dim=0)   # [Pall,K,A]
+        grasp_collision_angle_merged = torch.cat(grasp_collision_angle_merged, dim=0) # [Pall,K,A]
+
+        # Nearest object grasp point for each seed.
+        _, nn_inds, _ = knn_points(seed_xyz.unsqueeze(0), grasp_points_merged.unsqueeze(0), K=1)
+        nn_inds = nn_inds.squeeze(-1).squeeze(0).long()
+
+        grasp_points_merged = torch.index_select(grasp_points_merged, 0, nn_inds)
+        grasp_views_rot_merged = torch.index_select(grasp_views_rot_merged, 0, nn_inds)
+        view_graspness_merged = torch.index_select(view_graspness_merged, 0, nn_inds)
+        top_view_index_merged = torch.index_select(top_view_index_merged, 0, nn_inds)
+        grasp_depth_angle_merged = torch.index_select(grasp_depth_angle_merged, 0, nn_inds)
+        grasp_score_angle_merged = torch.index_select(grasp_score_angle_merged, 0, nn_inds)
+        grasp_width_angle_merged = torch.index_select(grasp_width_angle_merged, 0, nn_inds)
+        grasp_collision_angle_merged = torch.index_select(grasp_collision_angle_merged, 0, nn_inds)
+
+        # Gather selected view zero-angle rotation, same as original process_grasp_labels.
+        pred_top_view_rot_idx = pred_top_view.view(num_samples, 1, 1, 1).expand(-1, -1, 3, 3)
+        top_grasp_views_rot = torch.gather(grasp_views_rot_merged, 1, pred_top_view_rot_idx).squeeze(1)
+
+        # Find selected view slot among stored top-K views.
+        pid, vid = torch.where(pred_top_view.unsqueeze(-1) == top_view_index_merged)
+
+        selected_score_angle = torch.zeros((num_samples, num_angle), dtype=dtype, device=device)
+        selected_depth_angle = num_depth * torch.ones((num_samples, num_angle), dtype=torch.long, device=device)
+        selected_width_angle = max_width * torch.ones((num_samples, num_angle), dtype=dtype, device=device)
+        selected_collision_angle = torch.zeros((num_samples, num_angle), dtype=dtype, device=device)
+        valid_view_mask = torch.zeros(num_samples, dtype=torch.bool, device=device)
+
+        if pid.numel() > 0:
+            selected_score_angle[pid] = grasp_score_angle_merged[pid, vid]
+            selected_depth_angle[pid] = grasp_depth_angle_merged[pid, vid].long().clamp(0, num_depth)
+            selected_width_angle[pid] = grasp_width_angle_merged[pid, vid].clamp(min=0.0, max=max_width)
+            selected_collision_angle[pid] = grasp_collision_angle_merged[pid, vid]
+            valid_view_mask[pid] = True
+
+        # Point-view validity, same semantics as original.
+        dist = _compute_pointwise_dists(seed_xyz, grasp_points_merged)
+        valid_point_mask = dist < 0.005
+        valid_points_count = valid_points_count + valid_point_mask.float().sum()
+        valid_views_count = valid_views_count + valid_view_mask.float().sum()
+        valid_mask = valid_point_mask & valid_view_mask
+
+        # Per-angle valid/positive masks.
+        angle_valid_mask = valid_mask.unsqueeze(-1).expand(-1, num_angle).contiguous()
+        angle_pos_mask = angle_valid_mask & (selected_score_angle > 0)
+
+        # Backward-compatible collapsed labels: best angle by extended score.
+        best_score, best_angle = selected_score_angle.max(dim=-1)  # [Q]
+        best_angle_valid = valid_mask & (best_score > 0)
+        best_angle_label = best_angle.long()
+        best_angle_label = torch.where(
+            best_angle_valid,
+            best_angle_label,
+            torch.full_like(best_angle_label, fill_value=num_angle),
+        )
+        best_depth = selected_depth_angle.gather(1, best_angle.clamp(0, num_angle - 1).view(-1, 1)).squeeze(1)
+        best_depth = torch.where(
+            best_angle_valid,
+            best_depth,
+            torch.full_like(best_depth, fill_value=num_depth),
+        )
+        best_width = selected_width_angle.gather(1, best_angle.clamp(0, num_angle - 1).view(-1, 1)).squeeze(1)
+        best_collision = selected_collision_angle.gather(1, best_angle.clamp(0, num_angle - 1).view(-1, 1)).squeeze(1)
+
+        batch_grasp_points.append(grasp_points_merged)
+        batch_grasp_views_rot.append(top_grasp_views_rot)
+        batch_view_graspness.append(view_graspness_merged)
+
+        batch_grasp_rotations.append(best_angle_label.int())
+        batch_grasp_depth.append(best_depth.long())
+        batch_grasp_scores.append(best_score.to(dtype))
+        batch_grasp_widths.append(best_width.to(dtype))
+        batch_grasp_collisions.append(best_collision.to(dtype))
+        batch_valid_mask.append(valid_mask)
+
+        batch_grasp_depth_angle.append(selected_depth_angle.long())
+        batch_grasp_score_angle.append(selected_score_angle.to(dtype))
+        batch_grasp_width_angle.append(selected_width_angle.to(dtype))
+        batch_grasp_collision_angle.append(selected_collision_angle.to(dtype))
+        batch_grasp_angle_valid_mask.append(angle_valid_mask)
+        batch_grasp_angle_pos_mask.append(angle_pos_mask)
+
+    # Stack batch outputs.
+    batch_grasp_points = torch.stack(batch_grasp_points, 0)
+    batch_grasp_views_rot = torch.stack(batch_grasp_views_rot, 0)
+    batch_view_graspness = torch.stack(batch_view_graspness, 0)
+    batch_grasp_rotations = torch.stack(batch_grasp_rotations, 0)
+    batch_grasp_depth = torch.stack(batch_grasp_depth, 0)
+    batch_grasp_scores = torch.stack(batch_grasp_scores, 0)
+    batch_grasp_widths = torch.stack(batch_grasp_widths, 0)
+    batch_grasp_collisions = torch.stack(batch_grasp_collisions, 0)
+    batch_valid_mask = torch.stack(batch_valid_mask, 0)
+
+    batch_grasp_depth_angle = torch.stack(batch_grasp_depth_angle, 0)
+    batch_grasp_score_angle = torch.stack(batch_grasp_score_angle, 0)
+    batch_grasp_width_angle = torch.stack(batch_grasp_width_angle, 0)
+    batch_grasp_collision_angle = torch.stack(batch_grasp_collision_angle, 0)
+    batch_grasp_angle_valid_mask = torch.stack(batch_grasp_angle_valid_mask, 0)
+    batch_grasp_angle_pos_mask = torch.stack(batch_grasp_angle_pos_mask, 0)
+
+    # Original-compatible keys.
+    end_points["batch_grasp_point"] = batch_grasp_points
+    end_points["batch_grasp_rotations"] = batch_grasp_rotations
+    end_points["batch_grasp_depth"] = batch_grasp_depth
+    end_points["batch_grasp_score"] = batch_grasp_scores
+    end_points["batch_grasp_width"] = batch_grasp_widths
+    end_points["batch_grasp_view_graspness"] = batch_view_graspness
+    end_points["batch_grasp_collision"] = batch_grasp_collisions
+    end_points["batch_valid_mask"] = batch_valid_mask
+
+    # Extended angle-candidate keys.
+    end_points["batch_grasp_depth_angle"] = batch_grasp_depth_angle
+    end_points["batch_grasp_score_angle"] = batch_grasp_score_angle
+    end_points["batch_grasp_width_angle"] = batch_grasp_width_angle
+    end_points["batch_grasp_collision_angle"] = batch_grasp_collision_angle
+    end_points["batch_grasp_angle_valid_mask"] = batch_grasp_angle_valid_mask
+    end_points["batch_grasp_angle_pos_mask"] = batch_grasp_angle_pos_mask
+
+    # Debug scalars.
+    end_points["C: Valid Points"] = valid_points_count / float(batch_size)
+    with torch.no_grad():
+        end_points["D: ExtAngle valid ratio"] = batch_grasp_angle_valid_mask.float().mean()
+        end_points["D: ExtAngle pos ratio"] = batch_grasp_angle_pos_mask.float().mean()
+        if batch_grasp_angle_valid_mask.any():
+            end_points["D: ExtAngle score valid mean"] = batch_grasp_score_angle[batch_grasp_angle_valid_mask].mean()
+            end_points["D: ExtAngle score>0 valid"] = (batch_grasp_score_angle[batch_grasp_angle_valid_mask] > 0).float().mean()
+        else:
+            z = batch_grasp_score_angle.sum() * 0.0
+            end_points["D: ExtAngle score valid mean"] = z
+            end_points["D: ExtAngle score>0 valid"] = z
+        if batch_grasp_angle_pos_mask.any():
+            end_points["D: ExtAngle depth01 pos"] = (batch_grasp_depth_angle[batch_grasp_angle_pos_mask] <= 1).float().mean()
+            end_points["D: ExtAngle width pos mean"] = batch_grasp_width_angle[batch_grasp_angle_pos_mask].mean()
+        else:
+            z = batch_grasp_score_angle.sum() * 0.0
+            end_points["D: ExtAngle depth01 pos"] = z
+            end_points["D: ExtAngle width pos mean"] = z
 
     return batch_grasp_views_rot, end_points
