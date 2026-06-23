@@ -473,10 +473,10 @@ class DINOv2DepthRegressionNet(nn.Module):
 
         return depth_448, depth_tok, img_feat
     
-from models.grasp_spatial_enhancer import MultiBasicEncoder
+from models.grasp_spatial_enhancer import MultiBasicEncoder, MultiBasicEncoderLayer1
 class ObsDepthAdapter(nn.Module):
     """
-    Observed depth encoder using MultiBasicEncoder.
+    Observed depth encoder using MultiBasicEncoderLayer1.
 
     Input:
         obs_depth: (B,1,H,W), meter
@@ -497,18 +497,43 @@ class ObsDepthAdapter(nn.Module):
         self.min_depth = float(min_depth)
         self.max_depth = float(max_depth)
 
-        self.encoder = MultiBasicEncoder(
-            input_dim=2,
+        self.encoder = MultiBasicEncoderLayer1(
+            input_dim=1,
             output_dim=[(out_dim, out_dim, out_dim)],
             norm_fn=norm_fn,
             dropout=0.0,
             downsample=downsample,
         )
 
+    @staticmethod
+    def _as_b1hw(x: torch.Tensor) -> torch.Tensor:
+        """
+        Normalize depth tensor to (B,1,H,W).
+        Handles accidental (B,1,1,H,W).
+        """
+        while x.dim() > 4:
+            squeezed = False
+            for d in range(1, x.dim() - 2):
+                if x.size(d) == 1:
+                    x = x.squeeze(d)
+                    squeezed = True
+                    break
+            if not squeezed:
+                raise ValueError(f"Unsupported obs_depth shape: {tuple(x.shape)}")
+
+        if x.dim() == 3:
+            x = x.unsqueeze(1)
+
+        if x.dim() != 4:
+            raise ValueError(f"Unsupported obs_depth shape: {tuple(x.shape)}")
+
+        if x.size(1) != 1:
+            x = x[:, :1]
+
+        return x
+
     def forward(self, obs_depth: torch.Tensor, out_hw):
-        if obs_depth.dim() == 3:
-            obs_depth = obs_depth.unsqueeze(1)
-        assert obs_depth.dim() == 4 and obs_depth.size(1) == 1
+        obs_depth = self._as_b1hw(obs_depth)
 
         obs_mask = (
             torch.isfinite(obs_depth)
@@ -516,11 +541,8 @@ class ObsDepthAdapter(nn.Module):
         ).float()
 
         z = torch.nan_to_num(obs_depth, nan=0.0, posinf=0.0, neginf=0.0)
-        x = torch.cat([z, obs_mask], dim=1)  # (B,2,H,W)
-        
-        outputs04, outputs08, outputs16 = self.encoder(x, num_layers=3)
-
-        # 最大空间分辨率 feature map
+        # x = torch.cat([z, obs_mask], dim=1)  # (B,2,H,W)
+        outputs04 = self.encoder(z)
         obs_feat = outputs04[0]
 
         if obs_feat.shape[-2:] != tuple(out_hw):
@@ -645,7 +667,7 @@ class DepthRefine(nn.Module):
             "depth_confidence": conf,
             "obs_depth_valid": obs_valid,
             "obs_depth_feat_norm": obs_feat.detach().norm(dim=1, keepdim=True),
-            "rgbd_fused_depth_feat": fused_feat,
+            "rgbd_fused_depth_feat": fused_feat.detach(),
         }
         return final_depth, aux
     
@@ -1288,9 +1310,15 @@ def pred_decode(end_points):
         grasp_center = end_points['xyz_graspable'][i].float()
 
         # composite score estimation
-        grasp_score_prob = end_points['grasp_score_pred'][i].float()
-        score = torch.tensor([0, 0.2, 0.4, 0.6, 0.8, 1]).view(-1, 1).expand(-1, grasp_score_prob.shape[1]).to(grasp_score_prob)
-        score = torch.sum(score * grasp_score_prob, dim=0)
+        # grasp_score_prob = end_points['grasp_score_pred'][i].float()
+        # score = torch.tensor([0, 0.2, 0.4, 0.6, 0.8, 1]).view(-1, 1).expand(-1, grasp_score_prob.shape[1]).to(grasp_score_prob)
+        # score = torch.sum(score * grasp_score_prob, dim=0)
+        # grasp_score = score.view(-1, 1)
+
+        score_logits = end_points["grasp_score_pred"][i].float()  # (6,M)
+        score_prob = F.softmax(score_logits, dim=0)               # (6,M)
+        score = torch.tensor([0, 0.2, 0.4, 0.6, 0.8, 1]).view(-1, 1).expand(-1, score_prob.shape[1]).to(score_prob)
+        score = torch.sum(score * score_prob, dim=0)  # (M,)
         grasp_score = score.view(-1, 1)
 
         grasp_angle_pred = end_points['grasp_angle_pred'][i].float()

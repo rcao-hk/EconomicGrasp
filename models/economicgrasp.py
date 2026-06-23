@@ -73,13 +73,82 @@ class economicgrasp(nn.Module):
         graspness_mask = graspness_score > cfgs.graspness_threshold
         graspable_mask = objectness_mask & graspness_mask
 
+        # ------------------------------------------------------------
+        # Debug / visualization states for wrapper.
+        # These are detached to avoid retaining computation graph.
+        # ------------------------------------------------------------
+        end_points['eco_seed_xyz'] = seed_xyz.detach()
+        end_points['eco_objectness_pred'] = objectness_pred.detach()
+        objectness_prob = torch.softmax(objectness_score.detach(), dim=1)[:, 1, :]  # (B,N)
+        end_points['eco_objectness_prob'] = objectness_prob.detach()
+        end_points['eco_objectness_mask'] = objectness_mask.detach()
+        end_points['eco_graspness_score'] = graspness_score.detach()
+        end_points['eco_graspness_mask'] = graspness_mask.detach()
+        end_points['eco_graspable_mask'] = graspable_mask.detach()
+        end_points['eco_seed_feat_norm'] = seed_features_flipped.detach().norm(dim=-1)
+
         # Generate the downsample point (1024 per scene) using the furthest point sampling
         seed_features_graspable = []
         seed_xyz_graspable = []
         graspable_num_batch = 0.
+        fps_fallback_count = 0
+
         for i in range(B):
             cur_mask = graspable_mask[i]
+            num_graspable = int(cur_mask.sum().item())
             graspable_num_batch += cur_mask.sum()
+
+            # ------------------------------------------------------------
+            # Minimal fallback:
+            # If no graspable points, uniformly sample from objectness points.
+            # If objectness is also empty, sample from all points.
+            # ------------------------------------------------------------
+            if num_graspable == 0:
+                fps_fallback_count += 1
+
+                obj_idx = torch.nonzero(objectness_mask[i], as_tuple=False).squeeze(1)
+
+                if obj_idx.numel() == 0:
+                    obj_idx = torch.arange(point_num, device=seed_xyz.device, dtype=torch.long)
+                    fallback_from = "all_points"
+                else:
+                    fallback_from = "objectness"
+
+                if (
+                    (not torch.distributed.is_available())
+                    or (not torch.distributed.is_initialized())
+                    or torch.distributed.get_rank() == 0
+                ):
+                    print(
+                        f"[WARN][EconomicGrasp] no graspable points at batch item {i}; "
+                        f"uniform sample from {fallback_from}, "
+                        f"pool_size={int(obj_idx.numel())}, "
+                        f"M_points={int(self.M_points)}"
+                    )
+
+                if obj_idx.numel() >= self.M_points:
+                    rand = torch.randperm(obj_idx.numel(), device=seed_xyz.device)[:self.M_points]
+                    sel_idx = obj_idx[rand]
+                else:
+                    rand = torch.randint(
+                        low=0,
+                        high=obj_idx.numel(),
+                        size=(self.M_points,),
+                        device=seed_xyz.device,
+                        dtype=torch.long,
+                    )
+                    sel_idx = obj_idx[rand]
+
+                cur_seed_xyz = seed_xyz[i][sel_idx].contiguous()                         # (M, 3)
+                cur_feat = seed_features_flipped[i][sel_idx].transpose(0, 1).contiguous() # (C, M)
+
+                seed_features_graspable.append(cur_feat)
+                seed_xyz_graspable.append(cur_seed_xyz)
+                continue
+
+            # ------------------------------------------------------------
+            # Original EconomicGrasp path, unchanged.
+            # ------------------------------------------------------------
             cur_feat = seed_features_flipped[i][cur_mask]
             cur_seed_xyz = seed_xyz[i][cur_mask]
 
@@ -92,11 +161,17 @@ class economicgrasp(nn.Module):
 
             seed_features_graspable.append(cur_feat)
             seed_xyz_graspable.append(cur_seed_xyz)
+
         seed_xyz_graspable = torch.stack(seed_xyz_graspable, 0)
-        # [B (batch size), 512 (feature dim), 1024 (points after sample)]
         seed_features_graspable = torch.stack(seed_features_graspable)
+
         end_points['xyz_graspable'] = seed_xyz_graspable
         end_points['D: Graspable Points'] = graspable_num_batch / B
+        end_points['D: FPS Fallback#'] = torch.as_tensor(
+            float(fps_fallback_count),
+            device=seed_xyz.device,
+            dtype=torch.float32,
+        ).reshape(())
 
         # -------- FPS downsample (robust, always return (C,M) and (M,3)) --------
         # seed_features_graspable = []
@@ -166,6 +241,11 @@ class economicgrasp(nn.Module):
         # [B (batch size), 512 (feature dim), 1024 (points after sample)]
         seed_features_graspable = seed_features_graspable + res_feat
         # [B (batch size), 512 (feature dim), 1024 (points after sample)]
+
+        if 'view_score' in end_points:
+            view_score_dbg = end_points['view_score'].detach()
+            end_points['eco_view_top_score'] = view_score_dbg.max(dim=-1).values
+            end_points['eco_view_top_idx'] = view_score_dbg.argmax(dim=-1)
 
         # Generate the labels
         if self.is_training:
@@ -1218,6 +1298,9 @@ class economicgrasp_multi(nn.Module):
         end_points, res_feat = self.view(seed_features_graspable, end_points)
         seed_features_graspable = seed_features_graspable + res_feat
 
+        # cache post-view seed features for oracle-view debug experiments
+        end_points['_seed_features_graspable_postview'] = seed_features_graspable
+        
         self._maybe_save_vis(
             end_points,
             xyz_full=seed_xyz,

@@ -9,6 +9,7 @@ import time
 
 # PyTorch Libraries
 import torch
+import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -20,8 +21,9 @@ from utils.arguments import cfgs
 from models.economicgrasp import economicgrasp, economicgrasp_multi
 # from models.economicgrasp_2d import EconomicGrasp_ImageCenter
 # from models.loss_economicgrasp import get_loss as get_loss_economicgrasp
-# from models.economicgrasp_depth import EconomicGrasp_RGBDepthProb
-from models.loss_economicgrasp_depth import get_loss as get_loss_economicgrasp
+# from models.loss_economicgrasp_depth import get_loss as get_loss_economicgrasp
+from models.economicgrasp_depth import economicgrasp_depth_baseline
+from models.loss_economicgrasp_depth_c1 import get_loss as get_loss_economicgrasp
 from dataset.graspnet_dataset import GraspNetDataset, GraspNetMultiDataset, collate_fn
 
 # ----------- GLOBAL CONFIG ------------
@@ -55,8 +57,8 @@ def my_worker_init_fn(worker_id):
 # TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, camera=cfgs.camera, split='train',
 #                                 voxel_size=cfgs.voxel_size, num_points=cfgs.num_point, remove_outlier=True, augment=True)
 if cfgs.multi_modal:
-    TRAIN_DATASET = GraspNetMultiDataset(cfgs.dataset_root, camera=cfgs.camera, split='train', voxel_size=cfgs.voxel_size, num_points=cfgs.num_point, remove_outlier=True, augment=False, use_gt_depth=cfgs.use_gt_depth, min_depth=cfgs.min_depth, max_depth=cfgs.max_depth, bin_num=cfgs.bin_num)
-    TEST_DATASET = GraspNetMultiDataset(cfgs.dataset_root, camera=cfgs.camera, split='test_seen', num_points=cfgs.num_point, remove_outlier=True, augment=False, voxel_size=cfgs.voxel_size, use_gt_depth=False, min_depth=cfgs.min_depth, max_depth=cfgs.max_depth, bin_num=cfgs.bin_num)
+    TRAIN_DATASET = GraspNetMultiDataset(cfgs.dataset_root, camera=cfgs.camera, split='train', voxel_size=cfgs.voxel_size, num_points=cfgs.num_point, remove_outlier=True, augment=False, use_gt_depth=cfgs.use_gt_depth, use_fuse_depth=cfgs.use_fuse_depth, min_depth=cfgs.min_depth, max_depth=cfgs.max_depth, bin_num=cfgs.bin_num, depth_strides=1)
+    TEST_DATASET = GraspNetMultiDataset(cfgs.dataset_root, camera=cfgs.camera, split='test_seen', num_points=cfgs.num_point, remove_outlier=True, augment=False, voxel_size=cfgs.voxel_size, use_gt_depth=False, use_fuse_depth=cfgs.use_fuse_depth, min_depth=cfgs.min_depth, max_depth=cfgs.max_depth, bin_num=cfgs.bin_num, depth_strides=1)
 else:
     TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, camera=cfgs.camera, split='train',
                                     voxel_size=cfgs.voxel_size, num_points=cfgs.num_point, remove_outlier=True, augment=True)
@@ -64,18 +66,14 @@ else:
                                     voxel_size=cfgs.voxel_size, num_points=cfgs.num_point, remove_outlier=True, augment=False)
     
 TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
-                              num_workers=2, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
+                              num_workers=cfgs.num_workers, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
 TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
-                              num_workers=2, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
+                              num_workers=cfgs.num_workers, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
 # Init the model
 if cfgs.multi_modal:
     # net = economicgrasp(seed_feat_dim=512, is_training=True)
-    net = economicgrasp_multi(seed_feat_dim=512, fuse_type=cfgs.fuse_type, is_training=True, vis_dir=os.path.join('vis', 'eco_multi_{}'.format(cfgs.fuse_type)), vis_every=500)
-    # net = EconomicGrasp_RGBDepthProb(img_feat_dim=256,
-    #              depth_stride=2,     # <-- your expectation: 224x224 tokens
-    #              min_depth=cfgs.min_depth,
-    #              max_depth=cfgs.max_depth,
-    #              bin_num=cfgs.bin_num, is_training=True)
+    # net = economicgrasp_multi(seed_feat_dim=512, fuse_type=cfgs.fuse_type, is_training=True, vis_dir=os.path.join('vis', 'eco_multi_{}'.format(cfgs.fuse_type)), vis_every=500)
+    net = economicgrasp_depth_baseline(seed_feat_dim=512, depth_stride=1, min_depth=cfgs.min_depth, max_depth=cfgs.max_depth, is_training=True, use_obs_depth=cfgs.use_obs_depth, vis_dir=cfgs.vis_dir, vis_every=cfgs.vis_every)
 else:
     net = economicgrasp(seed_feat_dim=512, is_training=True)
 
@@ -108,7 +106,43 @@ def adjust_learning_rate(optimizer, epoch):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-import torch.nn as nn
+
+def _scalar_to_float(x):
+    if torch.is_tensor(x):
+        if x.numel() != 1:
+            return None
+        return float(x.detach().item())
+    if isinstance(x, (int, float, np.integer, np.floating)):
+        return float(x)
+    return None
+
+
+def _is_log_key(key: str):
+    return key.startswith(("A:", "B:", "C:", "D:"))
+
+
+def _accumulate_end_point_stats(stat_dict, end_points):
+    for key, value in end_points.items():
+        if not _is_log_key(key):
+            continue
+        v = _scalar_to_float(value)
+        if v is None:
+            continue
+        stat_dict[key] = stat_dict.get(key, 0.0) + v
+
+
+def _get_grasp_loss_value(end_points):
+    if "A: Grasp Loss" not in end_points:
+        raise KeyError(
+            "end_points does not contain 'A: Grasp Loss'. "
+            "Cannot use grasp loss for checkpoint selection."
+        )
+    v = _scalar_to_float(end_points["A: Grasp Loss"])
+    if v is None:
+        raise RuntimeError("'A: Grasp Loss' exists but is not a scalar.")
+    return v
+
+
 def _find_last_conv2d(m: nn.Module):
     last = None
     for mm in m.modules():
@@ -142,145 +176,205 @@ def dbg_optimizer_has_depthhead(optimizer, model):
 log_writer = SummaryWriter(os.path.join(cfgs.log_dir))
 # ------TRAINING BEGIN  ------------
 def train_one_epoch():
-    stat_dict = {}  # collect statistics
+    stat_dict = {}
     adjust_learning_rate(optimizer, EPOCH_CNT)
-    # set model to training mode
+
     net.train()
-    overall_loss = 0
+    overall_grasp_loss = 0.0
+
+    batch_interval = 20
     batch_start_time = time.time()
     data_start_time = time.time()
     num_batches = len(TRAIN_DATALOADER)
+
     for batch_idx, batch_data_label in enumerate(TRAIN_DATALOADER):
         for key in batch_data_label:
             if 'list' in key:
                 for i in range(len(batch_data_label[key])):
                     for j in range(len(batch_data_label[key][i])):
-                        batch_data_label[key][i][j] = batch_data_label[key][i][j].cuda(non_blocking=cfgs.pin_memory)
+                        batch_data_label[key][i][j] = batch_data_label[key][i][j].cuda(
+                            non_blocking=cfgs.pin_memory
+                        )
             else:
-                batch_data_label[key] = batch_data_label[key].cuda(non_blocking=cfgs.pin_memory)
+                batch_data_label[key] = batch_data_label[key].cuda(
+                    non_blocking=cfgs.pin_memory
+                )
+
         data_end_time = time.time()
-        stat_dict['C: Data Time'] = data_end_time - data_start_time
+        stat_dict['C: Data Time'] = stat_dict.get('C: Data Time', 0.0) + (
+            data_end_time - data_start_time
+        )
 
         model_start_time = time.time()
         end_points = net(batch_data_label)
         model_end_time = time.time()
-        stat_dict['C: Model Time'] = model_end_time - model_start_time
+        stat_dict['C: Model Time'] = stat_dict.get('C: Model Time', 0.0) + (
+            model_end_time - model_start_time
+        )
+
         end_points['epoch'] = EPOCH_CNT
 
         loss_start_time = time.time()
-        # Compute loss and gradients, update parameters.
+
+        optimizer.zero_grad(set_to_none=True)
+
+        # loss can be total loss, e.g. grasp + depth.
+        # checkpoint metric uses only A: Grasp Loss.
         loss, end_points = get_loss_economicgrasp(end_points)
+        grasp_loss_value = _get_grasp_loss_value(end_points)
 
         loss.backward()
-        # dbg_depthhead_grads(net)
-        # dbg_optimizer_has_depthhead(optimizer, net)
-        # if (batch_idx + 1) % 1 == 0:
+        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
         optimizer.step()
-        optimizer.zero_grad()
 
         loss_end_time = time.time()
-        stat_dict['C: Loss Time'] = loss_end_time - loss_start_time
+        stat_dict['C: Loss Time'] = stat_dict.get('C: Loss Time', 0.0) + (
+            loss_end_time - loss_start_time
+        )
 
-        # Accumulate statistics and print out
-        for key in end_points:
-            if 'A' in key or 'B' in key or 'C' in key or 'D' in key:
-                if key not in stat_dict: stat_dict[key] = 0
-                stat_dict[key] += end_points[key].item()
+        overall_grasp_loss += grasp_loss_value
 
-        overall_loss += stat_dict['A: Grasp Loss']
-        batch_interval = 20
+        # Accumulate scalar logs from end_points.
+        _accumulate_end_point_stats(stat_dict, end_points)
 
         if (batch_idx + 1) % batch_interval == 0:
-            remain_batches = (cfgs.max_epoch - EPOCH_CNT) * num_batches - batch_idx - 1
-            batch_time = time.time() - batch_start_time
+            interval_time = time.time() - batch_start_time
             batch_start_time = time.time()
-            stat_dict['C: Remain Time (h)'] = remain_batches * batch_time / 3600
+
+            remain_batches = (cfgs.max_epoch - EPOCH_CNT) * num_batches - batch_idx - 1
+            per_batch_time = interval_time / float(batch_interval)
+            stat_dict['C: Remain Time (h)'] = remain_batches * per_batch_time / 3600.0
+
             log_string(f' ---- epoch: {EPOCH_CNT},  batch: {batch_idx + 1} ----')
+
+            global_step = (
+                EPOCH_CNT * len(TRAIN_DATALOADER) + batch_idx
+            ) * cfgs.batch_size
+
             for key in sorted(stat_dict.keys()):
-                log_writer.add_scalar('train_' + key, stat_dict[key]/batch_interval, (EPOCH_CNT*len(TRAIN_DATALOADER)+batch_idx)*cfgs.batch_size)
-                log_string(f'{key:<20}: {round(stat_dict[key] / batch_interval, 4):0<8}')
-                stat_dict[key] = 0
+                # Time/metric logs are accumulated over batch_interval,
+                # except remaining time, which is already an estimate.
+                denom = 1.0 if key == 'C: Remain Time (h)' else float(batch_interval)
+                value = stat_dict[key] / denom
+
+                log_writer.add_scalar('train_' + key, value, global_step)
+                log_string(f'{key:<24}: {round(value, 4):0<8}')
+
+                stat_dict[key] = 0.0
 
         data_start_time = time.time()
-    overall_loss = overall_loss/float(cfgs.batch_size)
-    log_string('overall loss:{}, batch num:{}'.format(overall_loss, batch_idx+1))
-    mean_loss = overall_loss/float(batch_idx+1)
-    return mean_loss
+
+    mean_grasp_loss = overall_grasp_loss / float(batch_idx + 1)
+    log_string('overall grasp loss:{}, batch num:{}'.format(mean_grasp_loss, batch_idx + 1))
+
+    return mean_grasp_loss
 
 
 def evaluate_one_epoch():
-    stat_dict = {} # collect statistics
-    # set model to eval mode (for bn and dp)
+    stat_dict = {}
+
     net.eval()
-    overall_loss = 0
+    overall_grasp_loss = 0.0
+
     for batch_idx, batch_data_label in enumerate(TEST_DATALOADER):
         if batch_idx % 10 == 0:
-            log_string('Eval batch: %d'%(batch_idx))
+            log_string('Eval batch: %d' % batch_idx)
+
         for key in batch_data_label:
             if 'list' in key:
                 for i in range(len(batch_data_label[key])):
                     for j in range(len(batch_data_label[key][i])):
-                        batch_data_label[key][i][j] = batch_data_label[key][i][j].cuda(non_blocking=cfgs.pin_memory)
+                        batch_data_label[key][i][j] = batch_data_label[key][i][j].cuda(
+                            non_blocking=cfgs.pin_memory
+                        )
             else:
-                batch_data_label[key] = batch_data_label[key].cuda(non_blocking=cfgs.pin_memory)
-        # Forward pass
+                batch_data_label[key] = batch_data_label[key].cuda(
+                    non_blocking=cfgs.pin_memory
+                )
+
         with torch.no_grad():
             end_points = net(batch_data_label)
+            end_points['epoch'] = EPOCH_CNT
 
-        # Compute loss
-        loss, end_points = get_loss_economicgrasp(end_points)
+            # loss may include depth loss, but checkpoint metric uses grasp loss only.
+            loss, end_points = get_loss_economicgrasp(end_points)
+            grasp_loss_value = _get_grasp_loss_value(end_points)
 
-        # Accumulate statistics and print out
-        for key in end_points:
-            if 'A' in key or 'B' in key or 'C' in key or 'D' in key:
-                if key not in stat_dict: stat_dict[key] = 0
-                stat_dict[key] += end_points[key].item()
-    
-        overall_loss += stat_dict['A: Grasp Loss']
+        overall_grasp_loss += grasp_loss_value
+
+        _accumulate_end_point_stats(stat_dict, end_points)
+
+    num_eval_batches = float(batch_idx + 1)
+
+    global_step = (EPOCH_CNT + 1) * len(TRAIN_DATALOADER) * cfgs.batch_size
+
     for key in sorted(stat_dict.keys()):
-        log_writer.add_scalar('test_' + key, stat_dict[key]/float(batch_idx+1), (EPOCH_CNT+1)*len(TRAIN_DATALOADER)*cfgs.batch_size)
-        log_string('eval mean %s: %f'%(key, stat_dict[key]/(float(batch_idx+1))))
+        value = stat_dict[key] / num_eval_batches
+        log_writer.add_scalar('test_' + key, value, global_step)
+        log_string('eval mean %s: %f' % (key, value))
 
-    overall_loss = overall_loss/float(cfgs.batch_size)
-    log_string('overall loss:{}, batch num:{}'.format(overall_loss, batch_idx+1))
-    mean_loss = overall_loss/float(batch_idx+1)
-    return mean_loss
+    mean_grasp_loss = overall_grasp_loss / num_eval_batches
+    log_string('overall eval grasp loss:{}, batch num:{}'.format(mean_grasp_loss, batch_idx + 1))
+
+    return mean_grasp_loss
 
 
 def train(start_epoch):
     global EPOCH_CNT
-    min_loss = np.inf
+
+    min_grasp_loss = np.inf
     best_epoch = 0
+
     for epoch in range(start_epoch, cfgs.max_epoch):
         EPOCH_CNT = epoch
         log_string(f'**** EPOCH {epoch:<3} ****')
         log_string('Current learning rate: %f' % (get_current_lr(epoch)))
 
         np.random.seed()
-        train_loss = train_one_epoch()
 
-        # Save checkpoint
-        save_dict = {'epoch': epoch + 1,  # after training one epoch, the start_epoch should be epoch+1
-                     'optimizer_state_dict': optimizer.state_dict(),
-                     }
-        try:  # with nn.DataParallel() the net is added as a submodule of DataParallel
+        train_grasp_loss = train_one_epoch()
+
+        save_dict = {
+            'epoch': epoch + 1,
+            'optimizer_state_dict': optimizer.state_dict(),
+        }
+
+        try:
             save_dict['model_state_dict'] = net.module.state_dict()
         except:
             save_dict['model_state_dict'] = net.state_dict()
 
         if epoch >= cfgs.eval_start_epoch:
-            eval_loss = evaluate_one_epoch()
-            if eval_loss < min_loss:
-                min_loss = eval_loss
-                best_epoch = epoch
-                ckpt_name = "epoch_" + str(best_epoch) \
-                            + "_train_" + str(train_loss) \
-                            + "_val_" + str(eval_loss)
-                torch.save(save_dict['model_state_dict'], os.path.join(cfgs.log_dir, ckpt_name + '.tar'))
-            elif not EPOCH_CNT % cfgs.ckpt_save_interval:
-                torch.save(save_dict, os.path.join(cfgs.log_dir, 'checkpoint_{}.tar'.format(EPOCH_CNT)))
-            log_string("best_epoch:{}".format(best_epoch))
-        torch.save(save_dict, os.path.join(cfgs.log_dir, 'checkpoint.tar'))
+            eval_grasp_loss = evaluate_one_epoch()
 
+            # Use grasp loss only for best-checkpoint selection.
+            if eval_grasp_loss < min_grasp_loss:
+                min_grasp_loss = eval_grasp_loss
+                best_epoch = epoch
+
+                ckpt_name = (
+                    "epoch_" + str(best_epoch)
+                    + "_train_grasp_" + str(train_grasp_loss)
+                    + "_val_grasp_" + str(eval_grasp_loss)
+                )
+
+                # 保持你原来的保存方式：best 只保存 model_state_dict。
+                torch.save(
+                    save_dict['model_state_dict'],
+                    os.path.join(cfgs.log_dir, ckpt_name + '.tar')
+                )
+
+            elif not EPOCH_CNT % cfgs.ckpt_save_interval:
+                torch.save(
+                    save_dict,
+                    os.path.join(cfgs.log_dir, 'checkpoint_{}.tar'.format(EPOCH_CNT))
+                )
+
+            log_string("best_epoch:{}".format(best_epoch))
+            log_string("best_eval_grasp_loss:{}".format(min_grasp_loss))
+
+        torch.save(save_dict, os.path.join(cfgs.log_dir, 'checkpoint.tar'))
+        
+        
 if __name__ == '__main__':
     train(start_epoch)
