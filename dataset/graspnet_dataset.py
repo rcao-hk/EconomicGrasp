@@ -272,7 +272,7 @@ from torchvision import transforms
 class GraspNetMultiDataset(Dataset):
     def __init__(self, root, camera='kinect', split='train', num_points=20000, voxel_size=0.005, remove_outlier=False, remove_invisible=True,
                  augment=False, load_label=True, use_gt_depth=False,
-                 use_fuse_depth=False, min_depth=0.2, max_depth=1.0, bin_num=256, depth_strides=2):
+                 use_fuse_depth=False, graspness_mode='scene', min_depth=0.2, max_depth=1.0, bin_num=256, depth_strides=2, extend_angle=False):
         self.root = root
         self.split = split
         self.voxel_size = voxel_size
@@ -284,6 +284,8 @@ class GraspNetMultiDataset(Dataset):
         self.load_label = load_label
         self.use_gt_depth = use_gt_depth
         self.use_fuse_depth = use_fuse_depth
+        self.graspness_mode = graspness_mode
+        self.extend_angle = extend_angle
         self.collision_labels = {}
 
         if split == 'train':
@@ -335,14 +337,20 @@ class GraspNetMultiDataset(Dataset):
                 )
                 self.labelpath.append(os.path.join(root, 'scenes', x, camera, 'label', str(img_num).zfill(4) + '.png'))
                 self.metapath.append(os.path.join(root, 'scenes', x, camera, 'meta', str(img_num).zfill(4) + '.mat'))
-                self.graspnesspath.append(os.path.join(root, 'graspness', x, camera, str(img_num).zfill(4) + '.npy'))
+                if self.graspness_mode == 'scene':
+                    self.graspnesspath.append(os.path.join(root, 'graspness', x, camera, str(img_num).zfill(4) + '.npy'))
+                elif self.graspness_mode == 'instance':
+                    self.graspnesspath.append(os.path.join(root, 'graspness_instance', x, camera, str(img_num).zfill(4) + '.npy'))                    
                 self.gtgraspnesspath.append(os.path.join(root, 'virtual_graspness', x, camera, str(img_num).zfill(4) + '.npy'))
                 self.scenename.append(x.strip())
                 self.frameid.append(img_num)
 
             if self.load_label:
-                self.grasp_labels[x.strip()] = os.path.join(self.root, 'economic_grasp_label_300views', x + '_labels.npz')
-
+                if self.extend_angle:
+                    self.grasp_labels[x.strip()] = os.path.join(self.root, 'economic_grasp_label_300views_extend_angle', x + '_labels.npz')
+                else:
+                    self.grasp_labels[x.strip()] = os.path.join(self.root, 'economic_grasp_label_300views', x + '_labels.npz')
+                    
     def scene_list(self):
         return self.scenename
 
