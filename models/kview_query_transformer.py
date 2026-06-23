@@ -2175,3 +2175,626 @@ class KViewQueryTransformerLocalGraspModule(nn.Module):
         self._save_debug(end_points, img=img, image_hw=(H, W))
         self._vis_iter += 1
         return end_points
+
+
+class SimpleAttentionModule(nn.Module):
+    """Small wrapper around MultiheadAttention with residual + FFN.
+
+    This is used only to let the A angle candidates of the same center compare
+    with each other before producing candidate score/depth/width.
+    """
+    def __init__(self, dim: int, n_head: int = 4, dropout: float = 0.05, ffn_ratio: float = 2.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(dim, n_head, dropout=dropout, batch_first=True)
+        self.norm2 = nn.LayerNorm(dim)
+        hidden = int(round(dim * ffn_ratio))
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [N,A,C]
+        y = self.norm1(x)
+        y, _ = self.attn(y, y, y, need_weights=False)
+        x = x + y
+        x = x + self.ffn(self.norm2(x))
+        return x
+
+
+class CenterViewAngleCandidateDecoder(nn.Module):
+    """Simple D4RT-style query decoder for center-view-angle candidates.
+
+    Input:
+        group_features_angle: [B,C,Q*A]
+        end_points['kview_angle_query_base_q'] = Q
+        end_points['kview_angle_query_num_angle'] = A
+
+    Candidate outputs:
+        grasp_depth_pred_angle: [B,D+1,Q,A]
+        grasp_score_pred_angle: [B,6,Q,A]
+        grasp_width_pred_angle: [B,1,Q,A]
+
+    Compatibility outputs are collapsed by score-expected selected angle.
+    """
+    def __init__(
+        self,
+        num_angle: int,
+        num_depth: int,
+        in_dim: int = 256,
+        hidden_dim: int = 256,
+        num_layers: int = 2,
+        num_heads: int = 4,
+        dropout_p: float = 0.15,
+        attn_dropout: float = 0.05,
+        debug_prefix: str = "D: CVA",
+    ):
+        super().__init__()
+        self.num_angle = int(num_angle)
+        self.num_depth = int(num_depth)
+        self.hidden_dim = int(hidden_dim)
+        self.debug_prefix = debug_prefix
+
+        self.input_proj = nn.Conv1d(in_dim, hidden_dim, 1)
+        self.angle_embed = nn.Embedding(self.num_angle, hidden_dim)
+        self.layers = nn.ModuleList([
+            SimpleAttentionModule(hidden_dim, n_head=num_heads, dropout=attn_dropout)
+            for _ in range(int(num_layers))
+        ])
+
+        # EconomicGrasp-style lightweight branch interaction.
+        self.depth_proj = nn.Conv1d(hidden_dim, 64, 1)
+        self.width_proj = nn.Conv1d(hidden_dim, 64, 1)
+        self.score_proj = nn.Conv1d(hidden_dim, 64, 1)
+        self.branch_attn = nn.MultiheadAttention(64, 1, dropout=attn_dropout, batch_first=True)
+
+        self.depth_dropout = nn.Dropout(dropout_p)
+        self.width_dropout = nn.Dropout(dropout_p)
+        self.score_dropout = nn.Dropout(dropout_p)
+        self.depth_head = nn.Conv1d(64, self.num_depth + 1, 1)
+        self.width_head = nn.Conv1d(64, 1, 1)
+        self.score_head = nn.Conv1d(64, 6, 1)
+
+    @staticmethod
+    def _expected_score(score_logits_angle: torch.Tensor) -> torch.Tensor:
+        # score_logits_angle: [B,6,Q,A]
+        bins = torch.tensor(
+            [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+            device=score_logits_angle.device,
+            dtype=score_logits_angle.dtype,
+        ).view(1, 6, 1, 1)
+        prob = F.softmax(score_logits_angle, dim=1)
+        return (prob * bins).sum(dim=1)  # [B,Q,A]
+
+    @staticmethod
+    def _gather_angle(x: torch.Tensor, angle_idx: torch.Tensor) -> torch.Tensor:
+        """Gather candidate tensor along final angle dimension.
+
+        x: [B,C,Q,A]
+        angle_idx: [B,Q]
+        return: [B,C,Q]
+        """
+        B, C, Q, A = x.shape
+        idx = angle_idx.long().clamp(0, A - 1).view(B, 1, Q, 1).expand(B, C, Q, 1)
+        return torch.gather(x, dim=-1, index=idx).squeeze(-1)
+
+    @torch.no_grad()
+    def _add_debug(self, end_points: Dict[str, Any], score_angle: torch.Tensor, depth_angle: torch.Tensor, selected_angle: torch.Tensor) -> None:
+        p = self.debug_prefix
+        score_expected = self._expected_score(score_angle)  # [B,Q,A]
+        B, Q, A = score_expected.shape
+        end_points[f"{p} score angle expected"] = score_expected.mean()
+        end_points[f"{p} selected angle bin0 ratio"] = (selected_angle == 0).float().mean()
+        end_points[f"{p} selected angle mean"] = selected_angle.float().mean()
+        end_points[f"{p} score max-angle margin"] = (
+            torch.topk(score_expected, k=min(2, A), dim=-1).values[..., 0]
+            - torch.topk(score_expected, k=min(2, A), dim=-1).values[..., -1]
+        ).mean()
+
+        # Candidate depth shallow statistics under selected angle.
+        depth_sel = self._gather_angle(depth_angle, selected_angle)  # [B,D+1,Q]
+        depth_idx = torch.argmax(depth_sel[:, :self.num_depth, :], dim=1)
+        end_points[f"{p} selected depth01 ratio"] = (depth_idx <= 1).float().mean()
+
+        # If extended labels are available, compare score-selected angle to best-score GT angle.
+        label_score = end_points.get("batch_grasp_score_angle", None)
+        valid = end_points.get("batch_grasp_angle_valid_mask", None)
+        if torch.is_tensor(label_score) and label_score.shape == (B, Q, A):
+            best_label_angle = torch.argmax(label_score.float(), dim=-1)
+            if torch.is_tensor(valid) and valid.shape == (B, Q, A):
+                m = valid.any(dim=-1)
+            else:
+                m = torch.ones((B, Q), dtype=torch.bool, device=label_score.device)
+            if bool(m.any()):
+                end_points[f"{p} selected angle acc vs label-score-best"] = (selected_angle[m] == best_label_angle[m]).float().mean()
+                label_hist = _bincount_float(best_label_angle[m], A)
+                _add_hist_to_endpoints(end_points, "cva_debug_label_best_angle_hist", label_hist.cpu(), f"{p} label best angle")
+
+    def forward(self, group_features_angle: torch.Tensor, end_points: Dict[str, Any]) -> Dict[str, Any]:
+        B, C, QA = group_features_angle.shape
+        Q = int(end_points["kview_angle_query_base_q"])
+        A = int(end_points["kview_angle_query_num_angle"])
+        if A != self.num_angle or QA != Q * A:
+            raise RuntimeError(f"Expected QA=Q*A ({Q}*{A}), got {QA}.")
+
+        x = self.input_proj(group_features_angle)  # [B,H,Q*A]
+        x = x.transpose(1, 2).contiguous().view(B, Q, A, self.hidden_dim)
+        angle_ids = torch.arange(A, device=x.device).view(1, 1, A)
+        x = x + self.angle_embed(angle_ids)
+
+        # D4RT-style: decoder answers a set of query tokens.  Here the set is the
+        # A angle candidates of one center-view query.
+        x = x.view(B * Q, A, self.hidden_dim)
+        for layer in self.layers:
+            x = layer(x)
+        x = x.view(B, Q, A, self.hidden_dim).reshape(B, Q * A, self.hidden_dim).transpose(1, 2).contiguous()
+
+        depth_feat = self.depth_proj(x)
+        width_feat = self.width_proj(x)
+        score_feat = self.score_proj(x)
+
+        # 3 branch interaction per candidate: [B*Q*A,3,64]
+        depth_tok = depth_feat.permute(0, 2, 1).reshape(B * Q * A, 1, 64)
+        width_tok = width_feat.permute(0, 2, 1).reshape(B * Q * A, 1, 64)
+        score_tok = score_feat.permute(0, 2, 1).reshape(B * Q * A, 1, 64)
+        tokens = torch.cat([depth_tok, width_tok, score_tok], dim=1)
+        tokens, _ = self.branch_attn(tokens, tokens, tokens, need_weights=False)
+        depth_feat = tokens[:, 0].view(B, Q * A, 64).permute(0, 2, 1).contiguous()
+        width_feat = tokens[:, 1].view(B, Q * A, 64).permute(0, 2, 1).contiguous()
+        score_feat = tokens[:, 2].view(B, Q * A, 64).permute(0, 2, 1).contiguous()
+
+        depth_logits_flat = self.depth_head(self.depth_dropout(depth_feat))  # [B,D+1,Q*A]
+        score_logits_flat = self.score_head(self.score_dropout(score_feat))  # [B,6,Q*A]
+        width_flat = self.width_head(self.width_dropout(width_feat))         # [B,1,Q*A]
+
+        depth_angle = depth_logits_flat.view(B, self.num_depth + 1, Q, A)
+        score_angle = score_logits_flat.view(B, 6, Q, A)
+        width_angle = width_flat.view(B, 1, Q, A)
+
+        # Candidate tensors for new extended-angle losses.
+        end_points["grasp_depth_pred_angle"] = depth_angle
+        end_points["grasp_score_pred_angle"] = score_angle
+        end_points["grasp_width_pred_angle"] = width_angle
+
+        # Inference/compatibility collapse: select angle by candidate expected score.
+        score_expected = self._expected_score(score_angle)  # [B,Q,A]
+        selected_angle = torch.argmax(score_expected, dim=-1)  # [B,Q]
+        end_points["cva_selected_angle"] = selected_angle
+        end_points["cva_score_expected_angle"] = score_expected.detach()
+
+        # Pseudo angle prediction for existing pred_decode: valid angle logits = score expected.
+        angle_logits_valid = score_expected.permute(0, 2, 1).contiguous()  # [B,A,Q]
+        invalid = angle_logits_valid.new_full((B, 1, Q), -20.0)
+        end_points["grasp_angle_pred"] = torch.cat([angle_logits_valid, invalid], dim=1)
+        end_points["grasp_depth_pred"] = self._gather_angle(depth_angle, selected_angle)
+        end_points["grasp_score_pred"] = self._gather_angle(score_angle, selected_angle)
+        end_points["grasp_width_pred"] = self._gather_angle(width_angle, selected_angle)
+
+        self._add_debug(end_points, score_angle, depth_angle, selected_angle)
+        return end_points
+
+
+class CenterViewAngleQueryTransformerLocalGraspModule(nn.Module):
+    """Minimal center-view-angle query module.
+
+    It reuses the existing ViewNet and KView selector.  After a view is selected,
+    it enumerates A in-plane angles, performs angle-conditioned grouping, and
+    decodes candidate depth/width/score.
+    """
+    def __init__(
+        self,
+        view_net: nn.Module,
+        num_view: int,
+        num_angle: int,
+        num_depth: int,
+        seed_feature_dim: int,
+        feat_dim: int,
+        view_dirs: torch.Tensor,
+        batch_viewpoint_params_to_matrix_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+        config: Optional[KViewQueryTransformerConfig] = None,
+    ):
+        super().__init__()
+        self.view = view_net
+        self.num_view = int(num_view)
+        self.num_angle = int(num_angle)
+        self.num_depth = int(num_depth)
+        self.seed_feature_dim = int(seed_feature_dim)
+        self.feat_dim = int(feat_dim)
+        self.config = config if config is not None else KViewQueryTransformerConfig()
+        self.batch_viewpoint_params_to_matrix_fn = batch_viewpoint_params_to_matrix_fn
+
+        self._vis_iter = 0
+        if self.config.vis_dir is not None:
+            os.makedirs(self.config.vis_dir, exist_ok=True)
+
+        self.selector = KViewQuerySelector(
+            num_view=self.num_view,
+            view_dirs=view_dirs,
+            batch_viewpoint_params_to_matrix_fn=batch_viewpoint_params_to_matrix_fn,
+            config=self.config,
+        )
+        self.group = ViewConditionedAttentionGrouping(
+            seed_feature_dim=self.seed_feature_dim,
+            feat_dim=self.feat_dim,
+            out_dim=int(self.config.head_model_dim),
+            config=self.config,
+        )
+        self.decoder = CenterViewAngleCandidateDecoder(
+            num_angle=self.num_angle,
+            num_depth=self.num_depth,
+            in_dim=int(self.config.head_model_dim),
+            hidden_dim=int(self.config.head_model_dim),
+            num_layers=max(int(self.config.head_num_layers), 1),
+            num_heads=max(int(self.config.head_num_heads), 1),
+            dropout_p=float(self.config.head_dropout_p),
+            attn_dropout=float(self.config.head_attn_dropout),
+            debug_prefix="D: CVA",
+        )
+
+    def _call_view_net(self, seed_features, token_sel_idx, camera_K, depth_map, depth_prob, end_points):
+        try:
+            return self.view(
+                seed_features=seed_features,
+                token_sel_idx=token_sel_idx,
+                K=camera_K,
+                depth_map=depth_map,
+                depth_prob=depth_prob,
+                end_points=end_points,
+            )
+        except TypeError:
+            return self.view(seed_features, end_points)
+
+    def _expand_angle_queries(self, seed_features_q, seed_xyz_q, token_sel_idx_q, view_xyz_q, end_points):
+        B, C, Q = seed_features_q.shape
+        A = self.num_angle
+        device = seed_features_q.device
+        dtype = seed_xyz_q.dtype
+
+        seed_features_a = seed_features_q.unsqueeze(-1).expand(B, C, Q, A).reshape(B, C, Q * A).contiguous()
+        seed_xyz_a = seed_xyz_q.unsqueeze(2).expand(B, Q, A, 3).reshape(B, Q * A, 3).contiguous()
+        token_sel_idx_a = token_sel_idx_q.unsqueeze(-1).expand(B, Q, A).reshape(B, Q * A).contiguous()
+        view_xyz_a = view_xyz_q.unsqueeze(2).expand(B, Q, A, 3).reshape(B, Q * A, 3).contiguous()
+
+        angle_ids = torch.arange(A, device=device).view(1, 1, A).expand(B, Q, A).reshape(B, Q * A)
+        # Use the same angle discretization as EconomicGrasp pred_decode: idx * pi / 12 when A=12.
+        angle_rad = angle_ids.to(dtype) * (np.pi / float(A))
+        view_rot_a = self.batch_viewpoint_params_to_matrix_fn(
+            -view_xyz_a.reshape(-1, 3),
+            angle_rad.reshape(-1),
+        ).view(B, Q * A, 3, 3)
+
+        end_points["kview_angle_query_base_q"] = int(Q)
+        end_points["kview_angle_query_num_angle"] = int(A)
+        end_points["kview_angle_query_angle_ids"] = angle_ids
+        end_points["D: CVA base Q"] = torch.tensor(float(Q), device=device)
+        end_points["D: CVA angle A"] = torch.tensor(float(A), device=device)
+        end_points["D: CVA Qangle"] = torch.tensor(float(Q * A), device=device)
+        return seed_features_a, seed_xyz_a, token_sel_idx_a, view_rot_a, end_points
+
+    @staticmethod
+    def _angle_color(angle_id: int, num_angle: int) -> Tuple[int, int, int]:
+        """BGR color for OpenCV drawing."""
+        try:
+            import cv2
+            hue = int(round(179.0 * (int(angle_id) % max(int(num_angle), 1)) / max(float(num_angle), 1.0)))
+            hsv = np.uint8([[[hue, 220, 255]]])
+            bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0, 0]
+            return int(bgr[0]), int(bgr[1]), int(bgr[2])
+        except Exception:
+            return (0, 255, 255)
+
+    @staticmethod
+    def _make_canvas(img0: torch.Tensor, out_hw: Tuple[int, int]) -> Optional[np.ndarray]:
+        """Create a BGR uint8 canvas from img[0]."""
+        if img0 is None:
+            return None
+        try:
+            import cv2
+            x = img0.detach().float().cpu()
+            if x.dim() == 2:
+                x = x.unsqueeze(0)
+            if x.shape[0] == 1:
+                x = x.repeat(3, 1, 1)
+            if x.shape[0] > 3:
+                x = x[:3]
+            x = x - x.amin()
+            x = x / (x.amax() + 1e-6)
+            canvas = (x.permute(1, 2, 0).numpy() * 255.0).astype(np.uint8)
+            canvas = canvas[..., ::-1].copy()  # RGB -> BGR
+            H, W = out_hw
+            if canvas.shape[:2] != (H, W):
+                canvas = cv2.resize(canvas, (W, H), interpolation=cv2.INTER_LINEAR)
+            return canvas
+        except Exception:
+            return None
+
+    @torch.no_grad()
+    def _save_cva_visualization(
+        self,
+        end_points: Dict[str, Any],
+        img: Optional[torch.Tensor],
+        image_hw: Tuple[int, int],
+    ) -> None:
+        """Save PNG-only diagnostics for center-view-angle query decoding.
+
+        Saved files:
+          - cva_overlay_itXXXXXX.png: centers colored by score-selected angle;
+            red rings mark disagreement with label best-angle when labels exist.
+          - cva_angle_hist_itXXXXXX.png: selected-angle histogram vs label best-angle.
+          - cva_score_heatmap_itXXXXXX.png: predicted score over angle for selected queries;
+            label score over angle is shown below when available.
+
+        No .npy/.npz files are written by design.
+        """
+        cfg = self.config
+        if cfg.vis_dir is None:
+            return
+        if int(cfg.vis_every) <= 0:
+            return
+        if self._vis_iter % int(cfg.vis_every) != 0:
+            return
+        if not _rank0_only():
+            return
+
+        os.makedirs(cfg.vis_dir, exist_ok=True)
+        H, W = image_hw
+
+        selected_angle = end_points.get("cva_selected_angle", None)       # [B,Q]
+        score_expected = end_points.get("cva_score_expected_angle", None) # [B,Q,A]
+        token_idx = end_points.get("token_sel_idx", None)                 # [B,Q]
+        patch_uv = end_points.get("kview_debug_patch_uv0", None)          # [Nqa,P,2], first batch preview
+        label_score = end_points.get("batch_grasp_score_angle", None)     # [B,Q,A]
+        valid_angle = end_points.get("batch_grasp_angle_valid_mask", None)
+
+        if not (torch.is_tensor(selected_angle) and torch.is_tensor(score_expected)):
+            return
+
+        A = int(score_expected.shape[-1])
+        B = int(score_expected.shape[0])
+        Q = int(score_expected.shape[1])
+        selected0 = selected_angle[0].detach().long().cpu()
+        score0 = score_expected[0].detach().float().cpu()
+        score_sel0 = torch.gather(score0, 1, selected0.view(-1, 1).clamp(0, A - 1)).squeeze(1)
+
+        if torch.is_tensor(valid_angle) and tuple(valid_angle.shape[:3]) == tuple(score_expected.shape):
+            valid_q0 = valid_angle[0].detach().bool().cpu().any(dim=-1)
+        else:
+            valid_q0 = torch.ones(Q, dtype=torch.bool)
+
+        if torch.is_tensor(label_score) and tuple(label_score.shape[:3]) == tuple(score_expected.shape):
+            label0 = label_score[0].detach().float().cpu()
+            label_best0 = torch.argmax(label0, dim=-1)
+            has_label = True
+        else:
+            label0 = None
+            label_best0 = None
+            has_label = False
+
+        # Pick visualization query indices: top predicted-score valid queries.
+        q_pool = torch.where(valid_q0)[0]
+        nvis = min(max(int(cfg.vis_num_queries), 1), int(q_pool.numel()) if int(q_pool.numel()) > 0 else Q)
+        if int(q_pool.numel()) > 0:
+            pool_scores = score_sel0[q_pool]
+            top_local = torch.topk(pool_scores, k=min(nvis, int(q_pool.numel())), largest=True).indices
+            q_sel = q_pool[top_local]
+        else:
+            q_sel = torch.linspace(0, Q - 1, steps=nvis).long()
+
+        # ------------------------------------------------------------------
+        # 1) Overlay: centers colored by selected angle + selected-angle patch.
+        # ------------------------------------------------------------------
+        canvas = self._make_canvas(img[0], (H, W)) if torch.is_tensor(img) else None
+        if canvas is not None:
+            try:
+                import cv2
+                # Draw query centers.
+                if torch.is_tensor(token_idx):
+                    idx0 = token_idx[0].detach().long().cpu()
+                    for q in q_sel.tolist():
+                        t = int(idx0[q])
+                        u, v = int(t % W), int(t // W)
+                        if not (0 <= u < W and 0 <= v < H):
+                            continue
+                        a = int(selected0[q])
+                        color = self._angle_color(a, A)
+                        rad = 2 + int(min(max(float(score_sel0[q]) * 4.0, 0.0), 4.0))
+                        cv2.circle(canvas, (u, v), rad, color, thickness=-1, lineType=cv2.LINE_AA)
+                        # Red ring if selected angle disagrees with label-score-best.
+                        if has_label and int(label_best0[q]) != a:
+                            cv2.circle(canvas, (u, v), rad + 3, (0, 0, 255), thickness=1, lineType=cv2.LINE_AA)
+
+                # Draw selected-angle patch tokens for the first few base queries
+                # for which kview_debug_patch_uv0 is available.  The grouping
+                # preview is ordered as q0_a0..q0_aA, q1_a0.. .
+                if torch.is_tensor(patch_uv):
+                    puv = patch_uv.detach().float().cpu().numpy()
+                    max_base = min(int(puv.shape[0]) // max(A, 1), 8, Q)
+                    for q in range(max_base):
+                        a = int(selected0[q])
+                        qa = q * A + a
+                        if qa < puv.shape[0]:
+                            pts = puv[qa].reshape(-1, 2)
+                            color = self._angle_color(a, A)
+                            step = max(1, int(pts.shape[0]) // 24)
+                            for uu, vv in pts[::step]:
+                                u, v = int(round(float(uu))), int(round(float(vv)))
+                                if 0 <= u < W and 0 <= v < H:
+                                    cv2.circle(canvas, (u, v), 1, color, thickness=-1, lineType=cv2.LINE_AA)
+
+                txt = f"CVA it={self._vis_iter} Q={Q} A={A} mean_sel_score={float(score_sel0[valid_q0].mean()) if bool(valid_q0.any()) else float(score_sel0.mean()):.3f}"
+                cv2.putText(canvas, txt, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(canvas, txt, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+                cv2.imwrite(os.path.join(cfg.vis_dir, f"cva_overlay_it{self._vis_iter:06d}.png"), canvas)
+            except Exception:
+                pass
+
+        # ------------------------------------------------------------------
+        # 2) Angle histograms and 3) score-vs-angle heatmaps.
+        # ------------------------------------------------------------------
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            m = valid_q0
+            if not bool(m.any()):
+                m = torch.ones_like(valid_q0)
+
+            # Histogram: selected angle, and label-best angle if available.
+            fig, ax = plt.subplots(figsize=(7.5, 3.0), dpi=160)
+            xs = np.arange(A)
+            pred_hist = np.bincount(selected0[m].numpy(), minlength=A).astype(np.float32)
+            pred_hist = pred_hist / max(pred_hist.sum(), 1.0)
+            ax.bar(xs - (0.18 if has_label else 0.0), pred_hist, width=(0.36 if has_label else 0.7), label="selected")
+            if has_label:
+                lab_hist = np.bincount(label_best0[m].numpy(), minlength=A).astype(np.float32)
+                lab_hist = lab_hist / max(lab_hist.sum(), 1.0)
+                ax.bar(xs + 0.18, lab_hist, width=0.36, label="label-best")
+                acc = float((selected0[m] == label_best0[m]).float().mean())
+                ax.set_title(f"CVA selected-angle distribution, acc={acc:.3f}")
+            else:
+                ax.set_title("CVA selected-angle distribution")
+            ax.set_xlabel("angle bin")
+            ax.set_ylabel("ratio")
+            ax.set_xticks(xs)
+            ax.set_ylim(0.0, max(float(pred_hist.max()) * 1.25, 0.05))
+            ax.legend(loc="upper right")
+            fig.tight_layout()
+            fig.savefig(os.path.join(cfg.vis_dir, f"cva_angle_hist_it{self._vis_iter:06d}.png"))
+            plt.close(fig)
+
+            # Heatmap for up to 64 high-score queries.
+            nheat = min(64, int(q_sel.numel()))
+            qh = q_sel[:nheat]
+            pred_h = score0[qh].numpy()  # [N,A]
+            if has_label:
+                lab_h = label0[qh].numpy()
+                fig, axes = plt.subplots(2, 1, figsize=(8.0, 4.8), dpi=160, sharex=True)
+                im0 = axes[0].imshow(pred_h, aspect="auto", interpolation="nearest", vmin=0.0, vmax=1.0)
+                axes[0].set_title("predicted expected score over angle")
+                axes[0].set_ylabel("query")
+                im1 = axes[1].imshow(lab_h, aspect="auto", interpolation="nearest", vmin=0.0, vmax=max(1.0, float(np.nanmax(lab_h)) if lab_h.size else 1.0))
+                axes[1].set_title("label score over angle")
+                axes[1].set_ylabel("query")
+                axes[1].set_xlabel("angle bin")
+                fig.colorbar(im0, ax=axes[0], fraction=0.025, pad=0.02)
+                fig.colorbar(im1, ax=axes[1], fraction=0.025, pad=0.02)
+            else:
+                fig, ax = plt.subplots(figsize=(8.0, 2.8), dpi=160)
+                im0 = ax.imshow(pred_h, aspect="auto", interpolation="nearest", vmin=0.0, vmax=1.0)
+                ax.set_title("predicted expected score over angle")
+                ax.set_ylabel("query")
+                ax.set_xlabel("angle bin")
+                fig.colorbar(im0, ax=ax, fraction=0.025, pad=0.02)
+            fig.tight_layout()
+            fig.savefig(os.path.join(cfg.vis_dir, f"cva_score_heatmap_it{self._vis_iter:06d}.png"))
+            plt.close(fig)
+        except Exception:
+            return
+
+    def forward(
+        self,
+        seed_features: torch.Tensor,
+        seed_xyz: torch.Tensor,
+        token_sel_idx: torch.Tensor,
+        feat_map: torch.Tensor,
+        depth_map: torch.Tensor,
+        camera_K: torch.Tensor,
+        end_points: Dict[str, Any],
+        is_training: bool,
+        process_grasp_labels_fn: Optional[Callable[..., Any]] = None,
+        process_grasp_labels_kwargs: Optional[Dict[str, Any]] = None,
+        topview_debug_fn: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+        depth_prob: Optional[torch.Tensor] = None,
+        objectness_logits: Optional[torch.Tensor] = None,
+        graspness_map: Optional[torch.Tensor] = None,
+        img: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Any]:
+        # 1) View field.
+        end_points, res_feat = self._call_view_net(
+            seed_features=seed_features,
+            token_sel_idx=token_sel_idx,
+            camera_K=camera_K,
+            depth_map=depth_map,
+            depth_prob=depth_prob,
+            end_points=end_points,
+        )
+        viewnet_sampled_view_inds = end_points.get("grasp_top_view_inds", None)
+        if torch.is_tensor(viewnet_sampled_view_inds):
+            viewnet_sampled_view_inds = viewnet_sampled_view_inds.detach().clone()
+            end_points["kview_viewnet_sampled_view_inds"] = viewnet_sampled_view_inds
+
+        seed_features_base = seed_features + res_feat
+        seed_xyz_base = seed_xyz
+        token_sel_idx_base = token_sel_idx
+
+        end_points["xyz_graspable"] = seed_xyz_base
+        end_points["token_sel_idx"] = token_sel_idx_base
+        end_points["token_sel_xyz"] = seed_xyz_base
+
+        # 2) Base label pass for view loss.
+        if is_training and process_grasp_labels_fn is not None:
+            _, end_points = _call_label_process(process_grasp_labels_fn, end_points, process_grasp_labels_kwargs)
+            end_points = _backup_base_view_labels(end_points)
+            if topview_debug_fn is not None:
+                end_points = topview_debug_fn(end_points)
+
+        # 3) Select center-view queries.
+        mode = str(self.config.mode).upper()
+        forced_view_inds = None
+        if is_training and torch.is_tensor(viewnet_sampled_view_inds):
+            if mode in ("A1", "A2") and bool(self.config.reuse_viewnet_sample_in_single_view_train):
+                forced_view_inds = viewnet_sampled_view_inds
+            elif mode == "A3" and bool(self.config.reuse_viewnet_sample_in_multiview_train):
+                forced_view_inds = viewnet_sampled_view_inds
+
+        seed_features_q, seed_xyz_q, token_sel_idx_q, view_rot_q, end_points = self.selector(
+            seed_features=seed_features_base,
+            seed_xyz=seed_xyz_base,
+            token_sel_idx=token_sel_idx_base,
+            view_score=end_points["view_score"],
+            end_points=end_points,
+            is_training=is_training,
+            forced_view_inds=forced_view_inds,
+        )
+        view_xyz_q = end_points["grasp_top_view_xyz"]  # [B,Q,3]
+
+        # 4) Query-level extended labels.  This must be a new label function that
+        # writes batch_grasp_*_angle tensors.  It also writes base-compatible
+        # batch_grasp_view_graspness for view debug/loss.
+        if is_training and process_grasp_labels_fn is not None:
+            _, end_points = _call_label_process(process_grasp_labels_fn, end_points, process_grasp_labels_kwargs)
+            end_points["batch_grasp_view_graspness_query"] = end_points.get("batch_grasp_view_graspness", None)
+            end_points = _add_kview_selected_view_label_debug(end_points, prefix=self.config.debug_prefix)
+            end_points = _restore_base_view_labels_for_view_loss(end_points)
+
+        # 5) Angle query expansion and grouping.
+        seed_features_a, seed_xyz_a, token_sel_idx_a, view_rot_a, end_points = self._expand_angle_queries(
+            seed_features_q, seed_xyz_q, token_sel_idx_q, view_xyz_q, end_points
+        )
+
+        group_features_a = self.group(
+            seed_features=seed_features_a,
+            token_sel_idx=token_sel_idx_a,
+            seed_xyz=seed_xyz_a,
+            top_view_rot=view_rot_a,
+            feat_map=feat_map,
+            depth_map=depth_map,
+            objectness_logits=objectness_logits,
+            graspness_map=graspness_map,
+            camera_K=camera_K,
+            end_points=end_points,
+        )
+
+        # 6) Candidate decoder.
+        end_points = self.decoder(group_features_a, end_points)
+
+        # 7) Internal PNG-only visualization.  No .npy/.npz files are saved.
+        _, _, H, W = feat_map.shape
+        self._save_cva_visualization(end_points, img=img, image_hw=(H, W))
+        self._vis_iter += 1
+        return end_points

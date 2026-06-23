@@ -35,7 +35,7 @@ from models.bip3d.models.modules.channel_mapper import ChannelMapper
 from .economicgrasp_depth_c1 import TokGraspableHead2D
 from models.modules_economicgrasp import ViewNet, Cylinder_Grouping_Global_Interaction, Grasp_Head_Local_Interaction
 from libs.pointnet2.pointnet2_utils import furthest_point_sample, gather_operation
-from utils.label_generation import process_grasp_labels, process_grasp_labels_depth_cls_compensated, batch_viewpoint_params_to_matrix
+from utils.label_generation import process_grasp_labels, process_grasp_labels_depth_cls_compensated, batch_viewpoint_params_to_matrix, process_grasp_labels_extend_angle
 from models.modules_economicgrasp import AttentionModule
 
 def gather_depth_by_img_idxs(depth_map_1hw: torch.Tensor, img_idxs: torch.Tensor):
@@ -6278,6 +6278,7 @@ from models.grasp_spatial_enhancer import GraspSpatialEnhancer
 from models.kview_query_transformer import (
     KViewQueryTransformerConfig,
     KViewQueryTransformerLocalGraspModule,
+    CenterViewAngleQueryTransformerLocalGraspModule,
 )
 
 class economicgrasp_dpt(nn.Module):
@@ -6362,6 +6363,7 @@ class economicgrasp_dpt(nn.Module):
             use_clstoken=True,
         )
 
+        self.depth_refine_dim=32
         if self.use_obs_depth:
             depth_feat_dim_map = {
                 "vits": 64,
@@ -6372,7 +6374,8 @@ class economicgrasp_dpt(nn.Module):
             self.depth_feat_dim = depth_feat_dim_map[encoder]
             self.depth_refine = DepthRefine(
                 rgb_feat_dim=self.depth_feat_dim,
-                hidden_dim=self.depth_feat_dim,
+                obs_feat_dim=self.depth_refine_dim,
+                hidden_dim=self.depth_refine_dim,
                 min_depth=self.min_depth,
                 max_depth=self.max_depth,
                 downsample=self.stride,
@@ -6425,81 +6428,81 @@ class economicgrasp_dpt(nn.Module):
         #     cylinder_radius=cylinder_radius,
         #     seed_feature_dim=self.seed_feature_dim,
         # )
-        self.local_region_group = MetricRegionCropGrouping(
-            seed_feature_dim=self.seed_feature_dim,
-            feat_dim=self.seed_feature_dim,
-            out_dim=256,
-            hidden_dim=128,
-            patch_size=12,
-            metric_radius=0.08,
-            radius_px_min=8.0,
-            radius_px_max=64.0,
-            train_scale_min=0.80,
-            train_scale_max=1.25,
-            min_depth=self.min_depth,
-            max_depth=self.max_depth,
-            depth_norm_scale=0.08,
-            detach_depth=True,
-            detach_aux_maps=True,
-            use_view_conditioned_pool=True,
-            vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'local_region_crop'),
-            vis_every=self.vis_every,
-            vis_num_seeds=4,
-            vis_seed_mode='first',
-            save_npz=True,
-        )
+        # self.local_region_group = MetricRegionCropGrouping(
+        #     seed_feature_dim=self.seed_feature_dim,
+        #     feat_dim=self.seed_feature_dim,
+        #     out_dim=256,
+        #     hidden_dim=128,
+        #     patch_size=12,
+        #     metric_radius=0.08,
+        #     radius_px_min=8.0,
+        #     radius_px_max=64.0,
+        #     train_scale_min=0.80,
+        #     train_scale_max=1.25,
+        #     min_depth=self.min_depth,
+        #     max_depth=self.max_depth,
+        #     depth_norm_scale=0.08,
+        #     detach_depth=True,
+        #     detach_aux_maps=True,
+        #     use_view_conditioned_pool=True,
+        #     vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'local_region_crop'),
+        #     vis_every=self.vis_every,
+        #     vis_num_seeds=4,
+        #     vis_seed_mode='first',
+        #     save_npz=True,
+        # )
         
         # self.grasp_head = Grasp_Head_Local_Interaction(
         #     num_angle=self.num_angle,
         #     num_depth=self.num_depth,
         # )
-        self.grasp_head = Grasp_Head_Local_Interaction_Collision(
-            num_angle=self.num_angle,
-            num_depth=self.num_depth,
-        )
+        # self.grasp_head = Grasp_Head_Local_Interaction_Collision(
+        #     num_angle=self.num_angle,
+        #     num_depth=self.num_depth,
+        # )
         # self.grasp_head = Grasp_Head_Local_Interaction_Dropout(
         #     num_angle=self.num_angle,
         #     num_depth=self.num_depth,
         # )
 
-        # self.kview_grasp_module = KViewQueryTransformerLocalGraspModule(
-        #     view_net=self.view,
-        #     num_view=self.num_view,
-        #     num_angle=self.num_angle,
-        #     num_depth=self.num_depth,
-        #     seed_feature_dim=self.seed_feature_dim,
-        #     feat_dim=self.seed_feature_dim,  # feat_grid channel dim; change if proposal_path1_enh has different C
-        #     view_dirs=self.view_dirs,
-        #     batch_viewpoint_params_to_matrix_fn=batch_viewpoint_params_to_matrix,  # direct repo function, no fallback
-        #     config=KViewQueryTransformerConfig(
-        #         mode=getattr(cfgs, 'kview_mode', 'A1'),
-        #         num_query_views=getattr(cfgs, 'kview_k', 4),
-        #         sample_temperature=getattr(cfgs, 'kview_tau', 1.0),
-        #         sample_from=getattr(cfgs, 'kview_sample_from', 'minmax_norm'),
+        self.kview_grasp_module = CenterViewAngleQueryTransformerLocalGraspModule(
+            view_net=self.view,
+            num_view=self.num_view,
+            num_angle=self.num_angle,
+            num_depth=self.num_depth,
+            seed_feature_dim=self.seed_feature_dim,
+            feat_dim=self.seed_feature_dim,  # feat_grid channel dim; change if proposal_path1_enh has different C
+            view_dirs=self.view_dirs,
+            batch_viewpoint_params_to_matrix_fn=batch_viewpoint_params_to_matrix,  # direct repo function, no fallback
+            config=KViewQueryTransformerConfig(
+                mode=getattr(cfgs, 'kview_mode', 'A1'),
+                num_query_views=getattr(cfgs, 'kview_k', 1),
+                sample_temperature=getattr(cfgs, 'kview_tau', 1.0),
+                sample_from=getattr(cfgs, 'kview_sample_from', 'minmax_norm'),
 
-        #         patch_size=getattr(cfgs, 'kview_patch_size', 8),
-        #         metric_radius=getattr(cfgs, 'kview_metric_radius', 0.08),
-        #         radius_px_min=getattr(cfgs, 'kview_radius_px_min', 8.0),
-        #         radius_px_max=getattr(cfgs, 'kview_radius_px_max', 64.0),
-        #         grouping_model_dim=getattr(cfgs, 'kview_group_dim', 256),
-        #         grouping_num_heads=getattr(cfgs, 'kview_group_heads', 4),
-        #         grouping_dropout=getattr(cfgs, 'kview_group_dropout', 0.05),
-        #         grouping_max_queries_per_chunk=getattr(cfgs, 'kview_group_chunk', 2048),
-        #         use_gripper_projected_axes=True,
+                patch_size=getattr(cfgs, 'kview_patch_size', 6),
+                metric_radius=getattr(cfgs, 'kview_metric_radius', 0.08),
+                radius_px_min=getattr(cfgs, 'kview_radius_px_min', 8.0),
+                radius_px_max=getattr(cfgs, 'kview_radius_px_max', 64.0),
+                grouping_model_dim=getattr(cfgs, 'kview_group_dim', 256),
+                grouping_num_heads=getattr(cfgs, 'kview_group_heads', 4),
+                grouping_dropout=getattr(cfgs, 'kview_group_dropout', 0.05),
+                grouping_max_queries_per_chunk=getattr(cfgs, 'kview_group_chunk', 2048),
+                use_gripper_projected_axes=True,
 
-        #         head_model_dim=getattr(cfgs, 'kview_head_dim', 256),
-        #         head_hidden_dim=getattr(cfgs, 'kview_head_hidden_dim', 64),
-        #         head_num_layers=getattr(cfgs, 'kview_head_layers', 2),
-        #         head_num_heads=getattr(cfgs, 'kview_head_heads', 4),
-        #         head_attn_dropout=getattr(cfgs, 'kview_attn_dropout', 0.05),
-        #         head_dropout_p=getattr(cfgs, 'kview_head_dropout', 0.15),
+                head_model_dim=getattr(cfgs, 'kview_head_dim', 128),
+                head_hidden_dim=getattr(cfgs, 'kview_head_hidden_dim', 64),
+                head_num_layers=getattr(cfgs, 'kview_head_layers', 2),
+                head_num_heads=getattr(cfgs, 'kview_head_heads', 4),
+                head_attn_dropout=getattr(cfgs, 'kview_attn_dropout', 0.05),
+                head_dropout_p=getattr(cfgs, 'kview_head_dropout', 0.15),
 
-        #         vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'kview_query_grasp'),
-        #         vis_every=self.vis_every,
-        #         vis_num_queries=256,
-        #         save_npz=True,
-        #     ),
-        # )
+                vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'kview_query_grasp'),
+                vis_every=self.vis_every,
+                vis_num_queries=256,
+                save_npz=False,
+            ),
+        )
 
     @staticmethod
     def _backproject_uvz(uv_b_n2, z_b_n1, K_b_33):
@@ -7279,59 +7282,24 @@ class economicgrasp_dpt(nn.Module):
             except Exception:
                 pass
 
-        # ------------------------------------------------------------------
-        # 10) view + labels + grouping + head
-        # ------------------------------------------------------------------
-        # end_points, res_feat = self.view(seed_features_graspable, end_points)
-        end_points, res_feat = self.view(
-            seed_features=seed_features_graspable,   # (B,C,M)
-            token_sel_idx=token_sel_idx,             # (B,M)
-            K=K,
-            depth_map=depth_448,                     # (B,1,448,448)
-            depth_prob=None,               # (B,D,448,448)
-            end_points=end_points,
-        )
-        seed_features_graspable = seed_features_graspable + res_feat
-
-        if self.is_training:
-            if self.use_depth_comp:
-                grasp_top_views_rot, end_points = process_grasp_labels_depth_cls_compensated(
-                    end_points,
-                    point_match_thresh=0.005,
-                    tolerated_depth=0.03,
-                    depth_start=0.01,
-                    depth_interval=0.01,
-                    approach_axis_col=0,
-                    approach_axis_sign=1.0,
-                    depth_adjust_sign=1.0,
-                )
-            else:
-                grasp_top_views_rot, end_points = process_grasp_labels(end_points)
-            end_points = self._add_topview_quality_logs(end_points)
-        else:
-            grasp_top_views_rot = end_points["grasp_top_view_rot"]
-
-        # group_features = self.cy_group(seed_xyz_graspable, seed_features_graspable, grasp_top_views_rot)
-        group_features = self.local_region_group(
-            seed_features=seed_features_graspable,
-            token_sel_idx=token_sel_idx,
-            seed_xyz=seed_xyz_graspable,
-            top_view_rot=grasp_top_views_rot,
-            feat_map=feat_grid,
-            depth_map=depth_448,
-            depth_prob=None,
-            objectness_logits=objectness_logits_448,
-            graspness_map=grasp_sel.view(B, 1, H, W).contiguous(),
-            K=K,
-            end_points=end_points,
-        )
-        
-        end_points = self.grasp_head(group_features, end_points)
+        # # ------------------------------------------------------------------
+        # # 10) view + labels + grouping + head
+        # # ------------------------------------------------------------------
+        # # end_points, res_feat = self.view(seed_features_graspable, end_points)
+        # end_points, res_feat = self.view(
+        #     seed_features=seed_features_graspable,   # (B,C,M)
+        #     token_sel_idx=token_sel_idx,             # (B,M)
+        #     K=K,
+        #     depth_map=depth_448,                     # (B,1,448,448)
+        #     depth_prob=None,               # (B,D,448,448)
+        #     end_points=end_points,
+        # )
+        # seed_features_graspable = seed_features_graspable + res_feat
 
         # if self.is_training:
         #     if self.use_depth_comp:
-        #         process_fn = process_grasp_labels_depth_cls_compensated
-        #         process_kwargs = dict(
+        #         grasp_top_views_rot, end_points = process_grasp_labels_depth_cls_compensated(
+        #             end_points,
         #             point_match_thresh=0.005,
         #             tolerated_depth=0.03,
         #             depth_start=0.01,
@@ -7341,29 +7309,52 @@ class economicgrasp_dpt(nn.Module):
         #             depth_adjust_sign=1.0,
         #         )
         #     else:
-        #         process_fn = process_grasp_labels
-        #         process_kwargs = {}
+        #         grasp_top_views_rot, end_points = process_grasp_labels(end_points)
+        #     end_points = self._add_topview_quality_logs(end_points)
         # else:
-        #     process_fn = None
-        #     process_kwargs = None
+        #     grasp_top_views_rot = end_points["grasp_top_view_rot"]
 
-        # end_points = self.kview_grasp_module(
-        #     seed_features=seed_features_graspable,  # [B,C,M]
-        #     seed_xyz=seed_xyz_graspable,            # [B,M,3]
-        #     token_sel_idx=token_sel_idx,            # [B,M]
-        #     feat_map=feat_grid,                     # [B,C,H,W]
-        #     depth_map=depth_448,                    # [B,1,H,W]
-        #     camera_K=K,                             # [B,3,3]
-        #     end_points=end_points,
-        #     is_training=self.is_training,
-        #     process_grasp_labels_fn=process_fn,
-        #     process_grasp_labels_kwargs=process_kwargs,
-        #     topview_debug_fn=self._add_topview_quality_logs if self.is_training else None,
+        # # group_features = self.cy_group(seed_xyz_graspable, seed_features_graspable, grasp_top_views_rot)
+        # group_features = self.local_region_group(
+        #     seed_features=seed_features_graspable,
+        #     token_sel_idx=token_sel_idx,
+        #     seed_xyz=seed_xyz_graspable,
+        #     top_view_rot=grasp_top_views_rot,
+        #     feat_map=feat_grid,
+        #     depth_map=depth_448,
         #     depth_prob=None,
         #     objectness_logits=objectness_logits_448,
         #     graspness_map=grasp_sel.view(B, 1, H, W).contiguous(),
-        #     img=img,
+        #     K=K,
+        #     end_points=end_points,
         # )
+        
+        # end_points = self.grasp_head(group_features, end_points)
+
+        if self.is_training:
+            process_fn = process_grasp_labels_extend_angle
+            process_kwargs  = None
+        else:
+            process_fn = None
+            process_kwargs = None
+
+        end_points = self.kview_grasp_module(
+            seed_features=seed_features_graspable,
+            seed_xyz=seed_xyz_graspable,
+            token_sel_idx=token_sel_idx,
+            feat_map=feat_grid,
+            depth_map=depth_448,
+            camera_K=K,
+            end_points=end_points,
+            is_training=self.is_training,
+            process_grasp_labels_fn=process_fn,
+            process_grasp_labels_kwargs=process_kwargs,
+            topview_debug_fn=self._add_topview_quality_logs if self.is_training else None,
+            depth_prob=None,
+            objectness_logits=objectness_logits_448,
+            graspness_map=grasp_sel.view(B, 1, H, W).contiguous(),
+            img=img,
+        )
 
         with torch.no_grad():
             end_points["D: Depth final mean"] = depth_448.detach().mean()
@@ -7567,5 +7558,136 @@ def pred_decode_collision_filter(end_points):
             pred = pred[keep_mask]
 
         grasp_preds.append(pred)
+
+    return grasp_preds
+
+
+
+def _score_expected_from_logits(score_logits: torch.Tensor) -> torch.Tensor:
+    """Return expected score from raw class logits.
+
+    Args:
+        score_logits: [C, Q] or [C, Q, A], raw logits over score bins.
+
+    Returns:
+        [Q] or [Q, A] expected score in [0, 1].
+    """
+    C = score_logits.shape[0]
+    bins = torch.linspace(
+        0.0,
+        1.0,
+        steps=C,
+        device=score_logits.device,
+        dtype=score_logits.dtype,
+    ).view(C, *([1] * (score_logits.dim() - 1)))
+    prob = F.softmax(score_logits, dim=0)
+    return (prob * bins).sum(dim=0)
+
+
+def _gather_angle_candidate(x: torch.Tensor, angle_idx: torch.Tensor) -> torch.Tensor:
+    """Gather a candidate tensor along its last angle dimension.
+
+    Args:
+        x: [C, Q, A]
+        angle_idx: [Q]
+
+    Returns:
+        [C, Q]
+    """
+    if x.dim() != 3:
+        raise ValueError(f"Expected x as [C,Q,A], got {tuple(x.shape)}")
+    C, Q, A = x.shape
+    idx = angle_idx.long().clamp(0, A - 1).view(1, Q, 1).expand(C, Q, 1)
+    return torch.gather(x, dim=-1, index=idx).squeeze(-1)
+
+
+def pred_decode_center_view_angle(end_points, batch_viewpoint_params_to_matrix_fn=None):
+    """Decode Center-View-Angle Query Transformer predictions.
+
+    This function prefers candidate-level CVA outputs.  If they are absent, it
+    falls back to collapsed compatibility outputs.
+
+    Output format for each batch item:
+        [score, width, height, depth, rot(9), center(3), obj_id]
+    """
+    if batch_viewpoint_params_to_matrix_fn is None:
+        # In your existing pred_decode file, batch_viewpoint_params_to_matrix is
+        # usually already imported.  This lookup keeps the function drop-in.
+        batch_viewpoint_params_to_matrix_fn = globals()["batch_viewpoint_params_to_matrix"]
+
+    grasp_centers = end_points["xyz_graspable"]  # [B,Q,3]
+    batch_size = grasp_centers.shape[0]
+    grasp_preds = []
+
+    for i in range(batch_size):
+        grasp_center = grasp_centers[i].float()  # [Q,3]
+        Q = grasp_center.shape[0]
+
+        # Candidate-level logits.
+        score_logits_angle = end_points["grasp_score_pred_angle"][i].float()  # [6,Q,A]
+        depth_logits_angle = end_points["grasp_depth_pred_angle"][i].float()  # [D+1,Q,A]
+        width_pred_angle = end_points["grasp_width_pred_angle"][i].float()    # [1,Q,A]
+
+        if score_logits_angle.dim() != 3:
+            raise ValueError(
+                f"grasp_score_pred_angle[{i}] must be [6,Q,A], "
+                f"got {tuple(score_logits_angle.shape)}"
+            )
+        if score_logits_angle.shape[1] != Q:
+            raise ValueError(
+                f"Q mismatch: xyz_graspable has Q={Q}, "
+                f"score_pred_angle has Q={score_logits_angle.shape[1]}"
+            )
+
+        num_angle = score_logits_angle.shape[-1]
+        score_expected_angle = _score_expected_from_logits(score_logits_angle)  # [Q,A]
+        angle_inds = torch.argmax(score_expected_angle, dim=-1)                # [Q]
+        grasp_score = torch.gather(
+            score_expected_angle,
+            dim=-1,
+            index=angle_inds.view(Q, 1),
+        )  # [Q,1]
+
+        # Gather depth/width from the score-selected angle.
+        depth_logits = _gather_angle_candidate(depth_logits_angle, angle_inds)  # [D+1,Q]
+        width_pred = _gather_angle_candidate(width_pred_angle, angle_inds)      # [1,Q]
+
+        # The last depth class is the invalid class.  Do not decode it as a
+        # physical depth bin.  Original EconomicGrasp code used all classes;
+        # for CVA this valid-bin-only decode is safer.
+        num_depth_cfg = int(getattr(cfgs, "num_depth", depth_logits.shape[0] - 1))
+        num_depth_valid = max(1, min(num_depth_cfg, depth_logits.shape[0] - 1))
+        depth_inds = torch.argmax(depth_logits[:num_depth_valid, :], dim=0)  # [Q]
+        grasp_depth = (depth_inds.float() + 1.0) * 0.01
+        grasp_depth = grasp_depth.view(Q, 1)
+
+        grasp_angle = angle_inds.float() * (np.pi / float(num_angle))  # [Q]
+
+
+        # Same width convention as EconomicGrasp-DPT.
+        grasp_width = 1.2 * width_pred.squeeze(0).view(Q, 1) / 10.0
+        grasp_width = torch.clamp(
+            grasp_width,
+            min=0.0,
+            max=float(getattr(cfgs, "grasp_max_width", 0.1)),
+        )
+
+        approaching = -end_points["grasp_top_view_xyz"][i].float()  # [Q,3]
+        if approaching.shape[0] != Q:
+            raise ValueError(
+                f"Q mismatch: xyz_graspable has Q={Q}, "
+                f"grasp_top_view_xyz has Q={approaching.shape[0]}"
+            )
+        grasp_rot = batch_viewpoint_params_to_matrix_fn(approaching, grasp_angle)
+        grasp_rot = grasp_rot.view(Q, 9)
+
+        grasp_height = 0.02 * torch.ones_like(grasp_score)
+        obj_ids = -1 * torch.ones_like(grasp_score)
+        grasp_preds.append(
+            torch.cat(
+                [grasp_score, grasp_width, grasp_height, grasp_depth, grasp_rot, grasp_center, obj_ids],
+                dim=-1,
+            )
+        )
 
     return grasp_preds

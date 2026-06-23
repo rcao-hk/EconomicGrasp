@@ -19,7 +19,11 @@ from utils.arguments import cfgs
 
 # Local Libraries
 from models.economicgrasp_bip3d import economicgrasp_bip3d, economicgrasp_dpt
-from models.loss_economicgrasp_depth_c1 import get_loss_c2_2 as get_loss_economicgrasp
+from models.loss_economicgrasp_depth_kview_transformer import get_loss as get_loss_economicgrasp
+# from models.loss_economicgrasp_depth_c1 import get_loss_c2_2 as get_loss_economicgrasp
+
+# from models.economicgrasp_dpt_ray import economicgrasp_dpt_ray as economicgrasp_dpt
+# from models.economicgrasp_dpt_ray import get_loss_ray as get_loss_economicgrasp
 
 # from models.economicgrasp_query import economicgrasp_query
 # from models.loss_economicgrasp_query import get_loss_query as get_loss_economicgrasp
@@ -256,10 +260,12 @@ class Trainer:
             augment=False,
             use_gt_depth=cfgs.use_gt_depth,
             use_fuse_depth=cfgs.use_fuse_depth,
+            graspness_mode=cfgs.graspness_mode,
             min_depth=cfgs.min_depth,
             max_depth=cfgs.max_depth,
             bin_num=cfgs.bin_num,
             depth_strides=1,
+            extend_angle=cfgs.extend_angle
         )
         self.TEST_DATASET = GraspNetMultiDataset(
             cfgs.dataset_root,
@@ -271,10 +277,12 @@ class Trainer:
             voxel_size=cfgs.voxel_size,
             use_gt_depth=False,
             use_fuse_depth=cfgs.use_fuse_depth,
+            graspness_mode=cfgs.graspness_mode,
             min_depth=cfgs.min_depth,
             max_depth=cfgs.max_depth,
             bin_num=cfgs.bin_num,
             depth_strides=1,
+            extend_angle=cfgs.extend_angle
         )
 
         self.train_sampler = DistributedSampler(
@@ -336,14 +344,6 @@ class Trainer:
             vis_dir=getattr(cfgs, 'vis_dir', None),
             vis_every=getattr(cfgs, 'vis_every', 1000),
         )
-        # self.net = economicgrasp_dpt_direct(
-        #     min_depth=cfgs.min_depth,
-        #     max_depth=cfgs.max_depth,
-        #     bin_num=cfgs.bin_num,
-        #     is_training=True,
-        #     vis_dir=os.path.join('vis', 'dpt_view_attn_direct') if self.main else None,
-        #     vis_every=1000,
-        # )
 
         # self.net = economicgrasp_query(
         #     min_depth=cfgs.min_depth,
@@ -363,12 +363,7 @@ class Trainer:
                 find_unused_parameters=True,
             )
 
-        trainable_params = [p for p in self.net.parameters() if p.requires_grad]
-        self.optimizer = optim.AdamW(
-            trainable_params,
-            lr=cfgs.learning_rate,
-            weight_decay=cfgs.weight_decay,
-        )
+        self.optimizer = self.build_optimizer()
 
         self.start_epoch = 0
         if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
@@ -380,6 +375,63 @@ class Trainer:
 
     def unwrap_model(self):
         return self.net.module if hasattr(self.net, 'module') else self.net
+
+    def build_optimizer(self):
+        depth_weight_decay = float(getattr(cfgs, 'depth_weight_decay', 0.0))
+
+        if depth_weight_decay <= 0:
+            trainable_params = [p for p in self.net.parameters() if p.requires_grad]
+            return optim.AdamW(
+                trainable_params,
+                lr=cfgs.learning_rate,
+                weight_decay=cfgs.weight_decay,
+            )
+
+        model = self.unwrap_model()
+        depth_net = getattr(model, 'depth_net', None)
+        if depth_net is None:
+            self.log_string(
+                '[WARN] cfgs.depth_weight_decay > 0, but model has no depth_net; '
+                'fall back to cfgs.weight_decay for all trainable parameters.'
+            )
+            trainable_params = [p for p in self.net.parameters() if p.requires_grad]
+            return optim.AdamW(
+                trainable_params,
+                lr=cfgs.learning_rate,
+                weight_decay=cfgs.weight_decay,
+            )
+
+        depth_params = [p for p in depth_net.parameters() if p.requires_grad]
+        depth_param_ids = {id(p) for p in depth_params}
+        grasp_params = [
+            p for p in self.net.parameters()
+            if p.requires_grad and id(p) not in depth_param_ids
+        ]
+
+        param_groups = []
+        if grasp_params:
+            param_groups.append({
+                'params': grasp_params,
+                'weight_decay': cfgs.weight_decay,
+            })
+        if depth_params:
+            param_groups.append({
+                'params': depth_params,
+                'weight_decay': depth_weight_decay,
+            })
+
+        if len(param_groups) == 0:
+            raise RuntimeError('No trainable parameters found for optimizer.')
+
+        self.log_string(
+            f'-> optimizer weight_decay: grasp={cfgs.weight_decay}, '
+            f'depth_net={depth_weight_decay}'
+        )
+        return optim.AdamW(
+            param_groups,
+            lr=cfgs.learning_rate,
+            weight_decay=cfgs.weight_decay,
+        )
 
     def log_string(self, out_str: str):
         if self.main and self.LOG_FOUT is not None:

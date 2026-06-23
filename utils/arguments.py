@@ -40,6 +40,7 @@ parser.add_argument('--max_epoch', type=int, default=20, help='Epoch to run [def
 parser.add_argument('--batch_size', type=int, default=4, help='Batch Size during training [default: 2]')
 parser.add_argument('--learning_rate', type=float, default=0.001, help='Initial learning rate [default: 0.001]')
 parser.add_argument('--weight_decay', type=float, default=0, help='Optimization L2 weight decay [default: 0]')
+parser.add_argument('--depth_weight_decay', type=float, default=0, help='Optimization L2 weight decay for depth network [default: 0]')
 parser.add_argument('--voxel_size', type=float, default=0.005, help='Voxel size (in metters)')
 
 # testing setting
@@ -80,7 +81,7 @@ parser.add_argument(
     action="store_true",
     help="Use selected-view-GT mask for angle/depth/width losses.",
 )
-
+parser.add_argument("--extend_angle", action='store_true')
 parser.add_argument(
     "--pose-loss-view-gt-thresh",
     type=float,

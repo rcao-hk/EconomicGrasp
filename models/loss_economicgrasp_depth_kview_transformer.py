@@ -13,17 +13,20 @@ def get_loss(end_points):
 
     # EcoGrasp head losses (on selected M seeds)
     view_loss, end_points  = compute_view_graspness_loss(end_points)
-    angle_loss, end_points = compute_angle_loss(end_points)
-    depth_loss, end_points = compute_depth_loss(end_points)
-    score_loss, end_points = compute_score_loss_cls(end_points)
-    width_loss, end_points = compute_width_loss(end_points)
+    # angle_loss, end_points = compute_angle_loss(end_points)
+    # depth_loss, end_points = compute_depth_loss(end_points)
+    # score_loss, end_points = compute_score_loss_cls(end_points)
+    # width_loss, end_points = compute_width_loss(end_points)
+    score_loss, end_points = compute_cva_score_loss(end_points)
+    depth_loss, end_points = compute_cva_depth_loss(end_points)
+    width_loss, end_points = compute_cva_width_loss(end_points)
     collision_loss, end_points = compute_collision_loss(end_points, True)
     
     obj_loss = cfgs.objectness_loss_weight * objectness_loss
     grasp_loss = (
         cfgs.graspness_loss_weight * graspness_loss +
         cfgs.view_loss_weight      * view_loss +
-        cfgs.angle_loss_weight     * angle_loss +
+        # cfgs.angle_loss_weight     * angle_loss +
         cfgs.depth_loss_weight     * depth_loss +
         cfgs.score_loss_weight     * score_loss +
         cfgs.width_loss_weight     * width_loss
@@ -39,6 +42,148 @@ def get_loss(end_points):
     end_points['A: Collision Loss'] = collision_loss
     end_points['A: DepthReg Loss'] = depth_reg_loss
     end_points['A: Overall Loss'] = loss
+    return loss, end_points
+
+
+def _score_to_cls(score: torch.Tensor) -> torch.Tensor:
+    # Match current EconomicGrasp score classification:
+    # grasp_score_label = (batch_grasp_score * 10 / 2).long()
+    return (score.float() * 10.0 / 2.0).long().clamp(0, 5)
+
+
+def compute_cva_score_loss(end_points):
+    criterion = nn.CrossEntropyLoss(reduction="none")
+    pred = end_points["grasp_score_pred_angle"]       # [B,6,Q,A]
+    label = _score_to_cls(end_points["batch_grasp_score_angle"])  # [B,Q,A]
+    valid = end_points["batch_grasp_angle_valid_mask"].bool()     # [B,Q,A]
+
+    loss_map = criterion(pred, label)  # [B,Q,A]
+    if valid.sum() == 0:
+        loss = 0.0 * loss_map.sum()
+        acc = 0.0 * loss_map.sum()
+    else:
+        loss = loss_map[valid].mean()
+        acc = (torch.argmax(pred, dim=1) == label)[valid].float().mean()
+
+    end_points["B: Score Loss"] = loss
+    end_points["D: Score Acc"] = acc
+
+    with torch.no_grad():
+        score_prob = F.softmax(pred, dim=1)
+        bins = torch.tensor([0, .2, .4, .6, .8, 1.0], device=pred.device, dtype=pred.dtype).view(1, 6, 1, 1)
+        score_exp = (score_prob * bins).sum(dim=1)  # [B,Q,A]
+        if valid.any():
+            end_points["D: CVA score label raw min"] = end_points["batch_grasp_score_angle"].float()[valid].min()
+            end_points["D: CVA score label raw max"] = end_points["batch_grasp_score_angle"].float()[valid].max()
+            end_points["D: CVA score expected valid"] = score_exp[valid].mean()
+            end_points["D: CVA score label valid"] = end_points["batch_grasp_score_angle"].float()[valid].mean()
+        pos = end_points.get("batch_grasp_angle_pos_mask", None)
+        if torch.is_tensor(pos):
+            pos = pos.bool()
+            neg = valid & (~pos)
+            if pos.any():
+                end_points["D: CVA score expected pos"] = score_exp[pos].mean()
+            if neg.any():
+                end_points["D: CVA score expected neg"] = score_exp[neg].mean()
+        
+        label_score = end_points["batch_grasp_score_angle"].float()  # [B,Q,A]
+        valid_q = end_points["batch_valid_mask"].bool()              # [B,Q], if available
+
+        pred_angle = score_exp.argmax(dim=-1)       # [B,Q]
+        label_angle = label_score.argmax(dim=-1)    # [B,Q]
+
+        # only evaluate where point-view has at least one positive angle
+        has_pos = end_points["batch_grasp_angle_pos_mask"].bool().any(dim=-1)
+
+        m = has_pos
+        if m.any():
+            end_points["D: CVA selected angle acc"] = (pred_angle[m] == label_angle[m]).float().mean()
+            end_points["D: CVA selected angle bin0 ratio"] = (pred_angle[m] == 0).float().mean()
+            end_points["D: CVA label best angle bin0 ratio"] = (label_angle[m] == 0).float().mean()
+
+            pred_sel_score = torch.gather(score_exp, -1, pred_angle.unsqueeze(-1)).squeeze(-1)
+            label_best_score = torch.gather(label_score, -1, label_angle.unsqueeze(-1)).squeeze(-1)
+            end_points["D: CVA selected score expected"] = pred_sel_score[m].mean()
+            end_points["D: CVA label best score"] = label_best_score[m].mean()
+    
+    return loss, end_points
+
+
+def compute_cva_depth_loss(end_points):
+    criterion = nn.CrossEntropyLoss(reduction="none")
+    pred = end_points["grasp_depth_pred_angle"]       # [B,D+1,Q,A]
+    label = end_points["batch_grasp_depth_angle"].long()  # [B,Q,A]
+    pos = end_points["batch_grasp_angle_pos_mask"].bool() # [B,Q,A]
+
+    loss_map = criterion(pred, label)
+    if pos.sum() == 0:
+        loss = 0.0 * loss_map.sum()
+        acc = 0.0 * loss_map.sum()
+    else:
+        loss = loss_map[pos].mean()
+        acc = (torch.argmax(pred, dim=1) == label)[pos].float().mean()
+
+    end_points["B: Depth Loss"] = loss
+    end_points["D: Depth Acc"] = acc
+    with torch.no_grad():
+        pred_idx = torch.argmax(pred, dim=1)
+        if pos.any():
+            end_points["D: CVA pred depth01 pos"] = (pred_idx[pos] <= 1).float().mean()
+            end_points["D: CVA label depth01 pos"] = (label[pos] <= 1).float().mean()
+    return loss, end_points
+
+
+def compute_cva_width_loss(end_points):
+    criterion = nn.SmoothL1Loss(reduction="none")
+    pred = end_points["grasp_width_pred_angle"].squeeze(1)  # [B,Q,A]
+    label = end_points["batch_grasp_width_angle"].float() * 10.0
+    pos = end_points["batch_grasp_angle_pos_mask"].bool()
+
+    loss_map = criterion(pred, label)
+    if pos.sum() == 0:
+        loss = 0.0 * loss_map.sum()
+    else:
+        loss = loss_map[pos].mean()
+
+    end_points["B: Width Loss"] = loss
+    with torch.no_grad():
+        valid = end_points.get("batch_grasp_angle_valid_mask", None)
+        if torch.is_tensor(valid) and valid.bool().any():
+            end_points["D: Width Loss allangle-valid"] = loss_map[valid.bool()].mean()
+    return loss, end_points
+
+
+def compute_cva_candidate_rank_loss(end_points, margin: float = 0.1, weight: float = 0.0):
+    """Optional score ranking: best positive angle should beat best negative angle.
+
+    Set weight=0 to disable.  This is useful if score argmax over angles is used
+    at inference and you want an explicit positive-vs-negative angle ordering.
+    """
+    if weight <= 0:
+        dev = end_points["grasp_score_pred_angle"].device
+        loss = torch.zeros((), device=dev)
+        end_points["B: CVA Rank Loss"] = loss
+        return loss, end_points
+
+    score_logits = end_points["grasp_score_pred_angle"]  # [B,6,Q,A]
+    valid = end_points["batch_grasp_angle_valid_mask"].bool()
+    pos = end_points["batch_grasp_angle_pos_mask"].bool()
+    neg = valid & (~pos)
+
+    bins = torch.tensor([0, .2, .4, .6, .8, 1.0], device=score_logits.device, dtype=score_logits.dtype).view(1, 6, 1, 1)
+    score_exp = (F.softmax(score_logits, dim=1) * bins).sum(dim=1)  # [B,Q,A]
+
+    pos_score = score_exp.masked_fill(~pos, -1e6).max(dim=-1).values
+    neg_score = score_exp.masked_fill(~neg, -1e6).max(dim=-1).values
+    has_pos = pos.any(dim=-1)
+    has_neg = neg.any(dim=-1)
+    m = has_pos & has_neg
+    if m.sum() == 0:
+        loss = 0.0 * score_exp.sum()
+    else:
+        loss = F.relu(float(margin) - pos_score[m] + neg_score[m]).mean() * float(weight)
+
+    end_points["B: CVA Rank Loss"] = loss
     return loss, end_points
 
 

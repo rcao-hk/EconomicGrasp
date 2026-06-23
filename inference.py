@@ -197,8 +197,14 @@ if cfgs.multi_modal:
     #     vis_dir=os.path.join('vis', 'bip3d_no_enhancer_test'),
     #     vis_every=500)
     from models.economicgrasp_bip3d import economicgrasp_dpt
-    from models.economicgrasp_bip3d import pred_decode_collision as pred_decode
+    from models.economicgrasp_bip3d import pred_decode_center_view_angle as pred_decode
+    # # # from models.economicgrasp_bip3d import pred_decode_collision as pred_decode
+    # # # from models.economicgrasp_bip3d import pred_decode_collision_filter as pred_decode
     # from models.economicgrasp_depth_c1 import pred_decode_c2_1 as pred_decode
+    # # from models.economicgrasp_depth_c1 import pred_decode
+    
+    # from models.economicgrasp_dpt_ray import economicgrasp_dpt_ray as economicgrasp_dpt
+    # from models.economicgrasp_dpt_ray import pred_decode_ray as pred_decode
     net = economicgrasp_dpt(
         min_depth=cfgs.min_depth,
         max_depth=cfgs.max_depth,
