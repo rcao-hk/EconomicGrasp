@@ -492,6 +492,7 @@ class economicgrasp_query(nn.Module):
         if img_feat.shape[-2:] != (H, W):
             img_feat = F.interpolate(img_feat, size=(H, W), mode='bilinear', align_corners=False)
         depth_for_enh = depth_map_pred.detach() if self.detach_depth_for_enhancer else depth_map_pred
+        img_feat = img_feat.detach() if self.detach_depth_for_enhancer else img_feat
         feat_grid_enh = self.enhancer(img_feat, depth_for_enh, K, stride=1)
 
         end_points = self.graspable_2d(feat_grid_enh, end_points)
