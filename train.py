@@ -11,7 +11,7 @@ import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 from torch.utils.tensorboard import SummaryWriter
 
 # Config
@@ -25,6 +25,7 @@ from models.economicgrasp import economicgrasp, economicgrasp_multi
 from models.economicgrasp_depth import economicgrasp_depth_baseline
 from models.loss_economicgrasp_depth_c1 import get_loss as get_loss_economicgrasp
 from dataset.graspnet_dataset import GraspNetDataset, GraspNetMultiDataset, collate_fn
+from dataset.gc6d_dataset import GraspClutter6DMultiDataset
 
 # ----------- GLOBAL CONFIG ------------
 
@@ -54,21 +55,192 @@ def my_worker_init_fn(worker_id):
 
 
 # Create Dataset and Dataloader
-# TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, camera=cfgs.camera, split='train',
-#                                 voxel_size=cfgs.voxel_size, num_points=cfgs.num_point, remove_outlier=True, augment=True)
-if cfgs.multi_modal:
-    TRAIN_DATASET = GraspNetMultiDataset(cfgs.dataset_root, camera=cfgs.camera, split='train', voxel_size=cfgs.voxel_size, num_points=cfgs.num_point, remove_outlier=True, augment=False, use_gt_depth=cfgs.use_gt_depth, use_fuse_depth=cfgs.use_fuse_depth, min_depth=cfgs.min_depth, max_depth=cfgs.max_depth, bin_num=cfgs.bin_num, depth_strides=1)
-    TEST_DATASET = GraspNetMultiDataset(cfgs.dataset_root, camera=cfgs.camera, split='test_seen', num_points=cfgs.num_point, remove_outlier=True, augment=False, voxel_size=cfgs.voxel_size, use_gt_depth=False, use_fuse_depth=cfgs.use_fuse_depth, min_depth=cfgs.min_depth, max_depth=cfgs.max_depth, bin_num=cfgs.bin_num, depth_strides=1)
+# Supported dataset modes:
+#   cfgs.dataset == 'graspnet': train/eval on GraspNet-1B.
+#   cfgs.dataset == 'gc6d':     train/eval on GraspClutter6D.
+#   cfgs.dataset == 'mixed':    train on GraspNet-1B + GC6D, eval on GraspNet-1B test_seen.
+#
+# For mixed mode, follow the UA-Depth-style dataset_root assignment:
+#   --dataset_root /path/to/graspnet,/path/to/GraspClutter6D
+#
+# GC6D-specific low-level settings are intentionally fixed here. If these were
+# changed during label generation, change the constants below as well.
+GC6D_TRAIN_SPLIT = cfgs.train_split
+GC6D_EVAL_SPLIT = getattr(cfgs, 'test_split', 'test')
+GC6D_MASK_MODE = 'workspace_depth'
+GC6D_WORKSPACE_OUTLIER = 0.02
+GC6D_WORKSPACE_POSE_MODE = 'json'
+GC6D_WORKSPACE_DEPTH_TRUNC = 0.0
+GC6D_FACTOR_DEPTH_MODE = 'bop'
+GC6D_USE_FUSE_DEPTH = False
+
+
+def _require_cfg(name):
+    if not hasattr(cfgs, name):
+        raise AttributeError(
+            f"cfgs.{name} is missing. Add --{name} to utils.arguments. "
+            "Do not silently fall back to a default here, otherwise --dataset gc6d "
+            "can be ignored and the script will run GraspNet by mistake."
+        )
+    return getattr(cfgs, name)
+
+
+def _dataset_mode():
+    mode = str(_require_cfg('dataset')).strip().lower()
+    if mode not in ('graspnet', 'gc6d', 'mixed'):
+        raise ValueError(f"Unsupported cfgs.dataset={mode}. Expected graspnet/gc6d/mixed.")
+    return mode
+
+
+def _split_dataset_roots():
+    mode = _dataset_mode()
+    if mode == 'mixed':
+        roots = [x.strip() for x in str(cfgs.dataset_root).split(',') if x.strip()]
+        if len(roots) != 2:
+            raise ValueError(
+                "For --dataset mixed, cfgs.dataset_root must be 'GRASPNET_ROOT,GC6D_ROOT'. "
+                f"Got: {cfgs.dataset_root}"
+            )
+        return roots[0], roots[1]
+    if mode == 'graspnet':
+        return cfgs.dataset_root, None
+    return None, cfgs.dataset_root
+
+
+def _graspnet_camera(camera):
+    cam = str(camera)
+    if cam == 'realsense-d435':
+        return 'realsense'
+    if cam == 'azure-kinect':
+        return 'kinect'
+    return cam
+
+
+def _gc6d_camera(camera):
+    cam = str(camera)
+    if cam == 'realsense':
+        return 'realsense-d435'
+    if cam == 'kinect':
+        return 'azure-kinect'
+    return cam
+
+
+def _extend_angle():
+    return bool(_require_cfg('extend_angle'))
+
+
+def _graspness_mode():
+    return str(_require_cfg('graspness_mode'))
+
+
+def _build_graspnet_dataset(root, train=True):
+    split = 'train' if train else 'test_seen'
+    augment = False if cfgs.multi_modal else bool(train)
+    camera = _graspnet_camera(cfgs.camera)
+
+    if cfgs.multi_modal:
+        return GraspNetMultiDataset(
+            root,
+            camera=camera,
+            split=split,
+            voxel_size=cfgs.voxel_size,
+            num_points=cfgs.num_point,
+            remove_outlier=True,
+            augment=augment,
+            use_gt_depth=cfgs.use_gt_depth if train else False,
+            use_fuse_depth=cfgs.use_fuse_depth,
+            graspness_mode=_graspness_mode(),
+            min_depth=cfgs.min_depth,
+            max_depth=cfgs.max_depth,
+            bin_num=cfgs.bin_num,
+            depth_strides=1,
+            extend_angle=_extend_angle(),
+        )
+
+    return GraspNetDataset(
+        root,
+        camera=camera,
+        split=split,
+        voxel_size=cfgs.voxel_size,
+        num_points=cfgs.num_point,
+        remove_outlier=True,
+        augment=augment,
+    )
+
+
+def _build_gc6d_dataset(root, train=True):
+    if not cfgs.multi_modal:
+        raise ValueError("GC6D dataloader is implemented for multi_modal=True only.")
+
+    return GraspClutter6DMultiDataset(
+        root=root,
+        camera=_gc6d_camera(cfgs.camera),
+        split=GC6D_TRAIN_SPLIT if train else GC6D_EVAL_SPLIT,
+        voxel_size=cfgs.voxel_size,
+        num_points=cfgs.num_point,
+        remove_outlier=None,
+        augment=False,
+        load_label=True,
+        use_gt_depth=cfgs.use_gt_depth if train else False,
+        use_fuse_depth=GC6D_USE_FUSE_DEPTH,
+        graspness_mode=_graspness_mode(),
+        min_depth=cfgs.min_depth,
+        max_depth=cfgs.max_depth,
+        bin_num=cfgs.bin_num,
+        depth_strides=1,
+        extend_angle=_extend_angle(),
+        mask_mode=GC6D_MASK_MODE,
+        workspace_outlier=GC6D_WORKSPACE_OUTLIER,
+        workspace_pose_mode=GC6D_WORKSPACE_POSE_MODE,
+        workspace_depth_trunc=GC6D_WORKSPACE_DEPTH_TRUNC,
+        factor_depth_mode=GC6D_FACTOR_DEPTH_MODE,
+    )
+
+
+def _enable_eval():
+    # Must be defined in utils.arguments, e.g.:
+    # parser.add_argument('--enable_eval', type=int, default=1, choices=[0, 1])
+    return bool(int(_require_cfg('enable_eval')))
+
+
+DATASET_MODE = _dataset_mode()
+ENABLE_EVAL = _enable_eval()
+GRASPNET_ROOT, GC6D_ROOT = _split_dataset_roots()
+
+if DATASET_MODE == 'graspnet':
+    TRAIN_DATASET = _build_graspnet_dataset(GRASPNET_ROOT, train=True)
+    TEST_DATASET = _build_graspnet_dataset(GRASPNET_ROOT, train=False) if ENABLE_EVAL else None
+elif DATASET_MODE == 'gc6d':
+    TRAIN_DATASET = _build_gc6d_dataset(GC6D_ROOT, train=True)
+    TEST_DATASET = _build_gc6d_dataset(GC6D_ROOT, train=False) if ENABLE_EVAL else None
 else:
-    TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, camera=cfgs.camera, split='train',
-                                    voxel_size=cfgs.voxel_size, num_points=cfgs.num_point, remove_outlier=True, augment=True)
-    TEST_DATASET = GraspNetDataset(cfgs.dataset_root, camera=cfgs.camera, split='test_seen',
-                                    voxel_size=cfgs.voxel_size, num_points=cfgs.num_point, remove_outlier=True, augment=False)
-    
+    GRASPNET_TRAIN_DATASET = _build_graspnet_dataset(GRASPNET_ROOT, train=True)
+    GC6D_TRAIN_DATASET = _build_gc6d_dataset(GC6D_ROOT, train=True)
+    TRAIN_DATASET = ConcatDataset([GRASPNET_TRAIN_DATASET, GC6D_TRAIN_DATASET])
+    # Mixed mode uses GraspNet test_seen for checkpoint evaluation when enabled.
+    TEST_DATASET = _build_graspnet_dataset(GRASPNET_ROOT, train=False) if ENABLE_EVAL else None
+
+log_string(f"Dataset mode: {DATASET_MODE}")
+log_string(f"Enable eval: {ENABLE_EVAL}")
+log_string(f"cfgs.dataset={cfgs.dataset}")
+log_string(f"cfgs.dataset_root={cfgs.dataset_root}")
+log_string(f"cfgs.train_split={cfgs.train_split}")
+log_string(f"GC6D_TRAIN_SPLIT={GC6D_TRAIN_SPLIT}")
+log_string(f"GC6D_EVAL_SPLIT={GC6D_EVAL_SPLIT}")
+log_string(f"Train dataset type: {type(TRAIN_DATASET)}")
+log_string(f"Test dataset type: {type(TEST_DATASET)}")
+log_string(f"Train dataset length: {len(TRAIN_DATASET)}")
+if TEST_DATASET is not None:
+    log_string(f"Test dataset length: {len(TEST_DATASET)}")
+else:
+    log_string("Test dataset length: 0 (evaluation disabled)")
+
 TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
                               num_workers=cfgs.num_workers, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
-TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
-                              num_workers=cfgs.num_workers, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
+TEST_DATALOADER = None
+if ENABLE_EVAL:
+    TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
+                                  num_workers=cfgs.num_workers, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
 # Init the model
 if cfgs.multi_modal:
     # net = economicgrasp(seed_feat_dim=512, is_training=True)
@@ -141,35 +313,6 @@ def _get_grasp_loss_value(end_points):
     if v is None:
         raise RuntimeError("'A: Grasp Loss' exists but is not a scalar.")
     return v
-
-
-def _find_last_conv2d(m: nn.Module):
-    last = None
-    for mm in m.modules():
-        if isinstance(mm, nn.Conv2d):
-            last = mm
-    return last
-
-def dbg_depthhead_grads(model):
-    head = model.depth_net.dpt.depth_head
-    last_conv = _find_last_conv2d(head)
-    print("[DBG][grad] last_conv =", last_conv)
-    print("[DBG][grad] requires_grad =", last_conv.weight.requires_grad)
-    g = last_conv.weight.grad
-    print("[DBG][grad] grad is None?" , (g is None))
-    if g is not None:
-        print("[DBG][grad] grad abs mean =", float(g.abs().mean().item()))
-
-
-def dbg_optimizer_has_depthhead(optimizer, model):
-    head = model.depth_net.dpt.depth_head
-    head_param_ids = set(id(p) for p in head.parameters())
-    opt_param_ids = set()
-    for g in optimizer.param_groups:
-        for p in g["params"]:
-            opt_param_ids.add(id(p))
-    inter = head_param_ids & opt_param_ids
-    print(f"[DBG][opt] depth_head params in optimizer: {len(inter)}/{len(head_param_ids)}")
 
 
 # TensorBoard Visualizers
@@ -271,6 +414,9 @@ def train_one_epoch():
 
 
 def evaluate_one_epoch():
+    if not ENABLE_EVAL or TEST_DATALOADER is None:
+        raise RuntimeError("evaluate_one_epoch() was called while evaluation is disabled.")
+
     stat_dict = {}
 
     net.eval()
@@ -344,7 +490,7 @@ def train(start_epoch):
         except:
             save_dict['model_state_dict'] = net.state_dict()
 
-        if epoch >= cfgs.eval_start_epoch:
+        if ENABLE_EVAL and epoch >= cfgs.eval_start_epoch:
             eval_grasp_loss = evaluate_one_epoch()
 
             # Use grasp loss only for best-checkpoint selection.
@@ -372,6 +518,14 @@ def train(start_epoch):
 
             log_string("best_epoch:{}".format(best_epoch))
             log_string("best_eval_grasp_loss:{}".format(min_grasp_loss))
+
+        elif not ENABLE_EVAL:
+            log_string("Evaluation disabled; skip test/validation for this epoch.")
+            if not EPOCH_CNT % cfgs.ckpt_save_interval:
+                torch.save(
+                    save_dict,
+                    os.path.join(cfgs.log_dir, 'checkpoint_{}.tar'.format(EPOCH_CNT))
+                )
 
         torch.save(save_dict, os.path.join(cfgs.log_dir, 'checkpoint.tar'))
         

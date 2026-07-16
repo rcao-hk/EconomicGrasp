@@ -1,0 +1,54 @@
+GC6D Object ID,GC6D Object Name,GC6D Source,GC6D Category,GraspNet Object ID,GraspNet Object Name,Overlap Group,Match Type,Confidence,Include in object-level overlap?,Notes
+1,banana,YCB,Groceries,5,011 banana,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+2,apple,YCB,Groceries,12,013 apple,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+3,pear,YCB,Groceries,15,016 pear,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+4,strawberry,YCB,Groceries,11,012 strawberry,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+5,orange,YCB,Groceries,16,017 orange,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+6,peach,YCB,Groceries,14,015 peach,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+7,plum,YCB,Groceries,17,018 plum,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+8,lemon,YCB,Groceries,13,014 lemon,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+10,cracker_box,YCB,Groceries,0,003 cracker box,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+11,sugar_box,YCB,Groceries,1,004 sugar box,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+12,mustard_bottle,YCB,Groceries,3,006 mustard bottle,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+13,tomato_soup_can,YCB,Groceries,2,005 tomato soup can,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+17,potted_meat_can,YCB,Groceries,4,010 potted meat can,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+21,knife,YCB,Kitchen,18,032 knife,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+25,mug,YCB,Kitchen,7,025 mug,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+27,bowl,YCB,Kitchen,6,024 bowl,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+30,scissors,YCB,Office,9,037 scissors,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+33,flat_screwdriver,YCB,Tools,20,044 flat screwdriver,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+34,phillips_screwdriver,YCB,Tools,19,043 phillips screwdriver,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+39,power_drill,YCB,Tools,8,035 power drill,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+40,padlock,YCB,Tools,32,038 padlock,YCB exact/normalized,Same YCB physical object; names normalized/underscored,High,Yes,
+80,logitech_M330_mouse,GraspNet-1Billion,Electronics,47,white mouse,GraspNet collected object,Same object by official GraspNet object-source alias,High,Yes,Official GraspNet page: Object id 47 is Logitech M330 mouse; obj_list calls it white mouse.
+81,Logitech M170 mouse,GraspNet-1Billion,Electronics,60,black mouse,GraspNet collected object,Same object by official GraspNet object-source alias,High,Yes,Official GraspNet page: Object id 60 is Logitech M170 mouse; obj_list calls it black mouse.
+82,Nivea Men Oil Control Face Wash,GraspNet-1Billion,Hygiene,42,nivea men oil control,GraspNet collected object,Same object by official GraspNet object-source alias,High,Yes,Name alias/brand expanded.
+83,Pantene,GraspNet-1Billion,Hygiene,62,pantene,GraspNet collected object,Same object by official GraspNet object-source alias,High,Yes,Exact brand/product name.
+84,Headshoulders Supreme,GraspNet-1Billion,Hygiene,63,head shoulders supreme,GraspNet collected object,Same object by official GraspNet object-source alias,High,Yes,Name alias/spacing differs.
+85,Thera-Med toothpaste,GraspNet-1Billion,Hygiene,64,thera med,GraspNet collected object,Same object by official GraspNet object-source alias,High,Yes,Name alias; obj_list shortens to thera med.
+86,Dove body wash,GraspNet-1Billion,Hygiene,65,dove,GraspNet collected object,Same object by official GraspNet object-source alias,High,Yes,Name alias; obj_list shortens to dove.
+87,pitcher_cap,GraspNet-1Billion,Hygiene,45,pitcher cap,GraspNet collected object,Same object by official GraspNet object-source alias,High,Yes,Same pitcher cap object.
+88,3M double sided tape,GraspNet-1Billion,Hygiene,70,tape,GraspNet collected object,Same object by official GraspNet object-source alias,High,Yes,Official GraspNet page: Object id 70 is 3M double sided tape; obj_list calls it tape.
+89,Mastrad icecube tray,GraspNet-1Billion,Hygiene,74,ice cube mould,GraspNet collected object,Same object by official GraspNet object-source alias,High,Yes,Official GraspNet page: Object id 74 is Mastrad icecube tray; obj_list calls it ice cube mould.
+90,Mouth Rinse,GraspNet-1Billion,Hygiene,37,nzskincare mouth rinse,GraspNet collected object,Same object by official GraspNet object-source alias,High,Yes,Official GraspNet page: Object id 37 is Mouth Rinse; obj_list adds nzskincare.
+91,SafeGuard Soap box,GraspNet-1Billion,Hygiene,59,soap,GraspNet collected object,Same object by official GraspNet object-source alias,Medium,Yes,"Likely SafeGuard soap based on GC6D category=Hygiene and official GraspNet id59=SafeGuard Soap; CSV name says box, so verify if physical row matters."
+92-95,Schleich Wild Life Starter (4 undifferentiated rows),GraspNet-1Billion,Toys,50,zebra,GraspNet collected object / Schleich set,Collective one-to-many; row-level order unresolved,Collective,"Yes, but not row-resolved","Official GraspNet page groups ids 50, 53, 54, and 67 under Schleich Wild Life Starter. GC6D CSV rows 92-95 do not state animal names, so do not infer 92→zebra etc without images/CAD IDs."
+92-95,Schleich Wild Life Starter (4 undifferentiated rows),GraspNet-1Billion,Toys,53,small elephant,GraspNet collected object / Schleich set,Collective one-to-many; row-level order unresolved,Collective,"Yes, but not row-resolved","Official GraspNet page groups ids 50, 53, 54, and 67 under Schleich Wild Life Starter. GC6D CSV rows 92-95 do not state animal names, so do not infer 92→zebra etc without images/CAD IDs."
+92-95,Schleich Wild Life Starter (4 undifferentiated rows),GraspNet-1Billion,Toys,54,monkey,GraspNet collected object / Schleich set,Collective one-to-many; row-level order unresolved,Collective,"Yes, but not row-resolved","Official GraspNet page groups ids 50, 53, 54, and 67 under Schleich Wild Life Starter. GC6D CSV rows 92-95 do not state animal names, so do not infer 92→zebra etc without images/CAD IDs."
+92-95,Schleich Wild Life Starter (4 undifferentiated rows),GraspNet-1Billion,Toys,67,lion,GraspNet collected object / Schleich set,Collective one-to-many; row-level order unresolved,Collective,"Yes, but not row-resolved","Official GraspNet page groups ids 50, 53, 54, and 67 under Schleich Wild Life Starter. GC6D CSV rows 92-95 do not state animal names, so do not infer 92→zebra etc without images/CAD IDs."
+96,dragon,GraspNet-1Billion,Toys,33,dragon,GraspNet collected object,Same object by official GraspNet object-source alias,High,Yes,Exact name dragon.
+97,SafeGuard Soap box,GraspNet-1Billion,Boxes,39,soap box,GraspNet collected object,Same object by official GraspNet object-source alias,High,Yes,Likely SafeGuard soap box based on GC6D category=Boxes and official GraspNet id39=SafeGuard Soap box.
+98,Toothpaste,GraspNet-1Billion,Boxes,58,darlie box,GraspNet collected object,Same object by official GraspNet object-source alias,Medium,Yes,Likely toothpaste box/darlie box; GC6D category=Boxes and official GraspNet id58=Toothpaste box.
+99,Bar clamp,DexNet,3D-prints,75,bar clamp,DexNet adversarial / 3D-print,Same DexNet adversarial object; normalized/alias match,High,Yes,Exact/normalized name.
+100,Climbing hold,DexNet,3D-prints,76,climbing hold,DexNet adversarial / 3D-print,Same DexNet adversarial object; normalized/alias match,High,Yes,Exact/normalized name.
+101,Vase,DexNet,3D-prints,87,vase,DexNet adversarial / 3D-print,Same DexNet adversarial object; normalized/alias match,High,Yes,Exact/normalized name.
+102,Nozzel,DexNet,3D-prints,81,nozzle,DexNet adversarial / 3D-print,Same DexNet adversarial object; normalized/alias match,High,Yes,Typo/alias: Nozzel -> nozzle.
+103,Pawn,DexNet,3D-prints,84,pawn,DexNet adversarial / 3D-print,Same DexNet adversarial object; normalized/alias match,High,Yes,Exact/normalized name.
+104,end tip holder,DexNet,3D-prints,77,endstop holder,DexNet adversarial / 3D-print,Same DexNet adversarial object; normalized/alias match,High,Yes,Typo/alias: end tip holder -> endstop holder.
+105,Turbin housing,DexNet,3D-prints,86,turbine housing,DexNet adversarial / 3D-print,Same DexNet adversarial object; normalized/alias match,High,Yes,Typo/alias: Turbin housing -> turbine housing.
+106,Pipe connector,DexNet,3D-prints,85,pipe connector,DexNet adversarial / 3D-print,Same DexNet adversarial object; normalized/alias match,High,Yes,Exact/normalized name.
+107,Gearbox,DexNet,3D-prints,78,gearbox,DexNet adversarial / 3D-print,Same DexNet adversarial object; normalized/alias match,High,Yes,Exact/normalized name.
+108,Connect part 1,DexNet,3D-prints,82,part1,DexNet adversarial / 3D-print,Same DexNet adversarial object; normalized/alias match,High,Yes,Alias: Connect part 1 -> part1.
+109,Connect part 2,DexNet,3D-prints,83,part3,DexNet adversarial / 3D-print,Same DexNet adversarial object; normalized/alias match,Medium,Yes,Probable alias: Connect part 2 -> GraspNet part3; verify if CAD identity matters.
+110,Mount 1,DexNet,3D-prints,79,mount1,DexNet adversarial / 3D-print,Same DexNet adversarial object; normalized/alias match,High,Yes,Normalized spacing: Mount 1 -> mount1.
+111,Mount 2,DexNet,3D-prints,80,mount2,DexNet adversarial / 3D-print,Same DexNet adversarial object; normalized/alias match,High,Yes,Normalized spacing: Mount 2 -> mount2.
