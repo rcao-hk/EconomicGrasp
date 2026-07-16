@@ -20,7 +20,8 @@ def get_loss(end_points):
     score_loss, end_points = compute_cva_score_loss(end_points)
     depth_loss, end_points = compute_cva_depth_loss(end_points)
     width_loss, end_points = compute_cva_width_loss(end_points)
-    collision_loss, end_points = compute_collision_loss(end_points, True)
+    collision_loss, end_points = compute_cva_collision_loss(end_points, balanced=False)
+    # collision_loss, end_points = compute_collision_loss(end_points, True)
     
     obj_loss = cfgs.objectness_loss_weight * objectness_loss
     grasp_loss = (
@@ -42,6 +43,426 @@ def get_loss(end_points):
     end_points['A: Collision Loss'] = collision_loss
     end_points['A: DepthReg Loss'] = depth_reg_loss
     end_points['A: Overall Loss'] = loss
+    return loss, end_points
+
+
+def get_loss_fullrot(end_points):
+    """Loss for GeometryAwareDenseFieldRotNet + FullRotation CVA decoder.
+
+    The current model has two grasp stages:
+      1. dense coarse full-rotation proposal field [B,M,V,A];
+      2. sparse fixed-rotation queries [B,Q], Q=M*L, predicting score/depth/width.
+
+    There is no separate view loss or angle CE: view and in-plane angle are
+    already part of the full-rotation proposal/query state.
+    """
+    depth_reg_loss, end_points = compute_depth_reg_loss(end_points)
+
+    objectness_loss, end_points = compute_objectness_loss_tok(end_points)
+    graspness_loss, end_points = compute_graspness_loss_tok(end_points)
+
+    # Dense coarse rotation-field supervision. This is intentionally separate
+    # from the sparse final-query score loss.
+    rotation_loss, end_points = compute_rotation_proposal_loss(end_points, False, cfgs.rotation_reg_weight, cfgs.rotation_listwise_weight)
+
+    # Final sparse full-rotation query losses. Each query already has a fixed
+    # view + in-plane angle, so no angle loss is used.
+    score_loss, end_points = compute_fullrot_score_loss(end_points)
+    depth_loss, end_points = compute_fullrot_depth_loss(end_points)
+    width_loss, end_points = compute_fullrot_width_loss(end_points)
+    # collision_loss, end_points = compute_collision_loss(end_points, balanced=True)
+
+    obj_loss = cfgs.objectness_loss_weight * objectness_loss
+    grasp_loss = (
+        cfgs.graspness_loss_weight * graspness_loss
+        + rotation_loss
+        + cfgs.depth_loss_weight * depth_loss
+        + cfgs.score_loss_weight * score_loss
+        + cfgs.width_loss_weight * width_loss
+    )
+
+    depth_reg_loss = cfgs.depth_prob_loss_weight * depth_reg_loss
+    # collision_loss = cfgs.collision_loss_weight * collision_loss
+    # grasp_loss = grasp_loss + collision_loss
+    loss = obj_loss + grasp_loss + depth_reg_loss
+
+    end_points['A: Objectness Loss'] = objectness_loss
+    end_points['A: Rotation Proposal Loss'] = rotation_loss
+    end_points['A: Grasp Loss'] = grasp_loss
+    # end_points['A: Collision Loss'] = collision_loss
+    end_points['A: DepthReg Loss'] = depth_reg_loss
+    end_points['A: Overall Loss'] = loss
+    return loss, end_points
+
+
+# def compute_rotation_proposal_loss(
+#     end_points,
+#     balanced=False,
+#     positive_threshold=0.0,
+# ):
+#     """Balanced Smooth-L1 loss for the dense coarse rotation field.
+
+#     Required labels:
+#         batch_grasp_rotation_score:      [B,M,V,A]
+#         batch_grasp_rotation_valid_mask: [B,M,V,A]
+#     """
+#     pred = end_points["rotation_score"]
+#     label = end_points["batch_grasp_rotation_score"].to(
+#         device=pred.device,
+#         dtype=pred.dtype,
+#     )
+#     valid = end_points["batch_grasp_rotation_valid_mask"].bool().to(pred.device)
+#     if pred.shape != label.shape or pred.shape != valid.shape:
+#         raise RuntimeError(
+#             f"rotation proposal shapes must match, got pred={tuple(pred.shape)}, "
+#             f"label={tuple(label.shape)}, valid={tuple(valid.shape)}"
+#         )
+
+#     loss_map = F.smooth_l1_loss(pred, label, reduction="none")
+#     if not bool(valid.any()):
+#         loss = 0.0 * loss_map.sum()
+#     elif balanced:
+#         pos = valid & (label > float(positive_threshold))
+#         neg = valid & (~pos)
+#         if bool(pos.any()) and bool(neg.any()):
+#             loss = 0.5 * (loss_map[pos].mean() + loss_map[neg].mean())
+#         else:
+#             loss = loss_map[valid].mean()
+#     else:
+#         loss = loss_map[valid].mean()
+
+#     end_points["B: Rotation Proposal Loss"] = loss
+#     with torch.no_grad():
+#         label_flat = label.flatten(2)
+#         valid_flat = valid.flatten(2)
+#         proposal = end_points["rot_proposal_inds"].long()
+#         has_pos = ((label_flat > float(positive_threshold)) & valid_flat).any(dim=-1)
+#         best = label_flat.masked_fill(~valid_flat, -1.0).argmax(dim=-1)
+#         if bool(has_pos.any()):
+#             recall = (proposal == best.unsqueeze(-1)).any(dim=-1)
+#             end_points["D: RotNet best recall@L"] = recall[has_pos].float().mean()
+#         else:
+#             end_points["D: RotNet best recall@L"] = loss.detach() * 0.0
+
+#         proposal_label = torch.gather(label_flat, dim=-1, index=proposal)
+#         proposal_valid = torch.gather(valid_flat, dim=-1, index=proposal)
+#         end_points["D: RotNet label positive ratio"] = (
+#             (proposal_label > float(positive_threshold)) & proposal_valid
+#         ).float().mean()
+#         if bool(proposal_valid.any()):
+#             end_points["D: RotNet proposal label"] = proposal_label[
+#                 proposal_valid
+#             ].mean()
+#         else:
+#             end_points["D: RotNet proposal label"] = loss.detach() * 0.0
+#     return loss, end_points
+
+def compute_rotation_proposal_loss(
+    end_points,
+    balanced=False,
+    reg_weight=1.0,
+    listwise_weight=1.0,
+):
+    """Simple dense RotNet proposal loss with only two weights.
+
+    Loss = reg_weight * balanced_smooth_l1 + listwise_weight * listwise_softmax.
+
+    Required:
+        rotation_score:                    [B,M,V,A]
+        batch_grasp_rotation_score:        [B,M,V,A], quality in [0,1]
+        batch_grasp_rotation_valid_mask:   [B,M,V,A]
+        rot_proposal_inds:                 [B,M,L]
+
+    Design choices:
+      - positive = valid & label > 0
+      - negatives = valid & label == 0
+      - SmoothL1 is balanced between positives and negatives.
+      - Listwise target is label-normalized over positive rotations only;
+        negatives remain in the softmax denominator and are thus pushed down.
+      - No temperature, margin, hard-k, or positive-threshold hyperparameter.
+    """
+    pred = end_points["rotation_score"]
+    label = end_points["batch_grasp_rotation_score"].to(
+        device=pred.device,
+        dtype=pred.dtype,
+    )
+    valid = end_points["batch_grasp_rotation_valid_mask"].bool().to(pred.device)
+    if pred.shape != label.shape or pred.shape != valid.shape:
+        raise RuntimeError(
+            f"rotation proposal shapes must match, got pred={tuple(pred.shape)}, "
+            f"label={tuple(label.shape)}, valid={tuple(valid.shape)}"
+        )
+
+    B, M, V, A = pred.shape
+    R = V * A
+    pred_flat = pred.reshape(B, M, R)
+    label_flat = label.reshape(B, M, R)
+    valid_flat = valid.reshape(B, M, R)
+    pos_flat = valid_flat & (label_flat > 0)
+    neg_flat = valid_flat & (~pos_flat)
+
+    # 1) Balanced pointwise regression preserves the dense quality landscape.
+    reg_map = F.smooth_l1_loss(pred_flat, label_flat, reduction="none")
+    if balanced and pos_flat.any() and neg_flat.any():
+        reg_loss = (
+            0.5 * reg_map[pos_flat].mean()
+            + 0.5 * reg_map[neg_flat].mean()
+        )
+    elif valid_flat.any():
+        reg_loss = reg_map[valid_flat].mean()
+    else:
+        reg_loss = 0.0 * reg_map.sum()
+
+    # 2) Listwise softmax directly optimizes relative ranking within each seed.
+    # Target distribution uses only positive rotations but negatives are in the
+    # prediction denominator, so high-scoring negatives are penalized.
+    has_pos = pos_flat.any(dim=-1)  # [B,M]
+    if bool(has_pos.any()):
+        pred_logits = pred_flat.masked_fill(~valid_flat, -1e4)
+        pred_logprob = F.log_softmax(pred_logits[has_pos], dim=-1)
+
+        target = torch.where(pos_flat, label_flat.clamp_min(0.0), torch.zeros_like(label_flat))
+        target_sum = target.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+        target_prob = target / target_sum
+        listwise_loss = -(target_prob[has_pos] * pred_logprob).sum(dim=-1).mean()
+    else:
+        listwise_loss = 0.0 * pred_flat.sum()
+
+    loss = float(reg_weight) * reg_loss + float(listwise_weight) * listwise_loss
+    end_points["B: Rotation Proposal Loss"] = loss
+
+    with torch.no_grad():
+        proposal = end_points["rot_proposal_inds"].long().to(pred.device)  # [B,M,L]
+        valid_label = label_flat.masked_fill(~valid_flat, -1.0)
+        best_label, best_idx = valid_label.max(dim=-1)  # [B,M]
+        pred_top_idx = pred_flat.masked_fill(~valid_flat, -1e4).argmax(dim=-1)
+        pred_top_label = torch.gather(label_flat, dim=-1, index=pred_top_idx.unsqueeze(-1)).squeeze(-1)
+        proposal_label = torch.gather(label_flat, dim=-1, index=proposal.clamp(0, R - 1))
+        proposal_valid = torch.gather(valid_flat, dim=-1, index=proposal.clamp(0, R - 1))
+        proposal_pos = proposal_valid & (proposal_label > 0)
+
+        z = loss.detach() * 0.0
+        end_points["D: RotNet reg loss"] = reg_loss.detach()
+        end_points["D: RotNet listwise loss"] = listwise_loss.detach()
+        end_points["D: RotNet loss reg weight"] = pred.new_tensor(float(reg_weight))
+        end_points["D: RotNet loss listwise weight"] = pred.new_tensor(float(listwise_weight))
+
+        # Dense-field label statistics.  These are renamed to avoid confusion
+        # with proposal statistics from RotNet selected queries.
+        end_points["D: RotNet dense valid ratio"] = valid_flat.float().mean()
+        end_points["D: RotNet dense positive ratio"] = pos_flat.float().mean()
+        end_points["D: RotNet seeds with positive"] = has_pos.float().mean()
+        end_points["D: RotNet balanced reg"] = float(balanced)
+        
+        if bool(has_pos.any()):
+            recall = (proposal == best_idx.unsqueeze(-1)).any(dim=-1)
+            end_points["D: RotNet best recall@L"] = recall[has_pos].float().mean()
+            end_points["D: RotNet top1 exact acc"] = (pred_top_idx[has_pos] == best_idx[has_pos]).float().mean()
+            end_points["D: RotNet top1 label"] = pred_top_label[has_pos].mean()
+            end_points["D: RotNet best label"] = best_label[has_pos].mean()
+            end_points["D: RotNet top1 label ratio"] = (
+                pred_top_label[has_pos] / best_label[has_pos].clamp_min(1e-6)
+            ).mean()
+        else:
+            end_points["D: RotNet best recall@L"] = z
+            end_points["D: RotNet top1 exact acc"] = z
+            end_points["D: RotNet top1 label"] = z
+            end_points["D: RotNet best label"] = z
+            end_points["D: RotNet top1 label ratio"] = z
+
+        # Proposal statistics; this replaces the old misleading
+        # "RotNet label positive ratio" key.
+        end_points["D: RotNet proposal positive ratio"] = proposal_pos.float().mean()
+        if bool(proposal_valid.any()):
+            end_points["D: RotNet proposal label"] = proposal_label[proposal_valid].mean()
+        else:
+            end_points["D: RotNet proposal label"] = z
+    return loss, end_points
+
+def _fullrot_required_mask(end_points, key):
+    if key not in end_points:
+        raise KeyError(f"Full-rotation decoder training requires end_points['{key}']")
+    return end_points[key].bool()
+
+
+def compute_fullrot_score_loss(end_points, balanced=False):
+    """Score CE for sparse fixed-rotation queries.
+
+    Required:
+      grasp_score_pred:                    [B,6,Q]
+      batch_grasp_score:                  [B,Q], score in [0,1]
+      batch_rotation_query_valid_mask:    [B,Q]
+      batch_rotation_query_pos_mask:      [B,Q]
+
+    Positive/negative balancing is useful because RotNet proposals can contain
+    many zero-score rotations, especially early in training.
+    """
+    pred = end_points['grasp_score_pred']
+    label_score = end_points['batch_grasp_score'].to(pred.device).float()
+    valid = _fullrot_required_mask(
+        end_points, 'batch_rotation_query_valid_mask'
+    ).to(pred.device)
+    pos = _fullrot_required_mask(
+        end_points, 'batch_rotation_query_pos_mask'
+    ).to(pred.device) & valid
+    neg = valid & (~pos)
+
+    if pred.dim() != 3 or pred.shape[1] != 6:
+        raise RuntimeError(
+            f'grasp_score_pred must be [B,6,Q], got {tuple(pred.shape)}'
+        )
+    if label_score.shape != pred.shape[:1] + pred.shape[2:]:
+        raise RuntimeError(
+            f'batch_grasp_score shape {tuple(label_score.shape)} does not '
+            f'match score prediction [B,Q]={pred.shape[:1] + pred.shape[2:]}'
+        )
+    if valid.shape != label_score.shape or pos.shape != label_score.shape:
+        raise RuntimeError(
+            'Full-rotation score labels/masks must all be [B,Q], got '
+            f'label={tuple(label_score.shape)}, valid={tuple(valid.shape)}, '
+            f'pos={tuple(pos.shape)}'
+        )
+
+    label = _score_to_cls(label_score)
+    loss_map = F.cross_entropy(pred, label, reduction='none')
+
+    if not bool(valid.any()):
+        loss = 0.0 * loss_map.sum()
+        acc = 0.0 * loss_map.sum()
+    elif balanced and bool(pos.any()) and bool(neg.any()):
+        loss = 0.5 * (loss_map[pos].mean() + loss_map[neg].mean())
+        with torch.no_grad():
+            pred_cls = pred.argmax(dim=1)
+            acc = (pred_cls[valid] == label[valid]).float().mean()
+    else:
+        loss = loss_map[valid].mean()
+        with torch.no_grad():
+            pred_cls = pred.argmax(dim=1)
+            acc = (pred_cls[valid] == label[valid]).float().mean()
+
+    end_points['B: Score Loss'] = loss
+    end_points['D: Score Acc'] = acc
+
+    with torch.no_grad():
+        score_prob = F.softmax(pred, dim=1)
+        bins = torch.tensor(
+            [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+            device=pred.device,
+            dtype=pred.dtype,
+        ).view(1, 6, 1)
+        score_expected = (score_prob * bins).sum(dim=1)
+        end_points['D: FullRot query valid ratio'] = valid.float().mean()
+        end_points['D: FullRot query pos ratio'] = pos.float().mean()
+        if bool(valid.any()):
+            end_points['D: FullRot score label min'] = label_score[valid].min()
+            end_points['D: FullRot score label max'] = label_score[valid].max()
+            end_points['D: FullRot score expected valid'] = score_expected[valid].mean()
+        if bool(pos.any()):
+            end_points['D: FullRot score expected pos'] = score_expected[pos].mean()
+        else:
+            end_points['D: FullRot score expected pos'] = 0.0 * score_expected.sum()
+        if bool(neg.any()):
+            end_points['D: FullRot score expected neg'] = score_expected[neg].mean()
+        else:
+            end_points['D: FullRot score expected neg'] = 0.0 * score_expected.sum()
+
+        # Final local-decoder ranking among L proposals that share one seed.
+        if (
+            'fullrot_query_base_m' in end_points
+            and 'fullrot_query_num_proposals' in end_points
+        ):
+            M = int(end_points['fullrot_query_base_m'])
+            L = int(end_points['fullrot_query_num_proposals'])
+            B, Q = score_expected.shape
+            if Q == M * L:
+                score_bml = score_expected.view(B, M, L)
+                label_bml = label_score.view(B, M, L)
+                valid_bml = valid.view(B, M, L)
+                pred_rank = score_bml.argmax(dim=-1)
+                label_rank = label_bml.masked_fill(~valid_bml, -1.0).argmax(dim=-1)
+                has_valid = valid_bml.any(dim=-1)
+                if bool(has_valid.any()):
+                    end_points['D: FullRot selected proposal acc'] = (
+                        pred_rank[has_valid] == label_rank[has_valid]
+                    ).float().mean()
+                else:
+                    end_points['D: FullRot selected proposal acc'] = 0.0 * score_expected.sum()
+
+    return loss, end_points
+
+
+def compute_fullrot_depth_loss(end_points):
+    """Depth CE only for positive fixed-rotation queries."""
+    pred = end_points['grasp_depth_pred']
+    label = end_points['batch_grasp_depth'].long().to(pred.device)
+    valid = _fullrot_required_mask(
+        end_points, 'batch_rotation_query_valid_mask'
+    ).to(pred.device)
+    pos = _fullrot_required_mask(
+        end_points, 'batch_rotation_query_pos_mask'
+    ).to(pred.device) & valid
+
+    if pred.dim() != 3:
+        raise RuntimeError(
+            f'grasp_depth_pred must be [B,D+1,Q], got {tuple(pred.shape)}'
+        )
+    if label.shape != pred.shape[:1] + pred.shape[2:]:
+        raise RuntimeError(
+            f'batch_grasp_depth shape {tuple(label.shape)} does not match '
+            f'depth prediction [B,Q]={pred.shape[:1] + pred.shape[2:]}'
+        )
+
+    loss_map = F.cross_entropy(pred, label, reduction='none')
+    if not bool(pos.any()):
+        loss = 0.0 * loss_map.sum()
+        acc = 0.0 * loss_map.sum()
+    else:
+        loss = loss_map[pos].mean()
+        with torch.no_grad():
+            pred_idx = pred.argmax(dim=1)
+            acc = (pred_idx[pos] == label[pos]).float().mean()
+
+    end_points['B: Depth Loss'] = loss
+    end_points['D: Depth Acc'] = acc
+    with torch.no_grad():
+        pred_idx = pred[:, :-1, :].argmax(dim=1)
+        if bool(pos.any()):
+            end_points['D: FullRot pred depth01 pos'] = (
+                pred_idx[pos] <= 1
+            ).float().mean()
+            end_points['D: FullRot label depth01 pos'] = (
+                label[pos] <= 1
+            ).float().mean()
+    return loss, end_points
+
+
+def compute_fullrot_width_loss(end_points):
+    """Width Smooth-L1 only for positive fixed-rotation queries."""
+    pred = end_points['grasp_width_pred'].squeeze(1)
+    label = end_points['batch_grasp_width'].to(pred.device).float() * 10.0
+    valid = _fullrot_required_mask(
+        end_points, 'batch_rotation_query_valid_mask'
+    ).to(pred.device)
+    pos = _fullrot_required_mask(
+        end_points, 'batch_rotation_query_pos_mask'
+    ).to(pred.device) & valid
+
+    if pred.shape != label.shape:
+        raise RuntimeError(
+            f'width prediction/label mismatch: pred={tuple(pred.shape)}, '
+            f'label={tuple(label.shape)}'
+        )
+
+    loss_map = F.smooth_l1_loss(pred, label, reduction='none')
+    if not bool(pos.any()):
+        loss = 0.0 * loss_map.sum()
+    else:
+        loss = loss_map[pos].mean()
+
+    end_points['B: Width Loss'] = loss
+    with torch.no_grad():
+        if bool(valid.any()):
+            end_points['D: Width Loss fullrot-valid'] = loss_map[valid].mean()
     return loss, end_points
 
 
@@ -150,6 +571,122 @@ def compute_cva_width_loss(end_points):
         valid = end_points.get("batch_grasp_angle_valid_mask", None)
         if torch.is_tensor(valid) and valid.bool().any():
             end_points["D: Width Loss allangle-valid"] = loss_map[valid.bool()].mean()
+    return loss, end_points
+
+
+def compute_cva_collision_loss(end_points, balanced=False):
+    """
+    Angle-level CVA collision loss.
+
+    Required:
+      - grasp_collision_pred_angle:   [B,1,Q,A]
+      - batch_grasp_collision_angle:  [B,Q,A]
+      - batch_grasp_angle_valid_mask: [B,Q,A]
+
+    Label convention:
+      - 1: collision / invalid grasp
+      - 0: non-collision / valid grasp
+
+    Args:
+        end_points: dict
+        balanced: if True, average positive and negative losses equally.
+
+    Returns:
+        loss, end_points
+    """
+    required_keys = [
+        "grasp_collision_pred_angle",
+        "batch_grasp_collision_angle",
+        "batch_grasp_angle_valid_mask",
+    ]
+    for k in required_keys:
+        if k not in end_points:
+            raise KeyError(f"compute_cva_collision_loss requires end_points['{k}'].")
+
+    pred = end_points["grasp_collision_pred_angle"]  # [B,1,Q,A]
+    if pred.dim() != 4 or pred.shape[1] != 1:
+        raise ValueError(
+            "grasp_collision_pred_angle must be [B,1,Q,A], "
+            f"got {tuple(pred.shape)}"
+        )
+
+    pred = pred.squeeze(1)  # [B,Q,A]
+
+    label = end_points["batch_grasp_collision_angle"].to(
+        device=pred.device,
+        dtype=pred.dtype,
+    )  # [B,Q,A]
+
+    valid_mask = end_points["batch_grasp_angle_valid_mask"].bool().to(pred.device)
+
+    if label.shape != pred.shape:
+        raise ValueError(
+            "batch_grasp_collision_angle shape must match pred [B,Q,A], "
+            f"got label={tuple(label.shape)}, pred={tuple(pred.shape)}"
+        )
+
+    if valid_mask.shape != pred.shape:
+        raise ValueError(
+            "batch_grasp_angle_valid_mask shape must match pred [B,Q,A], "
+            f"got valid_mask={tuple(valid_mask.shape)}, pred={tuple(pred.shape)}"
+        )
+
+    loss_map = F.binary_cross_entropy_with_logits(
+        pred,
+        label,
+        reduction="none",
+    )  # [B,Q,A]
+
+    if valid_mask.sum() == 0:
+        loss = 0.0 * loss_map.sum()
+        acc = 0.0 * loss_map.sum()
+        pos_ratio = 0.0 * loss_map.sum()
+        pred_pos_ratio = 0.0 * loss_map.sum()
+        precision = 0.0 * loss_map.sum()
+        recall = 0.0 * loss_map.sum()
+    else:
+        if balanced:
+            pos_mask = valid_mask & (label > 0.5)
+            neg_mask = valid_mask & (label <= 0.5)
+
+            if pos_mask.any() and neg_mask.any():
+                loss = 0.5 * (
+                    loss_map[pos_mask].mean()
+                    + loss_map[neg_mask].mean()
+                )
+            else:
+                loss = loss_map[valid_mask].mean()
+        else:
+            loss = loss_map[valid_mask].mean()
+
+        with torch.no_grad():
+            prob = torch.sigmoid(pred)
+            pred_label = prob > 0.5
+            label_bool = label > 0.5
+
+            acc = (
+                pred_label[valid_mask]
+                == label_bool[valid_mask]
+            ).float().mean()
+
+            pos_ratio = label_bool[valid_mask].float().mean()
+            pred_pos_ratio = pred_label[valid_mask].float().mean()
+
+            tp = (pred_label & label_bool & valid_mask).float().sum()
+            fp = (pred_label & (~label_bool) & valid_mask).float().sum()
+            fn = ((~pred_label) & label_bool & valid_mask).float().sum()
+
+            precision = tp / (tp + fp + 1e-6)
+            recall = tp / (tp + fn + 1e-6)
+
+    end_points["B: CVA Collision Loss"] = loss
+
+    end_points["D: CVA Collision Label PosRatio"] = pos_ratio
+    end_points["D: CVA Collision Pred PosRatio"] = pred_pos_ratio
+    end_points["D: CVA Collision Acc"] = acc
+    end_points["D: CVA Collision Precision"] = precision
+    end_points["D: CVA Collision Recall"] = recall
+
     return loss, end_points
 
 
@@ -507,7 +1044,7 @@ def compute_pose_loss_mask(end_points, valid_mask):
     return pose_mask
 
 
-def compute_collision_loss(end_points, balanced=True):
+def compute_collision_loss(end_points, balanced=False):
     """
     Strict selected collision loss.
 

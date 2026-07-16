@@ -2381,16 +2381,8 @@ class CenterViewAngleCandidateDecoder(nn.Module):
         for layer in self.layers:
             x = layer(x)
 
-        # Preserve the angle-candidate representation before the legacy
-        # depth/width/score branches collapse operation factors.  The
-        # evaluator-aligned joint utility scorer combines this feature with a
-        # concrete depth candidate and exact evaluator supervision.  Do not
-        # detach here: the same endpoint can later support end-to-end fine-tuning.
-        angle_feature = x.view(B, Q, A, self.hidden_dim).contiguous()
-        end_points["cva_angle_feature"] = angle_feature
-
         x = (
-            angle_feature
+            x.view(B, Q, A, self.hidden_dim)
             .reshape(B, Q * A, self.hidden_dim)
             .transpose(1, 2)
             .contiguous()

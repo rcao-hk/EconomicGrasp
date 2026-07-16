@@ -1254,3 +1254,368 @@ def process_grasp_labels_extend_angle(end_points):
             end_points["D: ExtAngle width pos mean"] = z
 
     return batch_grasp_views_rot, end_points
+
+
+@torch.no_grad()
+def process_grasp_rotation_field_labels(end_points):
+    """Generate dense [B,M,V,A] supervision for GeometryAwareDenseFieldRotNet.
+
+    Call this while ``xyz_graspable`` is still the base seed set [B,M,3],
+    before RotNet proposals are expanded to Q=M*L.
+
+    This function reuses the same helpers as process_grasp_labels_extend_angle:
+      _build_view_angle_rot_grid
+      _build_angle_alignment_perm
+      _align_topk_angle_labels
+      _require_extended
+      _compute_pointwise_dists
+      transform_point_cloud
+      knn_points
+
+    Outputs:
+      batch_grasp_rotation_score:        [B,M,V,A]
+      batch_grasp_rotation_valid_mask:   [B,M,V,A]
+      batch_grasp_rotation_pos_mask:     [B,M,V,A]
+
+    Valid-mask semantics:
+      matched seed + stored top-view -> all angles are valid supervision;
+      score > 0 is positive, score == 0 is a valid negative;
+      unmatched seed or unavailable view is ignored.
+    """
+    if cfgs is None:
+        raise RuntimeError(
+            "cfgs is unavailable. Import utils.arguments.cfgs or place this "
+            "function in the same label-processing module."
+        )
+
+    num_view = int(cfgs.num_view)
+    num_angle = int(cfgs.num_angle)
+    point_match_thresh = float(
+        getattr(cfgs, "grasp_label_point_match_thresh", 0.005)
+    )
+
+    seed_xyzs = end_points["xyz_graspable"]  # [B,M,3]
+    if seed_xyzs.dim() != 3 or seed_xyzs.shape[-1] != 3:
+        raise RuntimeError(
+            f"xyz_graspable must be [B,M,3], got {tuple(seed_xyzs.shape)}"
+        )
+
+    batch_size, num_seed, _ = seed_xyzs.shape
+    device = seed_xyzs.device
+    dtype = seed_xyzs.dtype
+
+    canonical_views, canonical_rot = _build_view_angle_rot_grid(
+        num_view=num_view,
+        num_angle=num_angle,
+        device=device,
+        dtype=dtype,
+    )
+
+    batch_rotation_score = []
+    batch_rotation_valid_mask = []
+    batch_rotation_pos_mask = []
+    batch_rotation_points = []
+    batch_point_valid_mask = []
+
+    for i in range(batch_size):
+        seed_xyz = seed_xyzs[i]  # [M,3]
+        poses = end_points["object_poses_list"][i]
+
+        grasp_points_merged = []
+        top_view_index_merged = []
+        grasp_score_angle_merged = []
+
+        if len(poses) == 0:
+            raise RuntimeError(f"Batch item {i} contains no object labels")
+
+        for obj_idx, pose in enumerate(poses):
+            pose = pose.to(device=device, dtype=dtype)
+            grasp_points = end_points["grasp_points_list"][i][obj_idx].to(
+                device=device,
+                dtype=dtype,
+            )
+            top_view_index = end_points["top_view_index_list"][i][obj_idx].long().to(
+                device=device
+            )  # [P,K], object-frame view ids
+            grasp_score_angle = _require_extended(
+                "grasp_scores_list",
+                end_points["grasp_scores_list"][i][obj_idx].to(
+                    device=device,
+                    dtype=dtype,
+                ),
+                num_angle,
+            )  # [P,K,A]
+
+            if top_view_index.shape != grasp_score_angle.shape[:2]:
+                raise RuntimeError(
+                    f"top_view_index {tuple(top_view_index.shape)} and score "
+                    f"[P,K]={tuple(grasp_score_angle.shape[:2])} do not match"
+                )
+            if grasp_score_angle.numel() > 0:
+                score_min = float(grasp_score_angle.min())
+                score_max = float(grasp_score_angle.max())
+                if score_min < -1e-5 or score_max > 1.0001:
+                    raise RuntimeError(
+                        "grasp_scores_list must be decoded to [0,1]. "
+                        f"Observed [{score_min:.4f}, {score_max:.4f}]. "
+                        "Divide uint8 score*10 labels by 10 in the dataloader."
+                    )
+
+            num_grasp_points = grasp_points.shape[0]
+            grasp_points_trans = transform_point_cloud(grasp_points, pose, "3x4")
+            grasp_views_trans = transform_point_cloud(
+                canonical_views,
+                pose[:3, :3],
+                "3x3",
+            )
+
+            # view_inds[scene_view] = object_view.
+            _, view_inds, _ = knn_points(
+                canonical_views.unsqueeze(0),
+                grasp_views_trans.unsqueeze(0),
+                K=1,
+            )
+            view_inds = view_inds.squeeze(0).squeeze(-1).long()  # [V]
+
+            # Convert each stored object-frame top-view id to scene canonical id.
+            top_view_index_trans = torch.full_like(top_view_index, -1)
+            point_id, slot_id, scene_view_id = torch.where(
+                view_inds.view(1, 1, num_view)
+                == top_view_index.unsqueeze(-1)
+            )
+            top_view_index_trans[point_id, slot_id] = scene_view_id
+
+            # Full-rotation angle alignment after applying object pose.
+            transformed_rot = torch.matmul(
+                pose[:3, :3],
+                canonical_rot.reshape(-1, 3, 3),
+            ).view(num_view, num_angle, 3, 3)
+            transformed_rot_scene = torch.index_select(
+                transformed_rot,
+                0,
+                view_inds,
+            )
+            angle_perm = _build_angle_alignment_perm(
+                canonical_rot,
+                transformed_rot_scene,
+            )  # [V,A_scene] -> A_object
+            grasp_score_angle = _align_topk_angle_labels(
+                grasp_score_angle,
+                top_view_index_trans,
+                angle_perm,
+            ).to(dtype)
+
+            grasp_points_merged.append(grasp_points_trans)
+            top_view_index_merged.append(top_view_index_trans)
+            grasp_score_angle_merged.append(grasp_score_angle)
+
+        grasp_points_merged = torch.cat(grasp_points_merged, dim=0)       # [Pall,3]
+        top_view_index_merged = torch.cat(top_view_index_merged, dim=0) # [Pall,K]
+        grasp_score_angle_merged = torch.cat(
+            grasp_score_angle_merged,
+            dim=0,
+        )  # [Pall,K,A]
+
+        # Match each base seed to one extended-label point.
+        _, nn_inds, _ = knn_points(
+            seed_xyz.unsqueeze(0),
+            grasp_points_merged.unsqueeze(0),
+            K=1,
+        )
+        nn_inds = nn_inds.squeeze(0).squeeze(-1).long()
+
+        matched_points = torch.index_select(
+            grasp_points_merged,
+            0,
+            nn_inds,
+        )
+        top_view_index_nn = torch.index_select(
+            top_view_index_merged,
+            0,
+            nn_inds,
+        )  # [M,K]
+        score_angle_nn = torch.index_select(
+            grasp_score_angle_merged,
+            0,
+            nn_inds,
+        )  # [M,K,A]
+
+        # Scatter stored top-K view-angle labels into a dense [M,V,A] field.
+        dense_score = torch.zeros(
+            (num_seed, num_view, num_angle),
+            device=device,
+            dtype=dtype,
+        )
+        dense_view_valid = torch.zeros(
+            (num_seed, num_view, num_angle),
+            device=device,
+            dtype=torch.bool,
+        )
+
+        seed_id, slot_id = torch.where(top_view_index_nn >= 0)
+        if seed_id.numel() > 0:
+            scene_view_id = top_view_index_nn[seed_id, slot_id].long()
+            dense_score[seed_id, scene_view_id, :] = score_angle_nn[
+                seed_id,
+                slot_id,
+                :,
+            ]
+            dense_view_valid[seed_id, scene_view_id, :] = True
+
+        point_dist = _compute_pointwise_dists(seed_xyz, matched_points)
+        point_valid = point_dist < point_match_thresh
+        dense_valid = dense_view_valid & point_valid.view(num_seed, 1, 1)
+        dense_score = torch.where(
+            dense_valid,
+            dense_score,
+            torch.zeros_like(dense_score),
+        )
+        dense_pos = dense_valid & (dense_score > 0)
+
+        # Per-seed top-view remapping coverage before dense scatter.
+        # valid_slots: number of stored top-K slots that found a scene-view id.
+        # unique_views: number of unique scene-view ids after scatter.
+        # duplicate_slots: valid slots lost because multiple slots mapped to the same scene view.
+        # missing_slots: top-K slots that remained -1 after view remapping.
+        topview_valid_slot_count = (top_view_index_nn >= 0).float().sum(dim=1)  # [M]
+        unique_view_count = dense_view_valid.any(dim=-1).float().sum(dim=1)      # [M]
+        duplicate_slot_count = (topview_valid_slot_count - unique_view_count).clamp_min(0.0)
+        missing_slot_count = float(top_view_index_nn.shape[1]) - topview_valid_slot_count
+
+        tmp_valid_slots = end_points.get("_rotlabel_valid_slots_per_seed", [])
+        tmp_duplicate_slots = end_points.get("_rotlabel_duplicate_slots_per_seed", [])
+        tmp_missing_slots = end_points.get("_rotlabel_missing_slots_per_seed", [])
+        tmp_valid_slots.append(topview_valid_slot_count)
+        tmp_duplicate_slots.append(duplicate_slot_count)
+        tmp_missing_slots.append(missing_slot_count)
+        end_points["_rotlabel_valid_slots_per_seed"] = tmp_valid_slots
+        end_points["_rotlabel_duplicate_slots_per_seed"] = tmp_duplicate_slots
+        end_points["_rotlabel_missing_slots_per_seed"] = tmp_missing_slots
+
+        batch_rotation_score.append(dense_score)
+        batch_rotation_valid_mask.append(dense_valid)
+        batch_rotation_pos_mask.append(dense_pos)
+        batch_rotation_points.append(matched_points)
+        batch_point_valid_mask.append(point_valid)
+
+    batch_rotation_score = torch.stack(batch_rotation_score, dim=0).contiguous()
+    batch_rotation_valid_mask = torch.stack(
+        batch_rotation_valid_mask,
+        dim=0,
+    ).contiguous()
+    batch_rotation_pos_mask = torch.stack(
+        batch_rotation_pos_mask,
+        dim=0,
+    ).contiguous()
+    batch_rotation_points = torch.stack(batch_rotation_points, dim=0).contiguous()
+    batch_point_valid_mask = torch.stack(
+        batch_point_valid_mask,
+        dim=0,
+    ).contiguous()
+
+    end_points["batch_grasp_rotation_score"] = batch_rotation_score
+    end_points["batch_grasp_rotation_valid_mask"] = (
+        batch_rotation_valid_mask
+    )
+    end_points["batch_grasp_rotation_pos_mask"] = batch_rotation_pos_mask
+    end_points["batch_grasp_rotation_point"] = batch_rotation_points
+    end_points["batch_grasp_rotation_point_valid"] = batch_point_valid_mask
+
+    # Stack temporary per-seed view-remapping diagnostics for logging.
+    if isinstance(end_points.get("_rotlabel_valid_slots_per_seed", None), list):
+        end_points["_rotlabel_valid_slots_per_seed"] = torch.stack(
+            end_points["_rotlabel_valid_slots_per_seed"], dim=0
+        ).to(device=batch_rotation_score.device)
+    if isinstance(end_points.get("_rotlabel_duplicate_slots_per_seed", None), list):
+        end_points["_rotlabel_duplicate_slots_per_seed"] = torch.stack(
+            end_points["_rotlabel_duplicate_slots_per_seed"], dim=0
+        ).to(device=batch_rotation_score.device)
+    if isinstance(end_points.get("_rotlabel_missing_slots_per_seed", None), list):
+        end_points["_rotlabel_missing_slots_per_seed"] = torch.stack(
+            end_points["_rotlabel_missing_slots_per_seed"], dim=0
+        ).to(device=batch_rotation_score.device)
+
+    with torch.no_grad():
+        end_points["D: RotLabel point valid ratio"] = (
+            batch_point_valid_mask.float().mean()
+        )
+        end_points["D: RotLabel field valid ratio"] = (
+            batch_rotation_valid_mask.float().mean()
+        )
+        # Dense label statistics over the full [B,M,V,A] rotation field.
+        # Keep this name distinct from RotNet proposal-positive statistics,
+        # which are computed only over the selected top-L proposals.
+        end_points["D: RotLabel dense positive ratio"] = (
+            batch_rotation_pos_mask.float().mean()
+        )
+        # Backward-compatible alias; remove after log parsers are updated.
+        end_points["D: RotLabel positive ratio"] = end_points[
+            "D: RotLabel dense positive ratio"
+        ]
+
+        if batch_rotation_valid_mask.any():
+            end_points["D: RotLabel score valid mean"] = (
+                batch_rotation_score[batch_rotation_valid_mask].mean()
+            )
+        else:
+            z = batch_rotation_score.sum() * 0.0
+            end_points["D: RotLabel score valid mean"] = z
+
+        has_positive = batch_rotation_pos_mask.flatten(2).any(dim=-1)
+        end_points["D: RotLabel seeds with positive"] = (
+            has_positive.float().mean()
+        )
+
+        best_score = batch_rotation_score.flatten(2).max(dim=-1).values
+        if batch_point_valid_mask.any():
+            end_points["D: RotLabel best score"] = (
+                best_score[batch_point_valid_mask].mean()
+            )
+        else:
+            end_points["D: RotLabel best score"] = best_score.sum() * 0.0
+
+        # View-coverage diagnostics.  These are used to diagnose the common
+        # case where a supposedly full-300 view label field only covers ~272
+        # unique scene views after object-to-scene view remapping.
+        valid_views = batch_rotation_valid_mask.any(dim=-1).float().sum(dim=-1)  # [B,M]
+        valid_slots = end_points.get("_rotlabel_valid_slots_per_seed", None)
+        duplicate_slots = end_points.get("_rotlabel_duplicate_slots_per_seed", None)
+        missing_slots = end_points.get("_rotlabel_missing_slots_per_seed", None)
+        if batch_point_valid_mask.any():
+            m = batch_point_valid_mask
+            end_points["D: RotLabel unique valid views per seed"] = valid_views[m].mean()
+            # Backward-compatible alias.
+            end_points["D: RotLabel valid views per seed"] = end_points[
+                "D: RotLabel unique valid views per seed"
+            ]
+            end_points["D: RotLabel missing unique views per seed"] = (
+                float(num_view) - valid_views[m]
+            ).mean()
+            end_points["D: RotLabel unique view coverage"] = (
+                valid_views[m] / float(num_view)
+            ).mean()
+            if torch.is_tensor(valid_slots):
+                end_points["D: RotLabel topview valid slots per seed"] = valid_slots[m].float().mean()
+            if torch.is_tensor(missing_slots):
+                end_points["D: RotLabel topview missing slots per seed"] = missing_slots[m].float().mean()
+            if torch.is_tensor(duplicate_slots):
+                end_points["D: RotLabel topview duplicate slots per seed"] = duplicate_slots[m].float().mean()
+        else:
+            z = valid_views.sum() * 0.0
+            end_points["D: RotLabel unique valid views per seed"] = z
+            end_points["D: RotLabel valid views per seed"] = z
+            end_points["D: RotLabel missing unique views per seed"] = z
+            end_points["D: RotLabel unique view coverage"] = z
+            if torch.is_tensor(valid_slots):
+                end_points["D: RotLabel topview valid slots per seed"] = z
+            if torch.is_tensor(missing_slots):
+                end_points["D: RotLabel topview missing slots per seed"] = z
+            if torch.is_tensor(duplicate_slots):
+                end_points["D: RotLabel topview duplicate slots per seed"] = z
+
+        # Do not keep temporary tensors in end_points after logging.
+        end_points.pop("_rotlabel_valid_slots_per_seed", None)
+        end_points.pop("_rotlabel_duplicate_slots_per_seed", None)
+        end_points.pop("_rotlabel_missing_slots_per_seed", None)
+
+    return None, end_points

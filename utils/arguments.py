@@ -25,6 +25,9 @@ parser.add_argument('--m_point', type=int, default=1024, help='Point number afte
 # loss setting
 parser.add_argument('--objectness_loss_weight', type=float, default=1, help='Loss weight of the objectness term')
 parser.add_argument('--graspness_loss_weight', type=float, default=10, help='Loss weight of the graspness term')
+# parser.add_argument('--rotation_loss_weight', type=float, default=100, help='Loss weight of the rotation term')
+# parser.add_argument('--rotation_reg_weight', type=float, default=1, help='Loss weight of the rotation regession term')
+# parser.add_argument('--rotation_listwise_weight', type=float, default=1, help='Loss weight of the rotation classification term')
 parser.add_argument('--view_loss_weight', type=float, default=100, help='Loss weight of the view term')
 parser.add_argument('--angle_loss_weight', type=float, default=1, help='Loss weight of the angle term')
 parser.add_argument('--depth_loss_weight', type=float, default=1, help='Loss weight of the depth term')
@@ -76,18 +79,64 @@ parser.add_argument("--use_obs_depth", action='store_true')
 parser.add_argument("--use_depth_comp", action='store_true')
 parser.add_argument("--graspness_mode", type=str,)
 parser.add_argument("--kview_mode", type=str, default='A1')
+# parser.add_argument(
+#     "--use_pose_loss_mask",
+#     action="store_true",
+#     help="Use selected-view-GT mask for angle/depth/width losses.",
+# )
+# parser.add_argument(
+#     "--pose-loss-view-gt-thresh",
+#     type=float,
+#     default=0.1,
+#     help="Threshold on kview_query_selected_gt for pose losses.",
+# )
+
 parser.add_argument(
-    "--use-pose-loss-mask",
+    "--kview_use_collision",
     action="store_true",
-    help="Use selected-view-GT mask for angle/depth/width losses.",
+    help="Enable collision prediction head for CVA decoder.",
 )
 parser.add_argument("--extend_angle", action='store_true')
-parser.add_argument(
-    "--pose-loss-view-gt-thresh",
-    type=float,
-    default=0.1,
-    help="Threshold on kview_query_selected_gt for pose losses.",
-)
 parser.add_argument("--vis_dir", type=str)
 parser.add_argument("--vis_every", type=int, default=1000)
+
+parser.add_argument(
+    '--dataset',
+    default='graspnet',
+    choices=['graspnet', 'gc6d', 'mixed'],
+    help='Dataset mode: graspnet, gc6d, or mixed.'
+)
+parser.add_argument(
+    '--train_split',
+    default='train',
+    choices=['train', 'train_remove_overlap'],
+    help='Training split. For GC6D use train_remove_overlap.'
+)
+parser.add_argument(
+    '--test_split',
+    default='test',
+    help='Evaluation split. For GC6D usually test.'
+)
+parser.add_argument("--enable_eval", action='store_true')
+parser.add_argument("--model_variant", type=str, default='A1')
+# parser.add_argument('--rerank_modes', type=str,
+#                     default='base,g,g_ent,g_ent_view,g_ent_view_align')
+# parser.add_argument('--rerank_primary_mode', type=str, default='base')
+
+# parser.add_argument('--rerank_angle_tau', type=float, default=0.10)
+# parser.add_argument('--rerank_view_margin_tau', type=float, default=0.05)
+
+# parser.add_argument('--rerank_w_graspness', type=float, default=0.5)
+# parser.add_argument('--rerank_w_angle_ent', type=float, default=0.4)
+# parser.add_argument('--rerank_w_depth_ent', type=float, default=0.25)
+# parser.add_argument('--rerank_w_depth_invalid', type=float, default=0.3)
+# parser.add_argument('--rerank_w_view_ent', type=float, default=0.15)
+# parser.add_argument('--rerank_w_view_margin', type=float, default=0.25)
+# parser.add_argument('--rerank_w_align', type=float, default=0.25)
+# parser.add_argument('--rerank_w_clearance', type=float, default=0.25)
+
+# parser.add_argument('--rerank_norm_score', action='store_true',
+#                     help='Normalize score per sample. Usually not needed.')
+# parser.add_argument('--save_rerank_diag', action='store_true', default=True)
+
 cfgs = parser.parse_args()

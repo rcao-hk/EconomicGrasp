@@ -20,6 +20,8 @@ from utils.arguments import cfgs
 # Local Libraries
 from models.economicgrasp_bip3d import economicgrasp_bip3d, economicgrasp_dpt
 from models.loss_economicgrasp_depth_kview_transformer import get_loss as get_loss_economicgrasp
+# from models.economicgrasp_bip3d import economicgrasp_dpt_rotnet as economicgrasp_dpt
+# from models.loss_economicgrasp_depth_kview_transformer import get_loss_fullrot as get_loss_economicgrasp
 # from models.loss_economicgrasp_depth_c1 import get_loss_c2_2 as get_loss_economicgrasp
 
 # from models.economicgrasp_dpt_ray import economicgrasp_dpt_ray as economicgrasp_dpt

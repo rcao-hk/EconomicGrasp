@@ -1240,8 +1240,79 @@ class GeometryAwareDenseFieldViewNet(nn.Module):
         # ------------------------------------------------------------
         # Training: multinomial sampling
         # Eval: argmax
+        # Optional diagnostic override: use externally supplied view indices.
+        # Invalid entries fall back to the normal model selection.
         # ------------------------------------------------------------
-        top_view_inds = self._select_top_view_inds(view_score)           # (B,M)
+        normal_top_view_inds = self._select_top_view_inds(view_score)    # (B,M)
+        top_view_inds = normal_top_view_inds
+
+        # Prefer the runtime attribute injected by the outer grasp model.
+        # CenterViewAngleQueryTransformerLocalGraspModule may forward an
+        # internal endpoint dictionary to ViewNet, so a key placed only in the
+        # outer model input can otherwise be silently lost before this call.
+        override = getattr(self, "_runtime_oracle_view_inds_override", None)
+        override_source = "runtime_attribute" if override is not None else "endpoint"
+        if override is None:
+            override = None if end_points is None else end_points.get(
+                "oracle_view_inds_override", None
+            )
+        if torch.is_tensor(override):
+            override = override.to(device=device, dtype=torch.long)
+            if override.shape != (B, M):
+                raise ValueError(
+                    "oracle_view_inds_override must be [B,M] matching the "
+                    f"selected seeds, got {tuple(override.shape)} vs {(B, M)}"
+                )
+            override_valid = (override >= 0) & (override < V)
+            forced_view_inds = override.clamp(0, V - 1)
+            top_view_inds = torch.where(
+                override_valid,
+                forced_view_inds,
+                normal_top_view_inds,
+            )
+
+            # Some CVA wrappers recompute argmax(view_score) after ViewNet
+            # returns, which would silently discard an index-only override.
+            # Pin the requested view minimally above the row maximum so every
+            # downstream argmax remains consistent with top_view_inds.  Rows
+            # where the override equals the normal prediction are untouched,
+            # preserving exact identity-control behavior.
+            override_changed = override_valid & top_view_inds.ne(normal_top_view_inds)
+            if override_changed.any():
+                row_max = view_score.detach().amax(dim=-1)
+                row_min = view_score.detach().amin(dim=-1)
+                score_span = (row_max - row_min).abs()
+                score_margin = torch.maximum(
+                    score_span * 1.0e-4,
+                    torch.full_like(score_span, 1.0e-4),
+                )
+                forced_old = view_score.gather(
+                    -1, top_view_inds.unsqueeze(-1)
+                ).squeeze(-1)
+                forced_new = torch.where(
+                    override_changed,
+                    torch.maximum(forced_old, row_max + score_margin),
+                    forced_old,
+                )
+                view_score.scatter_(
+                    -1, top_view_inds.unsqueeze(-1), forced_new.unsqueeze(-1)
+                )
+
+            end_points["oracle_view_override_mask"] = override_valid
+            end_points["oracle_view_override_changed_mask"] = override_changed
+            end_points["oracle_view_override_source"] = override_source
+            end_points["oracle_view_override_used_inds"] = top_view_inds
+            end_points["D: OracleView Override Ratio"] = (
+                override_valid.float().mean().reshape(())
+            )
+            end_points["D: OracleView Changed Ratio"] = (
+                override_changed.float().mean().reshape(())
+            )
+        elif override is not None:
+            raise TypeError(
+                "oracle_view_inds_override must be a torch.Tensor or None, "
+                f"got {type(override)!r}"
+            )
 
         top_view_xyz = self.view_dirs.index_select(
             0,
@@ -6279,6 +6350,9 @@ from models.kview_query_transformer import (
     KViewQueryTransformerConfig,
     KViewQueryTransformerLocalGraspModule,
     CenterViewAngleQueryTransformerLocalGraspModule,
+    GeometryAwareDenseFieldRotNet,
+    FullRotationCVALocalTransformer,
+    GeometryAwareRotProposalCVALocalGraspModule,
 )
 
 class economicgrasp_dpt(nn.Module):
@@ -6306,9 +6380,11 @@ class economicgrasp_dpt(nn.Module):
         vis_dir: Optional[str] = 'vis_dpt',
         vis_every: int = 500,
         debug_print_every: int = 50,
+        oracle_diag: bool = False,
     ):
         super().__init__()
         self.is_training = bool(is_training)
+        self.oracle_diag = bool(oracle_diag)
         self.use_gt_xyz_for_train = bool(use_gt_xyz_for_train)
         self.seed_feature_dim = int(tok_feat_dim)
         self.num_depth = int(cfgs.num_depth)
@@ -6496,7 +6572,8 @@ class economicgrasp_dpt(nn.Module):
                 head_num_heads=getattr(cfgs, 'kview_head_heads', 4),
                 head_attn_dropout=getattr(cfgs, 'kview_attn_dropout', 0.05),
                 head_dropout_p=getattr(cfgs, 'kview_head_dropout', 0.15),
-
+                use_collision_head=getattr(cfgs, 'kview_use_collision', True),
+                
                 vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'kview_query_grasp'),
                 vis_every=self.vis_every,
                 vis_num_queries=256,
@@ -7338,23 +7415,118 @@ class economicgrasp_dpt(nn.Module):
             process_fn = None
             process_kwargs = None
 
-        end_points = self.kview_grasp_module(
-            seed_features=seed_features_graspable,
-            seed_xyz=seed_xyz_graspable,
-            token_sel_idx=token_sel_idx,
-            feat_map=feat_grid,
-            depth_map=depth_448,
-            camera_K=K,
-            end_points=end_points,
-            is_training=self.is_training,
-            process_grasp_labels_fn=process_fn,
-            process_grasp_labels_kwargs=process_kwargs,
-            topview_debug_fn=self._add_topview_quality_logs if self.is_training else None,
-            depth_prob=None,
-            objectness_logits=objectness_logits_448,
-            graspness_map=grasp_sel.view(B, 1, H, W).contiguous(),
-            img=img,
+        # Runtime view override must be attached directly to the active
+        # ViewNet.  The CVA wrapper may construct/use an internal endpoint
+        # dictionary, so relying only on end_points["oracle_view_inds_override"]
+        # is not sufficient for a counterfactual second pass.
+        runtime_view_override = end_points.get("oracle_view_inds_override", None)
+        active_view_nets = []
+        for candidate in (
+            getattr(self, "view", None),
+            getattr(self.kview_grasp_module, "view_net", None),
+            getattr(self.kview_grasp_module, "view", None),
+        ):
+            if isinstance(candidate, nn.Module) and all(candidate is not x for x in active_view_nets):
+                active_view_nets.append(candidate)
+        previous_runtime_overrides = [
+            getattr(module, "_runtime_oracle_view_inds_override", None)
+            for module in active_view_nets
+        ]
+        for module in active_view_nets:
+            module._runtime_oracle_view_inds_override = runtime_view_override
+
+        try:
+            end_points = self.kview_grasp_module(
+                seed_features=seed_features_graspable,
+                seed_xyz=seed_xyz_graspable,
+                token_sel_idx=token_sel_idx,
+                feat_map=feat_grid,
+                depth_map=depth_448,
+                camera_K=K,
+                end_points=end_points,
+                is_training=self.is_training,
+                process_grasp_labels_fn=process_fn,
+                process_grasp_labels_kwargs=process_kwargs,
+                topview_debug_fn=self._add_topview_quality_logs if self.is_training else None,
+                depth_prob=None,
+                objectness_logits=objectness_logits_448,
+                graspness_map=grasp_sel.view(B, 1, H, W).contiguous(),
+                img=img,
+            )
+        finally:
+            for module, previous in zip(active_view_nets, previous_runtime_overrides):
+                module._runtime_oracle_view_inds_override = previous
+
+        # --------------------------------------------------------------
+        # Eval-time labels for stage-wise oracle decomposition.
+        #
+        # CVA normally generates these labels only during training.  Here we
+        # preserve deterministic model.eval() predictions and attach labels
+        # *after* the prediction pass, so GT information cannot alter features
+        # or logits.  Dataset construction must use load_label=True.
+        # --------------------------------------------------------------
+        oracle_diag_active = bool(
+            self.oracle_diag or end_points.get("oracle_diag_enable", False)
         )
+        if oracle_diag_active and (not self.is_training):
+            required_oracle_keys = (
+                "batch_grasp_score_angle",
+                "batch_grasp_depth_angle",
+                "batch_grasp_width_angle",
+                "batch_grasp_angle_valid_mask",
+                "batch_grasp_angle_pos_mask",
+                "batch_grasp_view_graspness",
+            )
+            if not all(k in end_points for k in required_oracle_keys):
+                # Some label-generation implementations reuse generic endpoint
+                # names.  Snapshot prediction-side tensors and restore them after
+                # label attachment so the diagnostic cannot silently change the
+                # decoded model output.
+                prediction_keys = (
+                    "xyz_graspable",
+                    "token_sel_idx",
+                    "view_score",
+                    "grasp_top_view_inds",
+                    "grasp_top_view_xyz",
+                    "grasp_top_view_rot",
+                    "grasp_score_pred_angle",
+                    "grasp_depth_pred_angle",
+                    "grasp_width_pred_angle",
+                    "grasp_collision_pred_angle",
+                )
+                prediction_snapshot = {
+                    k: end_points[k] for k in prediction_keys if k in end_points
+                }
+                try:
+                    label_out = process_grasp_labels_extend_angle(end_points)
+                    if isinstance(label_out, tuple):
+                        if len(label_out) < 2 or not isinstance(label_out[-1], dict):
+                            raise RuntimeError(
+                                "Unexpected process_grasp_labels_extend_angle return: "
+                                f"{type(label_out)!r}, len={len(label_out)}"
+                            )
+                        end_points = label_out[-1]
+                    elif isinstance(label_out, dict):
+                        end_points = label_out
+                    else:
+                        raise RuntimeError(
+                            "Unexpected process_grasp_labels_extend_angle return type: "
+                            f"{type(label_out)!r}"
+                        )
+                    end_points.update(prediction_snapshot)
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Stage-wise oracle diagnostics require GT grasp labels. "
+                        "Build GraspNetDataset/GraspNetMultiDataset with "
+                        "load_label=True and keep all label tensors in the batch."
+                    ) from exc
+
+            missing = [k for k in required_oracle_keys if k not in end_points]
+            if missing:
+                raise KeyError(
+                    "Oracle label generation completed but required keys are missing: "
+                    + ", ".join(missing)
+                )
 
         with torch.no_grad():
             end_points["D: Depth final mean"] = depth_448.detach().mean()
@@ -7686,6 +7858,2201 @@ def pred_decode_center_view_angle(end_points, batch_viewpoint_params_to_matrix_f
         grasp_preds.append(
             torch.cat(
                 [grasp_score, grasp_width, grasp_height, grasp_depth, grasp_rot, grasp_center, obj_ids],
+                dim=-1,
+            )
+        )
+
+    return grasp_preds
+
+
+def _norm_entropy_from_prob(prob: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
+    n = prob.shape[dim]
+    if n <= 1:
+        shape = list(prob.shape)
+        shape.pop(dim if dim >= 0 else prob.dim() + dim)
+        return prob.new_zeros(shape)
+    p = prob.clamp_min(eps)
+    ent = -(p * p.log()).sum(dim=dim)
+    return (ent / math.log(float(n))).clamp(0.0, 1.0)
+
+
+def _query_graspness_from_endpoints(end_points, batch_i: int, Q: int, device, dtype) -> torch.Tensor:
+    """Return [Q] token-level graspness in [0,1]. Fallback: ones."""
+    token_idx = end_points.get("token_sel_idx", None)
+    if not (torch.is_tensor(token_idx) and token_idx.dim() == 2 and token_idx.shape[0] > batch_i and token_idx.shape[1] == Q):
+        return torch.ones(Q, device=device, dtype=dtype)
+
+    # Prefer the clamped graspness used by seed selection.
+    if torch.is_tensor(end_points.get("dbg_grasp_sel", None)):
+        flat = end_points["dbg_grasp_sel"][batch_i].float().view(-1)
+    elif torch.is_tensor(end_points.get("graspness_score", None)):
+        flat = end_points["graspness_score"][batch_i].float().view(-1)
+    else:
+        return torch.ones(Q, device=device, dtype=dtype)
+
+    idx = token_idx[batch_i].long().clamp(0, flat.numel() - 1)
+    return flat.index_select(0, idx).to(device=device, dtype=dtype).clamp(0.0, 1.0)
+
+
+def _query_view_stats_from_endpoints(end_points, batch_i: int, Q: int, device, dtype):
+    """Return view_entropy_norm [Q], view_margin [Q]. Fallback: zeros."""
+    view_score = end_points.get("view_score", None)
+    if not torch.is_tensor(view_score) or view_score.dim() != 3 or view_score.shape[0] <= batch_i:
+        z = torch.zeros(Q, device=device, dtype=dtype)
+        return z, z
+
+    cur = view_score[batch_i].float()  # expected [Q,V] or [V,Q], sometimes [M,V]
+    if cur.dim() != 2:
+        z = torch.zeros(Q, device=device, dtype=dtype)
+        return z, z
+
+    if cur.shape[0] == Q:
+        qv = cur
+    elif cur.shape[1] == Q:
+        qv = cur.t().contiguous()
+    else:
+        # Fallback when view_score still stores base-M tokens.
+        # If your KViewQuerySelector exposes selected base indices, add the exact key here.
+        selected_base = None
+        for k in [
+            "kview_selected_base_idx",
+            "kview_selected_base_inds",
+            "kview_selected_seed_idx",
+            "kview_selected_seed_inds",
+            "kview_query_base_idx",
+            "kview_query_base_inds",
+        ]:
+            if torch.is_tensor(end_points.get(k, None)):
+                cand = end_points[k][batch_i].long().view(-1)
+                if cand.numel() == Q and int(cand.max()) < cur.shape[0]:
+                    selected_base = cand
+                    break
+
+        if selected_base is None:
+            z = torch.zeros(Q, device=device, dtype=dtype)
+            return z, z
+        qv = cur.index_select(0, selected_base.to(cur.device))
+
+    if qv.shape[-1] <= 1:
+        z = torch.zeros(Q, device=device, dtype=dtype)
+        return z, z
+
+    prob = F.softmax(qv, dim=-1)
+    view_ent = _norm_entropy_from_prob(prob, dim=-1)
+
+    top2 = torch.topk(qv, k=2, dim=-1).values
+    view_margin = (top2[:, 0] - top2[:, 1]).clamp_min(0.0)
+
+    return view_ent.to(device=device, dtype=dtype), view_margin.to(device=device, dtype=dtype)
+
+
+def _query_align_from_endpoints(end_points, batch_i: int, Q: int, device, dtype) -> torch.Tensor:
+    """Return [Q] view-ray alignment proxy in [0,1]. Fallback: computed from center and top-view."""
+    x = end_points.get("view_ray_align", None)
+    if torch.is_tensor(x):
+        if x.dim() == 2 and x.shape[0] > batch_i and x.shape[1] == Q:
+            return x[batch_i].float().to(device=device, dtype=dtype).abs().clamp(0.0, 1.0)
+        if x.dim() == 1 and x.numel() == Q:
+            return x.float().to(device=device, dtype=dtype).abs().clamp(0.0, 1.0)
+
+    center = end_points.get("xyz_graspable", None)
+    top_view = end_points.get("grasp_top_view_xyz", None)
+    if torch.is_tensor(center) and torch.is_tensor(top_view):
+        if center.dim() == 3 and top_view.dim() == 3 and center.shape[0] > batch_i and center.shape[1] == Q and top_view.shape[1] == Q:
+            ray = F.normalize(center[batch_i].float(), dim=-1)
+            approaching = F.normalize(-top_view[batch_i].float(), dim=-1)
+            return (ray * approaching).sum(dim=-1).abs().to(device=device, dtype=dtype).clamp(0.0, 1.0)
+
+    return torch.ones(Q, device=device, dtype=dtype)
+
+
+def _compose_cva_rerank_scores(
+    base_score: torch.Tensor,
+    graspness: torch.Tensor,
+    angle_ent: torch.Tensor,
+    depth_ent: torch.Tensor,
+    depth_invalid_prob: torch.Tensor,
+    view_ent: torch.Tensor,
+    view_margin: torch.Tensor,
+    align: torch.Tensor,
+    clearance: torch.Tensor,
+    mode: str,
+):
+    """All inputs are [Q]. Output is [Q]."""
+    eps = 1e-6
+    mode = str(mode).strip().lower()
+
+    # Mild defaults. They are diagnostic weights, not final hyperparameters.
+    wg = float(getattr(cfgs, "rerank_w_graspness", 0.5))
+    wa = float(getattr(cfgs, "rerank_w_angle_ent", 0.4))
+    wd = float(getattr(cfgs, "rerank_w_depth_ent", 0.25))
+    winv = float(getattr(cfgs, "rerank_w_depth_invalid", 0.3))
+    wve = float(getattr(cfgs, "rerank_w_view_ent", 0.15))
+    wvm = float(getattr(cfgs, "rerank_w_view_margin", 0.25))
+    walign = float(getattr(cfgs, "rerank_w_align", 0.25))
+    wclear = float(getattr(cfgs, "rerank_w_clearance", 0.25))
+
+    s = base_score
+
+    if mode == "base":
+        out = s
+    elif mode == "g":
+        gfac = (0.1 + 0.9 * graspness).clamp_min(eps).pow(wg)
+        out = s * gfac
+    elif mode == "g_ent":
+        gfac = (0.1 + 0.9 * graspness).clamp_min(eps).pow(wg)
+        entfac = torch.exp(-wa * angle_ent - wd * depth_ent - winv * depth_invalid_prob)
+        out = s * gfac * entfac
+    elif mode == "g_ent_view":
+        gfac = (0.1 + 0.9 * graspness).clamp_min(eps).pow(wg)
+        entfac = torch.exp(-wa * angle_ent - wd * depth_ent - winv * depth_invalid_prob)
+
+        # view_margin is scale-dependent; tanh makes it bounded.
+        tau = float(getattr(cfgs, "rerank_view_margin_tau", 0.05))
+        margin_conf = torch.tanh(view_margin / max(tau, 1e-6)).clamp(0.0, 1.0)
+        viewfac = torch.exp(-wve * view_ent) * (0.25 + 0.75 * margin_conf).pow(wvm)
+
+        out = s * gfac * entfac * viewfac
+    elif mode in ["g_ent_view_align", "g_ent_view_geom"]:
+        gfac = (0.1 + 0.9 * graspness).clamp_min(eps).pow(wg)
+        entfac = torch.exp(-wa * angle_ent - wd * depth_ent - winv * depth_invalid_prob)
+
+        tau = float(getattr(cfgs, "rerank_view_margin_tau", 0.05))
+        margin_conf = torch.tanh(view_margin / max(tau, 1e-6)).clamp(0.0, 1.0)
+        viewfac = torch.exp(-wve * view_ent) * (0.25 + 0.75 * margin_conf).pow(wvm)
+
+        geomfac = (0.25 + 0.75 * align.clamp(0.0, 1.0)).pow(walign)
+        geomfac = geomfac * clearance.clamp(0.05, 1.0).pow(wclear)
+
+        out = s * gfac * entfac * viewfac * geomfac
+    else:
+        raise ValueError(f"Unknown rerank mode: {mode}")
+
+    out = torch.nan_to_num(out, nan=0.0, posinf=1.0, neginf=0.0).clamp_min(0.0)
+
+    # Do not normalize by default; ranking is what matters. Enable only if your eval/postprocess expects [0,1].
+    if bool(getattr(cfgs, "rerank_norm_score", False)):
+        out = out / (out.max().detach() + 1e-6)
+
+    return out
+
+
+def pred_decode_center_view_angle_diag(
+    end_points,
+    batch_viewpoint_params_to_matrix_fn=None,
+    return_dict: bool = True,
+):
+    """Diagnostic decoder for CVA Transformer.
+
+    Returns:
+        if return_dict=True:
+            {
+              "base": [B tensors],
+              "g": [...],
+              "g_ent": [...],
+              "g_ent_view": [...],
+              "g_ent_view_align": [...],
+            }
+        else:
+            same as original pred_decode, using primary mode.
+    """
+    if batch_viewpoint_params_to_matrix_fn is None:
+        batch_viewpoint_params_to_matrix_fn = globals()["batch_viewpoint_params_to_matrix"]
+
+    modes_str = str(getattr(
+        cfgs,
+        "rerank_modes",
+        "base,g,g_ent,g_ent_view,g_ent_view_align",
+    ))
+    modes = [m.strip() for m in modes_str.split(",") if m.strip()]
+    if len(modes) == 0:
+        modes = ["base"]
+
+    primary_mode = str(getattr(cfgs, "rerank_primary_mode", modes[0])).strip()
+    if primary_mode not in modes:
+        primary_mode = modes[0]
+
+    grasp_centers = end_points["xyz_graspable"]  # [B,Q,3]
+    batch_size = grasp_centers.shape[0]
+    out_by_mode = {m: [] for m in modes}
+    debug_rows = []
+
+    for i in range(batch_size):
+        grasp_center = grasp_centers[i].float()  # [Q,3]
+        Q = grasp_center.shape[0]
+
+        score_logits_angle = end_points["grasp_score_pred_angle"][i].float()  # [6,Q,A]
+        depth_logits_angle = end_points["grasp_depth_pred_angle"][i].float()  # [D+1,Q,A]
+        width_pred_angle = end_points["grasp_width_pred_angle"][i].float()    # [1,Q,A]
+
+        if score_logits_angle.dim() != 3:
+            raise ValueError(f"grasp_score_pred_angle[{i}] must be [6,Q,A], got {tuple(score_logits_angle.shape)}")
+        if score_logits_angle.shape[1] != Q:
+            raise ValueError(f"Q mismatch: xyz_graspable Q={Q}, score_pred_angle Q={score_logits_angle.shape[1]}")
+
+        num_angle = score_logits_angle.shape[-1]
+
+        # ------------------------------------------------------------
+        # 1) Base CVA angle selection. Keep this fixed for pure re-ranking.
+        # ------------------------------------------------------------
+        score_expected_angle = _score_expected_from_logits(score_logits_angle)  # [Q,A]
+        angle_inds = torch.argmax(score_expected_angle, dim=-1)                # [Q]
+        base_score = torch.gather(
+            score_expected_angle,
+            dim=-1,
+            index=angle_inds.view(Q, 1),
+        ).squeeze(1)  # [Q]
+
+        # ------------------------------------------------------------
+        # 2) Decode pose using the base-selected angle.
+        # ------------------------------------------------------------
+        depth_logits = _gather_angle_candidate(depth_logits_angle, angle_inds)  # [D+1,Q]
+        width_pred = _gather_angle_candidate(width_pred_angle, angle_inds)      # [1,Q]
+
+        num_depth_cfg = int(getattr(cfgs, "num_depth", depth_logits.shape[0] - 1))
+        num_depth_valid = max(1, min(num_depth_cfg, depth_logits.shape[0] - 1))
+
+        depth_inds = torch.argmax(depth_logits[:num_depth_valid, :], dim=0)  # [Q]
+        grasp_depth = (depth_inds.float() + 1.0) * 0.01
+        grasp_depth = grasp_depth.view(Q, 1)
+
+        grasp_angle = angle_inds.float() * (np.pi / float(num_angle))  # [Q]
+
+        grasp_width = 1.2 * width_pred.squeeze(0).view(Q, 1) / 10.0
+        grasp_width = torch.clamp(
+            grasp_width,
+            min=0.0,
+            max=float(getattr(cfgs, "grasp_max_width", 0.1)),
+        )
+
+        approaching = -end_points["grasp_top_view_xyz"][i].float()  # [Q,3]
+        if approaching.shape[0] != Q:
+            raise ValueError(f"Q mismatch: xyz_graspable Q={Q}, grasp_top_view_xyz Q={approaching.shape[0]}")
+
+        grasp_rot = batch_viewpoint_params_to_matrix_fn(approaching, grasp_angle).view(Q, 9)
+        grasp_height = 0.02 * torch.ones((Q, 1), device=grasp_center.device, dtype=grasp_center.dtype)
+        obj_ids = -1 * torch.ones((Q, 1), device=grasp_center.device, dtype=grasp_center.dtype)
+
+        # ------------------------------------------------------------
+        # 3) Diagnostic factors.
+        # ------------------------------------------------------------
+        device = base_score.device
+        dtype = base_score.dtype
+
+        graspness = _query_graspness_from_endpoints(end_points, i, Q, device, dtype)
+
+        angle_tau = float(getattr(cfgs, "rerank_angle_tau", 0.10))
+        p_angle = F.softmax(score_expected_angle / max(angle_tau, 1e-6), dim=-1)  # [Q,A]
+        angle_ent = _norm_entropy_from_prob(p_angle, dim=-1)                     # [Q]
+
+        p_depth = F.softmax(depth_logits[:num_depth_valid, :].transpose(0, 1), dim=-1)  # [Q,D]
+        depth_ent = _norm_entropy_from_prob(p_depth, dim=-1)                           # [Q]
+
+        if depth_logits.shape[0] > num_depth_valid:
+            p_depth_all = F.softmax(depth_logits[:num_depth_valid + 1, :], dim=0)
+            depth_invalid_prob = p_depth_all[-1].to(dtype=dtype)  # [Q]
+        else:
+            depth_invalid_prob = torch.zeros(Q, device=device, dtype=dtype)
+
+        view_ent, view_margin = _query_view_stats_from_endpoints(end_points, i, Q, device, dtype)
+        align = _query_align_from_endpoints(end_points, i, Q, device, dtype)
+
+        # Very cheap clearance proxy. It should be interpreted only as a diagnostic prior.
+        max_w = float(getattr(cfgs, "grasp_max_width", 0.1))
+        w_ratio = (grasp_width.squeeze(1) / max(max_w, 1e-6)).clamp(0.0, 2.0)
+        width_clear = torch.ones_like(w_ratio)
+        width_clear = width_clear * torch.where(w_ratio > 0.95, width_clear.new_tensor(0.6), width_clear.new_tensor(1.0))
+        width_clear = width_clear * torch.where(w_ratio < 0.03, width_clear.new_tensor(0.6), width_clear.new_tensor(1.0))
+        depth_clear = torch.where(depth_inds <= 0, width_clear.new_tensor(0.75), width_clear.new_tensor(1.0))
+        clearance = (width_clear * depth_clear).clamp(0.05, 1.0)
+
+        # ------------------------------------------------------------
+        # 4) Save one prediction tensor per scoring mode.
+        # ------------------------------------------------------------
+        common_tail = torch.cat(
+            [
+                grasp_width,
+                grasp_height,
+                grasp_depth,
+                grasp_rot,
+                grasp_center,
+                obj_ids,
+            ],
+            dim=-1,
+        )
+
+        score_by_mode = {}
+        for mode in modes:
+            s = _compose_cva_rerank_scores(
+                base_score=base_score,
+                graspness=graspness,
+                angle_ent=angle_ent,
+                depth_ent=depth_ent,
+                depth_invalid_prob=depth_invalid_prob,
+                view_ent=view_ent,
+                view_margin=view_margin,
+                align=align,
+                clearance=clearance,
+                mode=mode,
+            )
+            score_by_mode[mode] = s
+            out_by_mode[mode].append(torch.cat([s.view(Q, 1), common_tail], dim=-1))
+
+        # ------------------------------------------------------------
+        # 5) Lightweight per-sample debug row.
+        # ------------------------------------------------------------
+        row = {
+            "batch_i": int(i),
+            "Q": int(Q),
+            "base_score_mean": float(base_score.detach().mean().cpu()),
+            "base_score_max": float(base_score.detach().max().cpu()),
+            "graspness_mean": float(graspness.detach().mean().cpu()),
+            "angle_ent_mean": float(angle_ent.detach().mean().cpu()),
+            "depth_ent_mean": float(depth_ent.detach().mean().cpu()),
+            "depth_invalid_prob_mean": float(depth_invalid_prob.detach().mean().cpu()),
+            "view_ent_mean": float(view_ent.detach().mean().cpu()),
+            "view_margin_mean": float(view_margin.detach().mean().cpu()),
+            "align_mean": float(align.detach().mean().cpu()),
+            "clearance_mean": float(clearance.detach().mean().cpu()),
+        }
+
+        k = min(20, Q)
+        base_top = torch.topk(score_by_mode["base"], k=k).indices if "base" in score_by_mode else None
+        for mode, s in score_by_mode.items():
+            top = torch.topk(s, k=k).indices
+            row[f"{mode}_score_mean"] = float(s.detach().mean().cpu())
+            row[f"{mode}_score_top20_mean"] = float(s[top].detach().mean().cpu())
+            row[f"{mode}_top20_graspness_mean"] = float(graspness[top].detach().mean().cpu())
+            row[f"{mode}_top20_angle_ent_mean"] = float(angle_ent[top].detach().mean().cpu())
+            row[f"{mode}_top20_depth_ent_mean"] = float(depth_ent[top].detach().mean().cpu())
+            row[f"{mode}_top20_align_mean"] = float(align[top].detach().mean().cpu())
+            if base_top is not None:
+                # top-k overlap ratio with base top-k
+                overlap = torch.isin(top, base_top).float().mean()
+                row[f"{mode}_top20_overlap_base"] = float(overlap.detach().cpu())
+
+        debug_rows.append(row)
+
+    end_points["cva_rerank_debug_rows"] = debug_rows
+
+    if return_dict:
+        return out_by_mode
+    return out_by_mode[primary_mode]
+
+
+
+
+# =============================================================================
+# Stage-wise oracle decomposition for the first-generation CVA Transformer
+# =============================================================================
+
+def _gather_qa(x: torch.Tensor, q_index: torch.Tensor) -> torch.Tensor:
+    """Gather a [Q,A] tensor along A using one angle index per query."""
+    if x.dim() != 2:
+        raise ValueError(f"Expected [Q,A], got {tuple(x.shape)}")
+    Q, A = x.shape
+    if q_index.numel() != Q:
+        raise ValueError(
+            f"Index length mismatch: Q={Q}, index={q_index.numel()}"
+        )
+    idx = q_index.long().clamp(0, A - 1).view(Q, 1)
+    return torch.gather(x, dim=1, index=idx).squeeze(1)
+
+
+def _select_oracle_angle_from_labels(
+    label_score: torch.Tensor,
+    valid_mask: torch.Tensor,
+    pos_mask: torch.Tensor,
+    fallback_angle: torch.Tensor,
+):
+    """Select the label-best angle for each center-view query.
+
+    Use the best positive angle when one exists; otherwise keep the model's
+    predicted angle.  A merely valid-but-nonpositive angle is not an oracle
+    improvement and is therefore not forced.  This fallback keeps the candidate
+    count identical across all modes.
+    """
+    if label_score.dim() != 2:
+        raise ValueError(
+            f"label_score must be [Q,A], got {tuple(label_score.shape)}"
+        )
+    if valid_mask.shape != label_score.shape or pos_mask.shape != label_score.shape:
+        raise ValueError(
+            "Oracle angle masks must match label_score: "
+            f"score={tuple(label_score.shape)}, valid={tuple(valid_mask.shape)}, "
+            f"pos={tuple(pos_mask.shape)}"
+        )
+
+    finite = torch.isfinite(label_score)
+    valid = valid_mask.bool() & finite
+    positive = pos_mask.bool() & valid
+    neg_inf = torch.finfo(label_score.dtype).min
+
+    pos_idx = label_score.masked_fill(~positive, neg_inf).argmax(dim=-1)
+    has_pos = positive.any(dim=-1)
+    has_valid = valid.any(dim=-1)
+
+    oracle = torch.where(has_pos, pos_idx, fallback_angle.long())
+    return oracle.long(), has_pos, has_valid
+
+
+def _decode_cva_variant(
+    grasp_center: torch.Tensor,
+    top_view_xyz: torch.Tensor,
+    angle_idx: torch.Tensor,
+    depth_idx: torch.Tensor,
+    width_m: torch.Tensor,
+    score: torch.Tensor,
+    num_angle: int,
+    batch_viewpoint_params_to_matrix_fn,
+) -> torch.Tensor:
+    """Assemble one [Q,17] GraspNet prediction tensor."""
+    Q = grasp_center.shape[0]
+    if top_view_xyz.shape != (Q, 3):
+        raise ValueError(
+            f"top_view_xyz must be {(Q, 3)}, got {tuple(top_view_xyz.shape)}"
+        )
+
+    grasp_angle = angle_idx.float() * (np.pi / float(num_angle))
+    grasp_rot = batch_viewpoint_params_to_matrix_fn(
+        -top_view_xyz.float(), grasp_angle
+    ).view(Q, 9)
+
+    depth_interval = float(getattr(cfgs, "grasp_depth_interval", 0.01))
+    grasp_depth = ((depth_idx.float() + 1.0) * depth_interval).view(Q, 1)
+
+    grasp_width = torch.nan_to_num(
+        width_m.view(Q, 1).float(),
+        nan=0.0,
+        posinf=float(getattr(cfgs, "grasp_max_width", 0.1)),
+        neginf=0.0,
+    ).clamp(0.0, float(getattr(cfgs, "grasp_max_width", 0.1)))
+
+    grasp_score = torch.nan_to_num(
+        score.view(Q, 1).float(), nan=0.0, posinf=1.0, neginf=0.0
+    ).clamp_min(0.0)
+
+    grasp_height = 0.02 * torch.ones_like(grasp_score)
+    obj_ids = -1.0 * torch.ones_like(grasp_score)
+    return torch.cat(
+        [
+            grasp_score,
+            grasp_width,
+            grasp_height,
+            grasp_depth,
+            grasp_rot,
+            grasp_center.float(),
+            obj_ids,
+        ],
+        dim=-1,
+    )
+
+
+def pred_decode_center_view_angle_oracle(
+    end_points,
+    batch_viewpoint_params_to_matrix_fn=None,
+    return_dict: bool = True,
+):
+    """Decode label-derived stage/factor oracles for first-generation CVA.
+
+    The labels correspond to the *currently selected view*.  To diagnose the
+    view stage, run a second forward pass with ``oracle_view_inds_override`` and
+    call this decoder on that pass.
+
+    Modes:
+      - ``base``: all predicted operation components and predicted score.
+      - ``oracle_angle``: label-best angle; predicted depth/width/score there.
+      - ``oracle_depth``: predicted angle; label depth when available.
+      - ``oracle_angle_depth``: label-best angle and label depth.
+      - ``oracle_operation``: label angle/depth/width, predicted score.
+      - ``oracle_label_rank``: base pose ranked by angle-level label quality.
+      - ``oracle_operation_label_rank``: oracle operation + label ranking.
+
+    Invalid/unmatched labels fall back to the model prediction per query.  All
+    modes therefore preserve the same number of center queries.
+    """
+    if batch_viewpoint_params_to_matrix_fn is None:
+        batch_viewpoint_params_to_matrix_fn = globals()[
+            "batch_viewpoint_params_to_matrix"
+        ]
+
+    required = [
+        "xyz_graspable",
+        "grasp_top_view_xyz",
+        "grasp_score_pred_angle",
+        "grasp_depth_pred_angle",
+        "grasp_width_pred_angle",
+        "batch_grasp_score_angle",
+        "batch_grasp_depth_angle",
+        "batch_grasp_width_angle",
+        "batch_grasp_angle_valid_mask",
+        "batch_grasp_angle_pos_mask",
+    ]
+    missing = [k for k in required if k not in end_points]
+    if missing:
+        raise KeyError(
+            "pred_decode_center_view_angle_oracle is missing required keys: "
+            + ", ".join(missing)
+            + ". Run the model with oracle_diag=True and load_label=True."
+        )
+
+    grasp_centers = end_points["xyz_graspable"]
+    batch_size = grasp_centers.shape[0]
+    modes = [
+        "base",
+        "oracle_angle",
+        "oracle_depth",
+        "oracle_angle_depth",
+        "oracle_operation",
+        "oracle_label_rank",
+        "oracle_operation_label_rank",
+    ]
+    out_by_mode = {m: [] for m in modes}
+    debug_rows = []
+    meta_rows = []
+
+    for i in range(batch_size):
+        grasp_center = grasp_centers[i].float()
+        Q = grasp_center.shape[0]
+
+        score_logits_angle = end_points["grasp_score_pred_angle"][i].float()
+        depth_logits_angle = end_points["grasp_depth_pred_angle"][i].float()
+        width_pred_angle = end_points["grasp_width_pred_angle"][i].float()
+
+        if score_logits_angle.dim() != 3:
+            raise ValueError(
+                "grasp_score_pred_angle must be [C,Q,A], got "
+                f"{tuple(score_logits_angle.shape)}"
+            )
+        if depth_logits_angle.dim() != 3 or width_pred_angle.dim() != 3:
+            raise ValueError(
+                "CVA depth/width predictions must be [D+1,Q,A]/[1,Q,A], got "
+                f"depth={tuple(depth_logits_angle.shape)}, "
+                f"width={tuple(width_pred_angle.shape)}"
+            )
+
+        _, Q_score, num_angle = score_logits_angle.shape
+        if Q_score != Q:
+            raise ValueError(f"Q mismatch: centers={Q}, score logits={Q_score}")
+
+        label_score = end_points["batch_grasp_score_angle"][i].float().to(
+            score_logits_angle.device
+        )
+        label_depth = end_points["batch_grasp_depth_angle"][i].long().to(
+            score_logits_angle.device
+        )
+        label_width = end_points["batch_grasp_width_angle"][i].float().to(
+            score_logits_angle.device
+        )
+        valid_angle = end_points["batch_grasp_angle_valid_mask"][i].bool().to(
+            score_logits_angle.device
+        )
+        pos_angle = end_points["batch_grasp_angle_pos_mask"][i].bool().to(
+            score_logits_angle.device
+        )
+
+        expected_shape = (Q, num_angle)
+        for name, x in [
+            ("batch_grasp_score_angle", label_score),
+            ("batch_grasp_depth_angle", label_depth),
+            ("batch_grasp_width_angle", label_width),
+            ("batch_grasp_angle_valid_mask", valid_angle),
+            ("batch_grasp_angle_pos_mask", pos_angle),
+        ]:
+            if x.shape != expected_shape:
+                raise ValueError(
+                    f"{name}[{i}] must be {expected_shape}, got {tuple(x.shape)}"
+                )
+
+        # Predicted and label-best in-plane angles.
+        score_expected_angle = _score_expected_from_logits(score_logits_angle)
+        pred_angle_idx = score_expected_angle.argmax(dim=-1)
+        oracle_angle_idx, has_pos_angle, has_valid_angle = (
+            _select_oracle_angle_from_labels(
+                label_score, valid_angle, pos_angle, pred_angle_idx
+            )
+        )
+        pred_score_at_pred = _gather_qa(score_expected_angle, pred_angle_idx)
+        pred_score_at_oracle = _gather_qa(
+            score_expected_angle, oracle_angle_idx
+        )
+
+        # Predicted depth and width at either selected angle.
+        depth_logits_pred_angle = _gather_angle_candidate(
+            depth_logits_angle, pred_angle_idx
+        )
+        depth_logits_oracle_angle = _gather_angle_candidate(
+            depth_logits_angle, oracle_angle_idx
+        )
+        num_depth_cfg = int(
+            getattr(cfgs, "num_depth", depth_logits_angle.shape[0] - 1)
+        )
+        num_depth_valid = max(
+            1, min(num_depth_cfg, depth_logits_angle.shape[0] - 1)
+        )
+        pred_depth_idx_at_pred = depth_logits_pred_angle[
+            :num_depth_valid
+        ].argmax(dim=0)
+        pred_depth_idx_at_oracle = depth_logits_oracle_angle[
+            :num_depth_valid
+        ].argmax(dim=0)
+
+        width_pred_at_pred = _gather_angle_candidate(
+            width_pred_angle, pred_angle_idx
+        ).squeeze(0)
+        width_pred_at_oracle = _gather_angle_candidate(
+            width_pred_angle, oracle_angle_idx
+        ).squeeze(0)
+        width_pred_at_pred_m = 1.2 * width_pred_at_pred / 10.0
+        width_pred_at_oracle_m = 1.2 * width_pred_at_oracle / 10.0
+
+        # GT operation labels at predicted/oracle angles.
+        gt_depth_at_pred = _gather_qa(label_depth, pred_angle_idx)
+        gt_depth_at_oracle = _gather_qa(label_depth, oracle_angle_idx)
+        gt_width_at_pred = _gather_qa(label_width, pred_angle_idx)
+        gt_width_at_oracle = _gather_qa(label_width, oracle_angle_idx)
+        gt_score_at_pred = _gather_qa(label_score, pred_angle_idx)
+        gt_score_at_oracle = _gather_qa(label_score, oracle_angle_idx)
+        valid_at_pred = _gather_qa(valid_angle, pred_angle_idx).bool()
+        valid_at_oracle = _gather_qa(valid_angle, oracle_angle_idx).bool()
+        pos_at_pred = _gather_qa(pos_angle, pred_angle_idx).bool()
+        pos_at_oracle = _gather_qa(pos_angle, oracle_angle_idx).bool()
+
+        gt_depth_pred_valid = (
+            pos_at_pred
+            & (gt_depth_at_pred >= 0)
+            & (gt_depth_at_pred < num_depth_valid)
+        )
+        gt_depth_oracle_valid = (
+            pos_at_oracle
+            & (gt_depth_at_oracle >= 0)
+            & (gt_depth_at_oracle < num_depth_valid)
+        )
+        oracle_depth_idx_at_pred = torch.where(
+            gt_depth_pred_valid, gt_depth_at_pred, pred_depth_idx_at_pred
+        )
+        oracle_depth_idx_at_oracle = torch.where(
+            gt_depth_oracle_valid,
+            gt_depth_at_oracle,
+            pred_depth_idx_at_oracle,
+        )
+
+        gt_width_pred_valid = (
+            pos_at_pred
+            & torch.isfinite(gt_width_at_pred)
+            & (gt_width_at_pred >= 0.0)
+        )
+        gt_width_oracle_valid = (
+            pos_at_oracle
+            & torch.isfinite(gt_width_at_oracle)
+            & (gt_width_at_oracle >= 0.0)
+        )
+        # Match EconomicGrasp's 1.2 execution-width safety scale.
+        oracle_width_at_pred_m = torch.where(
+            gt_width_pred_valid,
+            1.2 * gt_width_at_pred,
+            width_pred_at_pred_m,
+        )
+        oracle_width_at_oracle_m = torch.where(
+            gt_width_oracle_valid,
+            1.2 * gt_width_at_oracle,
+            width_pred_at_oracle_m,
+        )
+
+        # Label-side score oracle.  The predicted score is only a deterministic
+        # tie-breaker and cannot change the primary GT ordering.
+        rank_eps = float(getattr(cfgs, "oracle_label_rank_tiebreak", 1e-4))
+        gt_rank_at_pred = torch.where(
+            valid_at_pred & torch.isfinite(gt_score_at_pred),
+            gt_score_at_pred.clamp(0.0, 1.0),
+            torch.zeros_like(gt_score_at_pred),
+        ) + rank_eps * pred_score_at_pred
+        gt_rank_at_oracle = torch.where(
+            valid_at_oracle & torch.isfinite(gt_score_at_oracle),
+            gt_score_at_oracle.clamp(0.0, 1.0),
+            torch.zeros_like(gt_score_at_oracle),
+        ) + rank_eps * pred_score_at_oracle
+
+        top_view_xyz = end_points["grasp_top_view_xyz"][i].float()
+        variants = {
+            "base": dict(
+                angle=pred_angle_idx,
+                depth=pred_depth_idx_at_pred,
+                width=width_pred_at_pred_m,
+                score=pred_score_at_pred,
+            ),
+            "oracle_angle": dict(
+                angle=oracle_angle_idx,
+                depth=pred_depth_idx_at_oracle,
+                width=width_pred_at_oracle_m,
+                score=pred_score_at_oracle,
+            ),
+            "oracle_depth": dict(
+                angle=pred_angle_idx,
+                depth=oracle_depth_idx_at_pred,
+                width=width_pred_at_pred_m,
+                score=pred_score_at_pred,
+            ),
+            "oracle_angle_depth": dict(
+                angle=oracle_angle_idx,
+                depth=oracle_depth_idx_at_oracle,
+                width=width_pred_at_oracle_m,
+                score=pred_score_at_oracle,
+            ),
+            "oracle_operation": dict(
+                angle=oracle_angle_idx,
+                depth=oracle_depth_idx_at_oracle,
+                width=oracle_width_at_oracle_m,
+                score=pred_score_at_oracle,
+            ),
+            "oracle_label_rank": dict(
+                angle=pred_angle_idx,
+                depth=pred_depth_idx_at_pred,
+                width=width_pred_at_pred_m,
+                score=gt_rank_at_pred,
+            ),
+            "oracle_operation_label_rank": dict(
+                angle=oracle_angle_idx,
+                depth=oracle_depth_idx_at_oracle,
+                width=oracle_width_at_oracle_m,
+                score=gt_rank_at_oracle,
+            ),
+        }
+
+        for mode, args in variants.items():
+            out_by_mode[mode].append(
+                _decode_cva_variant(
+                    grasp_center=grasp_center,
+                    top_view_xyz=top_view_xyz,
+                    angle_idx=args["angle"],
+                    depth_idx=args["depth"],
+                    width_m=args["width"],
+                    score=args["score"],
+                    num_angle=num_angle,
+                    batch_viewpoint_params_to_matrix_fn=(
+                        batch_viewpoint_params_to_matrix_fn
+                    ),
+                )
+            )
+
+        with torch.no_grad():
+            valid_score = valid_angle & torch.isfinite(label_score)
+            label_best_score = label_score.masked_fill(
+                ~valid_score, 0.0
+            ).max(dim=-1).values
+            debug_rows.append(
+                {
+                    "batch_i": int(i),
+                    "Q": int(Q),
+                    "oracle_angle_pos_query_ratio": float(
+                        has_pos_angle.float().mean().cpu()
+                    ),
+                    "oracle_angle_valid_query_ratio": float(
+                        has_valid_angle.float().mean().cpu()
+                    ),
+                    "pred_angle_eq_oracle_ratio": float(
+                        (pred_angle_idx == oracle_angle_idx).float().mean().cpu()
+                    ),
+                    "pred_angle_label_score_mean": float(
+                        torch.nan_to_num(gt_score_at_pred).mean().cpu()
+                    ),
+                    "oracle_angle_label_score_mean": float(
+                        torch.nan_to_num(gt_score_at_oracle).mean().cpu()
+                    ),
+                    "label_best_score_mean": float(
+                        label_best_score.mean().cpu()
+                    ),
+                    "oracle_depth_at_pred_replace_ratio": float(
+                        gt_depth_pred_valid.float().mean().cpu()
+                    ),
+                    "oracle_depth_at_oracle_replace_ratio": float(
+                        gt_depth_oracle_valid.float().mean().cpu()
+                    ),
+                    "oracle_width_replace_ratio": float(
+                        gt_width_oracle_valid.float().mean().cpu()
+                    ),
+                    "pred_score_at_pred_mean": float(
+                        pred_score_at_pred.mean().cpu()
+                    ),
+                    "pred_score_at_oracle_mean": float(
+                        pred_score_at_oracle.mean().cpu()
+                    ),
+                }
+            )
+            meta_rows.append(
+                {
+                    "pred_angle_idx": pred_angle_idx.detach(),
+                    "oracle_angle_idx": oracle_angle_idx.detach(),
+                    "has_pos_angle": has_pos_angle.detach(),
+                    "has_valid_angle": has_valid_angle.detach(),
+                    "pred_depth_idx_at_pred": pred_depth_idx_at_pred.detach(),
+                    "pred_depth_idx_at_oracle": pred_depth_idx_at_oracle.detach(),
+                    "gt_depth_at_pred": gt_depth_at_pred.detach(),
+                    "gt_depth_at_oracle": gt_depth_at_oracle.detach(),
+                    "gt_depth_pred_valid": gt_depth_pred_valid.detach(),
+                    "gt_depth_oracle_valid": gt_depth_oracle_valid.detach(),
+                    "pred_score_at_pred": pred_score_at_pred.detach(),
+                    "pred_score_at_oracle": pred_score_at_oracle.detach(),
+                    "gt_score_at_pred": gt_score_at_pred.detach(),
+                    "gt_score_at_oracle": gt_score_at_oracle.detach(),
+                    "valid_at_pred": valid_at_pred.detach(),
+                    "valid_at_oracle": valid_at_oracle.detach(),
+                    "pos_at_pred": pos_at_pred.detach(),
+                    "pos_at_oracle": pos_at_oracle.detach(),
+                }
+            )
+
+    end_points["cva_oracle_debug_rows"] = debug_rows
+    end_points["cva_oracle_meta"] = meta_rows
+    return out_by_mode if return_dict else out_by_mode["base"]
+
+
+from models.kview_query_transformer import (
+    GeometryAwareDenseFieldRotNet,
+    FullRotationCVALocalTransformer,
+    GeometryAwareRotProposalCVALocalGraspModule,
+)
+from utils.label_generation import process_grasp_rotation_field_labels
+class economicgrasp_dpt_rotnet(nn.Module):
+    """
+    economicgrasp_dpt:
+      - no enhancer
+      - DINOv2DepthDistributionNet produces depth distribution + returns raw feats
+      - a new DPTHead(out_dim=3) predicts objectness(2) + graspness(1) from the same feats
+      - path_1 from the proposal DPTHead is used as dense seed feature map
+      - seed selection / ViewNet / grouping / grasp head reuse EconomicGrasp pipeline
+    """
+    def __init__(
+        self,
+        encoder: str = 'vitb',
+        tok_feat_dim: int = 128,
+        cylinder_radius: float = 0.05,
+        min_depth: float = 0.2,
+        max_depth: float = 1.0,
+        bin_num: int = 256,
+        freeze_backbone: bool = True,
+        use_gt_xyz_for_train: bool = False,
+        is_training: bool = True,
+        use_obs_depth: bool = False,
+        use_depth_comp: bool = False,
+        vis_dir: Optional[str] = 'vis_dpt',
+        vis_every: int = 500,
+        debug_print_every: int = 50,
+    ):
+        super().__init__()
+        self.is_training = bool(is_training)
+        self.use_gt_xyz_for_train = bool(use_gt_xyz_for_train)
+        self.seed_feature_dim = int(tok_feat_dim)
+        self.num_depth = int(cfgs.num_depth)
+        self.num_angle = int(cfgs.num_angle)
+        self.M_points = int(cfgs.m_point)
+        self.num_view = int(cfgs.num_view)
+        self.min_depth = float(min_depth)
+        self.max_depth = float(max_depth)
+        self.bin_num = int(bin_num)
+        self.use_obs_depth = bool(use_obs_depth)
+        self.use_depth_comp = bool(use_depth_comp)
+        
+        self.stride = 1
+        self.vis_dir = vis_dir
+        self.vis_every = int(vis_every)
+        self.debug_print_every = int(debug_print_every)
+        self._vis_iter = 0
+        if self.vis_dir is not None:
+            os.makedirs(self.vis_dir, exist_ok=True)
+            
+        # self.depth_net = DINOv2DepthDistributionNet(
+        #     encoder=encoder,
+        #     stride=self.stride,
+        #     min_depth=self.min_depth,
+        #     max_depth=self.max_depth,
+        #     bin_num=self.bin_num,
+        #     freeze_backbone=freeze_backbone,
+        # )
+        self.depth_net = DINOv2DepthRegressionNet(
+            encoder=encoder,
+            stride=self.stride,
+            min_depth=self.min_depth,
+            max_depth=self.max_depth,
+            freeze_backbone=freeze_backbone,
+        )
+
+        model_configs = {
+            'vits': {'embed_dim': 384, 'out_channels': [48, 96, 192, 384]},
+            'vitb': {'embed_dim': 768, 'out_channels': [96, 192, 384, 768]},
+            'vitl': {'embed_dim': 1024, 'out_channels': [256, 512, 1024, 1024]},
+            'vitg': {'embed_dim': 1536, 'out_channels': [1536, 1536, 1536, 1536]},
+        }
+        cfg = model_configs[encoder]
+
+        # One DPT head predicts [objectness_logit_0, objectness_logit_1, graspness]
+        self.proposal_head = DPTHead(
+            in_channels=cfg['embed_dim'],
+            features=tok_feat_dim,
+            use_bn=False,
+            out_channels=cfg['out_channels'],
+            out_dim=3,
+            use_clstoken=True,
+        )
+
+        self.depth_refine_dim=32
+        if self.use_obs_depth:
+            depth_feat_dim_map = {
+                "vits": 64,
+                "vitb": 128,
+                "vitl": 256,
+                "vitg": 384,
+            }
+            self.depth_feat_dim = depth_feat_dim_map[encoder]
+            self.depth_refine = DepthRefine(
+                rgb_feat_dim=self.depth_feat_dim,
+                obs_feat_dim=self.depth_refine_dim,
+                hidden_dim=self.depth_refine_dim,
+                min_depth=self.min_depth,
+                max_depth=self.max_depth,
+                downsample=self.stride,
+            )
+        else:
+            self.depth_refine = None
+        self.spatial_enhancer = GraspSpatialEnhancer(
+            embed_dims=tok_feat_dim,
+            feature_3d_dim=32,
+            min_depth=self.min_depth,
+            max_depth=self.max_depth,
+            num_depth=self.bin_num,
+            detach_depth_grad=True,      # 第一轮建议 True，避免破坏 depth_net
+            use_post_norm=False,         # 第一轮建议 False，保持 path_1 分布
+            vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'spatial_enhancer'),
+            vis_every=self.vis_every,
+            vis_rank0_only=True,
+            save_vis_npz=True,
+            )
+        
+        # ------------------------------------------------------------------
+        # Geometry-aware dense full-rotation proposal + sparse local decoder
+        # ------------------------------------------------------------------
+        self.view_dirs = generate_grasp_views(self.num_view)
+        self.rotnet_cva_config = KViewQueryTransformerConfig(
+            # Selector-related fields are unused by the full-rotation wrapper,
+            # but grouping/debug fields are shared with the previous module.
+            patch_size=getattr(cfgs, 'kview_patch_size', 6),
+            metric_radius=getattr(cfgs, 'kview_metric_radius', 0.08),
+            radius_px_min=getattr(cfgs, 'kview_radius_px_min', 8.0),
+            radius_px_max=getattr(cfgs, 'kview_radius_px_max', 64.0),
+            grouping_model_dim=getattr(cfgs, 'kview_group_dim', 128),
+            grouping_num_heads=getattr(cfgs, 'kview_group_heads', 2),
+            grouping_dropout=getattr(cfgs, 'kview_group_dropout', 0.05),
+            grouping_max_queries_per_chunk=getattr(cfgs, 'kview_group_chunk', 512),
+            grouping_ffn_ratio=getattr(cfgs, 'kview_group_ffn_ratio', 1.0),
+            use_gripper_projected_axes=True,
+            detach_depth=True,
+            detach_aux_maps=True,
+
+            # ViewConditionedAttentionGrouping outputs head_model_dim channels.
+            head_model_dim=getattr(cfgs, 'fullrot_group_out_dim', 64),
+            head_attn_dropout=getattr(cfgs, 'fullrot_attn_dropout', 0.05),
+            head_dropout_p=getattr(cfgs, 'fullrot_head_dropout', 0.15),
+
+            vis_dir=None if self.vis_dir is None else os.path.join(
+                self.vis_dir, 'rotnet_cva'
+            ),
+            vis_every=self.vis_every,
+            vis_num_queries=getattr(cfgs, 'fullrot_vis_num_queries', 128),
+            save_npz=False,
+        )
+
+        self.rotation_net = GeometryAwareDenseFieldRotNet(
+            num_view=self.num_view,
+            num_angle=self.num_angle,
+            seed_feature_dim=self.seed_feature_dim,
+            hidden_dim=getattr(cfgs, 'rot_hidden_dim', 64),
+            num_rotation_queries=getattr(cfgs, 'rot_num_queries', 4),
+            view_dirs=self.view_dirs,
+            batch_viewpoint_params_to_matrix_fn=(
+                batch_viewpoint_params_to_matrix
+            ),
+            rotation_chunk_size=getattr(cfgs, 'rot_chunk_size', 128),
+            train_selection=getattr(
+                cfgs, 'rot_train_selection', 'minmax_sample'
+            ),
+            replacement=False,
+            vis_dir=None if self.vis_dir is None else os.path.join(
+                self.vis_dir, 'rotnet_cva'
+            ),
+            vis_every=self.vis_every,
+            vis_num_seeds=getattr(cfgs, 'rot_vis_num_seeds', 4),
+        )
+
+        self.fullrot_local_transformer = FullRotationCVALocalTransformer(
+            num_angle=self.num_angle,
+            num_depth=self.num_depth,
+            seed_feature_dim=self.seed_feature_dim,
+            # feat_grid is produced from proposal_path1_enh and has tok_feat_dim
+            # channels in this model.
+            feat_dim=self.seed_feature_dim,
+            config=self.rotnet_cva_config,
+            head_hidden_dim=getattr(cfgs, 'fullrot_head_dim', 64),
+            head_num_layers=getattr(cfgs, 'fullrot_head_layers', 0),
+            head_num_heads=getattr(cfgs, 'fullrot_head_heads', 4),
+            head_branch_dim=getattr(cfgs, 'fullrot_branch_dim', 64),
+            head_dropout_p=getattr(cfgs, 'fullrot_head_dropout', 0.15),
+            head_attn_dropout=getattr(cfgs, 'fullrot_attn_dropout', 0.05),
+        )
+
+        self.grasp_module = GeometryAwareRotProposalCVALocalGraspModule(
+            rotation_net=self.rotation_net,
+            local_transformer=self.fullrot_local_transformer,
+        )
+
+        # Optional early-training stabilization.  Keep False for a clean RotNet
+        # recall measurement; when True, proposal slot 0 is forced to GT-best.
+        self.rot_force_gt_train = bool(
+            getattr(cfgs, 'rot_force_gt_train', False)
+        )
+
+    @staticmethod
+    def _prepare_dense_rotation_labels(end_points):
+        """Generate and validate base-M dense RotNet labels.
+
+        process_grasp_rotation_field_labels must operate while
+        xyz_graspable is still [B,M,3], before proposal expansion to Q=M*L.
+        """
+        out = process_grasp_rotation_field_labels(end_points)
+        if isinstance(out, tuple):
+            end_points = out[-1]
+        elif isinstance(out, dict):
+            end_points = out
+        else:
+            raise TypeError(
+                'process_grasp_rotation_field_labels must return a dict or '
+                'a tuple ending in a dict.'
+            )
+
+        required = [
+            'batch_grasp_rotation_score',
+            'batch_grasp_rotation_valid_mask',
+        ]
+        missing = [k for k in required if k not in end_points]
+        if missing:
+            raise KeyError(
+                f'Dense rotation label processor did not create {missing}'
+            )
+
+        score = end_points['batch_grasp_rotation_score']
+        valid = end_points['batch_grasp_rotation_valid_mask']
+        if score.dim() != 4 or valid.shape != score.shape:
+            raise RuntimeError(
+                'Dense RotNet labels must both be [B,M,V,A], got '
+                f'score={tuple(score.shape)}, valid={tuple(valid.shape)}'
+            )
+        return end_points
+
+    @staticmethod
+    def _gt_best_rotation_inds(end_points):
+        """Return GT-best flat rotation id [B,M] for optional forcing."""
+        score = end_points['batch_grasp_rotation_score']
+        valid = end_points['batch_grasp_rotation_valid_mask'].bool()
+        score_flat = score.flatten(2)
+        valid_flat = valid.flatten(2)
+        return score_flat.masked_fill(~valid_flat, -1.0).argmax(dim=-1)
+
+    @staticmethod
+    def _backproject_uvz(uv_b_n2, z_b_n1, K_b_33):
+        fx = K_b_33[:, 0, 0].unsqueeze(1)
+        fy = K_b_33[:, 1, 1].unsqueeze(1)
+        cx = K_b_33[:, 0, 2].unsqueeze(1)
+        cy = K_b_33[:, 1, 2].unsqueeze(1)
+        u = uv_b_n2[..., 0]
+        v = uv_b_n2[..., 1]
+        z = z_b_n1.squeeze(-1)
+        x = (u - cx) / fx * z
+        y = (v - cy) / fy * z
+        return torch.stack([x, y, z], dim=-1)
+
+    def _save_map_png(self, arr2d, out_path, vmin=None, vmax=None, cmap='Spectral', title=None):
+        if torch.is_tensor(arr2d):
+            arr2d = arr2d.detach().float().cpu().numpy()
+        plt.figure(figsize=(6, 6))
+        if vmin is None:
+            vmin = float(np.nanmin(arr2d))
+        if vmax is None:
+            vmax = float(np.nanmax(arr2d))
+        plt.imshow(arr2d, vmin=vmin, vmax=vmax, cmap=cmap)
+        plt.axis('off')
+        if title is not None:
+            plt.title(title)
+        plt.tight_layout(pad=0)
+        plt.savefig(out_path, dpi=150)
+        plt.close()
+
+    def _save_overlay_points(self, img_448, pts_uv, out_path, radius=1, color=(0, 0, 255)):
+        import cv2
+        x = img_448.detach().float().cpu()
+        x = x - x.min()
+        x = x / (x.max() + 1e-6)
+        x = (x.permute(1, 2, 0).numpy() * 255.0).astype(np.uint8)
+        x_bgr = x[..., ::-1].copy()
+
+        pts = pts_uv.detach().cpu().numpy()
+        H, W = x_bgr.shape[:2]
+        for (u, v) in pts:
+            uu = int(round(float(u)))
+            vv = int(round(float(v)))
+            if 0 <= uu < W and 0 <= vv < H:
+                cv2.circle(x_bgr, (uu, vv), radius, color, thickness=-1)
+        cv2.imwrite(out_path, x_bgr)
+
+    @torch.no_grad()
+    def _save_pred_gt_cloud_ply(
+        self,
+        cloud_pred: torch.Tensor,
+        cloud_gt: torch.Tensor,
+        end_points: dict,
+    ):
+        if self.vis_dir is None:
+            return
+
+        # ------------------------------------------------------------
+        # Avoid duplicated visualization under DDP / multi-process.
+        # Only rank0 writes point clouds.
+        # ------------------------------------------------------------
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            if torch.distributed.get_rank() != 0:
+                return
+
+        def _valid(x: np.ndarray):
+            m = np.isfinite(x).all(axis=1)
+            m &= (x[:, 2] > self.min_depth)
+            m &= (x[:, 2] < self.max_depth)
+            return x[m]
+
+        def _make_color(n: int, color):
+            c = np.zeros((n, 3), dtype=np.float32)
+            c[:, 0] = float(color[0])
+            c[:, 1] = float(color[1])
+            c[:, 2] = float(color[2])
+            return c
+
+        def _write_ply(items, out_path: str):
+            """
+            items: list of (points_np, color_tuple)
+            """
+            pts_list = []
+            col_list = []
+
+            for pts_np, color in items:
+                if pts_np is None:
+                    continue
+
+                pts_np = _valid(pts_np)
+                if pts_np.shape[0] == 0:
+                    continue
+
+                pts_list.append(pts_np.astype(np.float32))
+                col_list.append(_make_color(pts_np.shape[0], color))
+
+            if len(pts_list) == 0:
+                return False
+
+            pts = np.concatenate(pts_list, axis=0)
+            cols = np.concatenate(col_list, axis=0)
+
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(pts.astype(np.float64))
+            pcd.colors = o3d.utility.Vector3dVector(cols.astype(np.float64))
+
+            o3d.io.write_point_cloud(out_path, pcd, write_ascii=False)
+            return True
+
+        # ------------------------------------------------------------
+        # Use batch item 0 only.
+        # ------------------------------------------------------------
+        p = cloud_pred[0].detach().float().cpu().numpy()
+        g = cloud_gt[0].detach().float().cpu().numpy()
+
+        scene = int(end_points.get('scene_idx', -1)[0].item()) \
+            if torch.is_tensor(end_points.get('scene_idx', None)) \
+            else int(end_points.get('scene_idx', -1))
+
+        anno = int(end_points.get('anno_idx', -1)[0].item()) \
+            if torch.is_tensor(end_points.get('anno_idx', None)) \
+            else int(end_points.get('anno_idx', -1))
+
+        # ------------------------------------------------------------
+        # Case 1: RGB mode, save pred + gt only.
+        #   red  = predicted final depth cloud
+        #   blue = GT depth cloud
+        # ------------------------------------------------------------
+        if not self.use_obs_depth:
+            out_path = os.path.join(
+                self.vis_dir,
+                f'dpt_pred_gt_xyz_scene{scene:04d}_anno{anno:04d}_it{self._vis_iter:06d}.ply'
+            )
+
+            _write_ply(
+                [
+                    (p, (1.0, 0.0, 0.0)),  # pred: red
+                    (g, (0.0, 0.0, 1.0)),  # gt: blue
+                ],
+                out_path,
+            )
+            return
+
+        # ------------------------------------------------------------
+        # Case 2: RGB-D mode, save pred + gt + obs in one PLY only.
+        #   red   = predicted final depth cloud
+        #   blue  = GT depth cloud
+        #   green = observed depth cloud
+        # ------------------------------------------------------------
+        if "sensor_depth_m" not in end_points:
+            # In principle should not happen when self.use_obs_depth=True.
+            out_path = os.path.join(
+                self.vis_dir,
+                f'dpt_pred_gt_xyz_scene{scene:04d}_anno{anno:04d}_it{self._vis_iter:06d}.ply'
+            )
+            _write_ply(
+                [
+                    (p, (1.0, 0.0, 0.0)),
+                    (g, (0.0, 0.0, 1.0)),
+                ],
+                out_path,
+            )
+            return
+
+        obs_depth = end_points["sensor_depth_m"]
+
+        if obs_depth.dim() == 3:
+            obs_depth = obs_depth.unsqueeze(1)
+        elif obs_depth.dim() == 4:
+            obs_depth = obs_depth[:, :1]
+        else:
+            return
+
+        K = end_points["K"]
+        device = obs_depth.device
+
+        obs_depth = obs_depth.to(device=device, dtype=K.dtype)
+        K = K.to(device=device, dtype=obs_depth.dtype)
+
+        # Use model input resolution when available.
+        if "img" in end_points and torch.is_tensor(end_points["img"]):
+            H_img, W_img = end_points["img"].shape[-2:]
+            if obs_depth.shape[-2:] != (H_img, W_img):
+                obs_depth = F.interpolate(
+                    obs_depth,
+                    size=(H_img, W_img),
+                    mode="nearest",
+                )
+        else:
+            H_img, W_img = obs_depth.shape[-2:]
+
+        B, _, Hobs, Wobs = obs_depth.shape
+
+        flat_all = torch.arange(
+            Hobs * Wobs,
+            device=device,
+            dtype=torch.long,
+        ).unsqueeze(0).expand(B, -1).contiguous()
+
+        u_all = (flat_all % Wobs).float()
+        v_all = (flat_all // Wobs).float()
+        uv_all = torch.stack([u_all, v_all], dim=-1)
+
+        z_obs = obs_depth.view(B, -1, 1).contiguous()
+        z_obs = torch.nan_to_num(
+            z_obs,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp_min(1e-6)
+
+        xyz_obs = self._backproject_uvz(uv_all, z_obs, K)
+        o = xyz_obs[0].detach().float().cpu().numpy()
+
+        out_path = os.path.join(
+            self.vis_dir,
+            f'dpt_pred_gt_xyz_scene{scene:04d}_anno{anno:04d}_it{self._vis_iter:06d}.ply'
+        )
+
+        _write_ply(
+            [
+                (p, (1.0, 0.0, 0.0)),  # pred: red
+                (g, (0.0, 0.0, 1.0)),  # gt: blue
+                (o, (0.0, 1.0, 0.0)),  # obs: green
+            ],
+            out_path,
+        )
+
+    @torch.no_grad()
+    def _add_topview_quality_logs(self, end_points: dict):
+        """
+        Diagnose whether dense view regression improves the actual argmax top-view.
+
+        Required:
+        - view_score: (B,M,V)
+        - grasp_top_view_inds: (B,M)
+        - batch_grasp_view_graspness: (B,M,V)
+
+        Logs:
+        - GT score of predicted top view
+        - oracle top-view GT score
+        - regret = oracle - predicted
+        - top-k agreement with GT view field
+        - angular error between predicted top view and oracle top view
+        - predicted top1-top2 angular distance
+        """
+        if not isinstance(end_points, dict):
+            return end_points
+
+        required = [
+            "view_score",
+            "grasp_top_view_inds",
+            "batch_grasp_view_graspness",
+        ]
+        for k in required:
+            if k not in end_points:
+                return end_points
+
+        view_score = end_points["view_score"].detach()
+        view_label = end_points["batch_grasp_view_graspness"].detach()
+        top_idx = end_points["grasp_top_view_inds"].detach().long()
+
+        if view_score.dim() != 3 or view_label.dim() != 3 or top_idx.dim() != 2:
+            return end_points
+
+        # Expected: (B,M,V). If someone accidentally returns (B,V,M), fix if unambiguous.
+        if view_score.shape != view_label.shape:
+            if view_score.transpose(1, 2).shape == view_label.shape:
+                view_score = view_score.transpose(1, 2).contiguous()
+            else:
+                return end_points
+
+        B, M, V = view_label.shape
+        if top_idx.shape != (B, M):
+            return end_points
+
+        device = view_label.device
+        top_idx = top_idx.clamp(0, V - 1)
+
+        # ------------------------------------------------------------
+        # 1) GT score of predicted top-view vs. oracle top-view
+        # ------------------------------------------------------------
+        pred_top_gt = torch.gather(
+            view_label,
+            dim=2,
+            index=top_idx.unsqueeze(-1),
+        ).squeeze(-1)  # (B,M)
+
+        oracle_top_gt, oracle_idx = view_label.max(dim=-1)  # (B,M), (B,M)
+
+        finite_mask = (
+            torch.isfinite(pred_top_gt)
+            & torch.isfinite(oracle_top_gt)
+            & torch.isfinite(view_label).all(dim=-1)
+        )
+
+        # If a selected seed has all-zero view labels, it is not informative for top-view quality.
+        label_valid = finite_mask & (oracle_top_gt > 1e-6)
+
+        # Use valid labels if available; otherwise fall back to finite mask to avoid empty logs.
+        stat_mask = label_valid
+        if not bool(stat_mask.any()):
+            stat_mask = finite_mask
+
+        def masked_mean(x: torch.Tensor):
+            if bool(stat_mask.any()):
+                return x[stat_mask].float().mean()
+            return x.new_tensor(0.0).float()
+
+        def masked_ratio(cond: torch.Tensor):
+            if bool(stat_mask.any()):
+                return cond[stat_mask].float().mean()
+            return cond.new_tensor(0.0).float()
+
+        regret = (oracle_top_gt - pred_top_gt).clamp_min(0.0)
+
+        end_points["D: TopView LabelValid"] = label_valid.float().mean().reshape(())
+        end_points["D: TopView PredGT"] = masked_mean(pred_top_gt).reshape(())
+        end_points["D: TopView OracleGT"] = masked_mean(oracle_top_gt).reshape(())
+        end_points["D: TopView Regret"] = masked_mean(regret).reshape(())
+
+        end_points["D: TopView PredGT>0.1"] = masked_ratio(pred_top_gt > 0.1).reshape(())
+        end_points["D: TopView PredGT>0.3"] = masked_ratio(pred_top_gt > 0.3).reshape(())
+        end_points["D: TopView PredGT>0.5"] = masked_ratio(pred_top_gt > 0.5).reshape(())
+
+        # ------------------------------------------------------------
+        # 2) Whether predicted top-view is among GT top-k modes
+        # ------------------------------------------------------------
+        for k in (1, 5, 10, 20):
+            kk = min(k, V)
+            gt_topk_idx = torch.topk(view_label, k=kk, dim=-1).indices  # (B,M,kk)
+            hit = (gt_topk_idx == top_idx.unsqueeze(-1)).any(dim=-1)    # (B,M)
+            end_points[f"D: TopView InGTTop{k}"] = masked_ratio(hit).reshape(())
+
+        # ------------------------------------------------------------
+        # 3) Predicted-score diagnostics
+        # ------------------------------------------------------------
+        pred_top_score = torch.gather(
+            view_score,
+            dim=2,
+            index=top_idx.unsqueeze(-1),
+        ).squeeze(-1)
+
+        top2_vals, top2_idx = torch.topk(view_score, k=min(2, V), dim=-1)
+        pred_margin = top2_vals[..., 0] - top2_vals[..., 1] if V >= 2 else torch.zeros_like(pred_top_score)
+
+        end_points["D: TopView PredScore"] = masked_mean(pred_top_score).reshape(())
+        end_points["D: TopView PredMargin"] = masked_mean(pred_margin).reshape(())
+
+        # ------------------------------------------------------------
+        # 4) Angular diagnostics on view anchors
+        # ------------------------------------------------------------
+        if hasattr(self.view, "view_dirs"):
+            view_dirs = self.view.view_dirs.detach().to(device=device, dtype=torch.float32)
+        else:
+            view_dirs = generate_grasp_views(V).to(device=device, dtype=torch.float32)
+
+        view_dirs = F.normalize(view_dirs, dim=-1)
+
+        pred_dir = view_dirs.index_select(0, top_idx.reshape(-1)).view(B, M, 3)
+        oracle_dir = view_dirs.index_select(0, oracle_idx.reshape(-1)).view(B, M, 3)
+
+        cos_po = (pred_dir * oracle_dir).sum(dim=-1).clamp(-1.0 + 1e-6, 1.0 - 1e-6)
+        ang_po = torch.rad2deg(torch.acos(cos_po))  # (B,M)
+
+        end_points["D: TopView AngErr"] = masked_mean(ang_po).reshape(())
+        end_points["D: TopView Ang<5"] = masked_ratio(ang_po < 5.0).reshape(())
+        end_points["D: TopView Ang<10"] = masked_ratio(ang_po < 10.0).reshape(())
+        end_points["D: TopView Ang<15"] = masked_ratio(ang_po < 15.0).reshape(())
+        end_points["D: TopView Ang<30"] = masked_ratio(ang_po < 30.0).reshape(())
+
+        if V >= 2:
+            top1_idx = top2_idx[..., 0].reshape(-1)
+            top2_idx_flat = top2_idx[..., 1].reshape(-1)
+
+            top1_dir = view_dirs.index_select(0, top1_idx).view(B, M, 3)
+            top2_dir = view_dirs.index_select(0, top2_idx_flat).view(B, M, 3)
+
+            cos_12 = (top1_dir * top2_dir).sum(dim=-1).clamp(-1.0 + 1e-6, 1.0 - 1e-6)
+            ang_12 = torch.rad2deg(torch.acos(cos_12))
+
+            end_points["D: TopView Top1Top2Ang"] = masked_mean(ang_12).reshape(())
+
+        return end_points
+
+    def forward(self, end_points: dict):
+        img = end_points['img']
+        K = end_points['K']
+        B, _, H, W = img.shape
+        assert (H, W) == (448, 448)
+        Ntok = H * W
+        M = self.M_points
+
+        # depth_448, depth_tok, _, depth_prob_448, depth_logits_448, depth_prob_pred, feats = self.depth_net(
+        #     img,
+        #     return_prob=True,
+        #     return_tok_prob=True,
+        #     return_feats=True,
+        # )
+
+        depth_net_pred_448, _, depth_img_feat, depth_head_raw_448, feats = self.depth_net(
+            img,
+            return_feats=True,
+            return_raw=True,
+        )
+
+        obs_depth_448 = None
+        depth_confidence_448 = None
+        depth_refined_correction_448 = torch.zeros_like(depth_net_pred_448)
+
+        if not self.use_obs_depth:
+            # RGB mode:
+            # RGB -> absolute depth
+            depth_448 = depth_net_pred_448
+        else:
+            # RGB-D mode:
+            # RGB -> network predicted absolute depth
+            # obs depth -> obs encoder
+            # confidence -> fuse network predicted depth and observed depth
+            obs_depth_448 = end_points.get("sensor_depth_m", None)
+            if obs_depth_448 is None:
+                raise ValueError("use_obs_depth=True requires end_points['sensor_depth_m'].")
+
+            if obs_depth_448.dim() == 3:
+                obs_depth_448 = obs_depth_448.unsqueeze(1)
+            elif obs_depth_448.dim() == 4:
+                obs_depth_448 = obs_depth_448[:, :1]
+            else:
+                raise ValueError(f"Unexpected sensor_depth_m shape: {obs_depth_448.shape}")
+
+            obs_depth_448 = obs_depth_448.to(device=img.device, dtype=depth_net_pred_448.dtype)
+
+            if obs_depth_448.shape[-2:] != (H, W):
+                obs_depth_448 = F.interpolate(
+                    obs_depth_448,
+                    size=(H, W),
+                    mode="nearest",
+                )
+
+            depth_448, fusion_aux = self.depth_refine(
+                rgb_feat=depth_img_feat,
+                net_depth=depth_head_raw_448,
+                obs_depth=obs_depth_448,
+            )
+
+            depth_confidence_448 = fusion_aux["depth_confidence"]
+            depth_refined_correction_448 = depth_448 - obs_depth_448             # For debug
+
+            # depth_448 = torch.nan_to_num(
+            #     depth_448_raw,
+            #     nan=self.min_depth,
+            #     posinf=self.max_depth,
+            #     neginf=self.min_depth,
+            # )
+
+        if self.stride > 1:
+            depth_tok = F.interpolate(
+                depth_448,
+                size=(H // self.stride, W // self.stride),
+                mode="nearest",
+            )
+        else:
+            depth_tok = depth_448
+    
+        patch_h, patch_w = H // 14, W // 14
+        proposal_path1, proposal_logits_448 = self.proposal_head(feats, patch_h, patch_w)
+
+        # ------------------------------------------------------------------
+        # Grasp Spatial Enhancer
+        # ------------------------------------------------------------------
+        # proposal_path1_enh, spatial_aux = self.spatial_enhancer(
+        #     feat_2d=proposal_path1,       # (B,C,Hf,Wf)
+        #     depth_prob=depth_prob_448,    # (B,D,448,448)
+        #     K=K,                          # K must match resized/cropped 448x448 image
+        #     image_hw=(H, W),              # usually (448,448)
+        #     return_maps=False,
+        #     img=end_points.get("img", img) if isinstance(end_points, dict) else img,
+        #     vis_prefix=None,
+        # )
+
+        proposal_path1_enh, spatial_aux = self.spatial_enhancer(
+            feat_2d=proposal_path1,
+            depth_prob=None,
+            depth_map=depth_448,     # final depth: RGB direct or observed + residual
+            K=K,
+            image_hw=(H, W),
+            return_maps=False,
+            img=end_points.get("img", img),
+        )
+
+        for k, v in spatial_aux.items():
+            end_points[k] = v
+
+        feat_grid = F.interpolate(proposal_path1_enh, size=(H, W), mode='bilinear', align_corners=False)
+
+        objectness_logits_448 = proposal_logits_448[:, :2, :, :]
+        graspness_logits_448 = proposal_logits_448[:, 2:3, :, :]
+
+        end_points['img_feat_dpt'] = feat_grid
+        end_points["depth_map_pred"] = depth_448
+        end_points["depth_tok_pred"] = depth_tok
+        
+        # network-predicted absolute depth
+        end_points["depth_net_pred"] = depth_net_pred_448
+
+        # raw 1-channel head output, debug only
+        end_points["depth_head_raw_pred"] = depth_head_raw_448
+
+        if self.use_obs_depth:
+            end_points["obs_depth_m_used"] = obs_depth_448
+            end_points["sensor_depth_m_used"] = obs_depth_448  # compatibility
+            end_points["depth_confidence_pred"] = depth_confidence_448
+
+            # Compatibility/debug: correction relative to observed depth.
+            end_points["depth_refined_correction"] = depth_refined_correction_448
+            end_points["depth_residual_pred"] = depth_refined_correction_448
+        else:
+            end_points["D: Depth net pred mean"] = depth_net_pred_448.detach().mean()
+            end_points["depth_residual_pred"] = torch.zeros_like(depth_448)
+
+        objectness_score = objectness_logits_448.view(B, 2, -1).contiguous()
+        graspness_score = graspness_logits_448.view(B, 1, -1).contiguous()
+        end_points['objectness_score'] = objectness_score
+        end_points['graspness_score'] = graspness_score
+
+        objectness_pred = torch.argmax(objectness_score, dim=1)
+        grasp_raw = graspness_score.squeeze(1)
+        grasp_sel = grasp_raw.clamp(0.0, 1.0)
+
+        if 'token_valid_mask' in end_points:
+            valid_tok = end_points['token_valid_mask'].bool()
+            if valid_tok.shape[1] != Ntok:
+                raise ValueError(f'Expected token_valid_mask with {Ntok}, got {tuple(valid_tok.shape)}')
+        else:
+            valid_tok = torch.ones((B, Ntok), device=img.device, dtype=torch.bool)
+
+        depth_valid_tok = (
+            torch.isfinite(depth_448)
+            & (depth_448 > self.min_depth)
+            & (depth_448 < self.max_depth)
+        ).view(B, -1)
+
+        valid_tok = valid_tok & depth_valid_tok
+
+        end_points['dbg_depth_valid'] = depth_valid_tok.detach()
+        end_points['D: DepthValid#'] = depth_valid_tok.float().sum(dim=1).mean().reshape(())
+        end_points['D: DepthValid ratio'] = depth_valid_tok.float().mean().reshape(())
+
+        mask_obj_pred = valid_tok & (objectness_pred == 1)
+        mask_thr_pred = mask_obj_pred & (grasp_sel > float(cfgs.graspness_threshold))
+
+        end_points['dbg_grasp_raw'] = grasp_raw.detach()
+        end_points['dbg_grasp_sel'] = grasp_sel.detach()
+        end_points['dbg_mask_obj'] = mask_obj_pred.detach()
+        end_points['dbg_mask_pred'] = mask_thr_pred.detach()
+        end_points['dbg_objectness_pred'] = objectness_pred.detach()
+        end_points['D: PredCand#(thr)'] = mask_thr_pred.float().sum(dim=1).mean().reshape(())
+        end_points['D: PredObj#'] = mask_obj_pred.float().sum(dim=1).mean().reshape(())
+        end_points['D: GraspRaw min'] = grasp_raw.min().reshape(())
+        end_points['D: GraspRaw max'] = grasp_raw.max().reshape(())
+        end_points['D: GraspSel mean'] = grasp_sel.mean().reshape(())
+
+        flat_all = torch.arange(H * W, device=img.device, dtype=torch.long).unsqueeze(0).expand(B, -1).contiguous()
+        u_all = (flat_all % W).float()
+        v_all = (flat_all // W).float()
+        uv_all = torch.stack([u_all, v_all], dim=-1)
+
+        z_all_pred = depth_448.view(B, -1, 1).contiguous()
+        z_all_pred = torch.nan_to_num(z_all_pred, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(1e-6)
+        xyz_all_pred = self._backproject_uvz(uv_all, z_all_pred.detach(), K)
+
+        use_gt_xyz = self.is_training and self.use_gt_xyz_for_train and ('gt_depth_m' in end_points)
+        if use_gt_xyz:
+            gt_depth = end_points['gt_depth_m']
+            if gt_depth.dim() == 3:
+                gt_depth = gt_depth.unsqueeze(1)
+            elif gt_depth.dim() == 4:
+                gt_depth = gt_depth[:, :1]
+            z_all_gt = gt_depth.view(B, -1, 1).contiguous()
+            z_all_gt = torch.nan_to_num(z_all_gt, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(1e-6)
+            xyz_all_match = self._backproject_uvz(uv_all, z_all_gt, K)
+        else:
+            xyz_all_match = xyz_all_pred
+
+        seed_features_flipped = feat_grid.view(B, feat_grid.shape[1], -1).contiguous()  # (B,C,N)
+        seed_xyz = xyz_all_match
+        graspable_mask = mask_thr_pred
+
+        seed_features_graspable = []
+        seed_xyz_graspable = []
+        token_sel_idx = []
+        graspable_num_batch = 0.0
+        for i in range(B):
+            cur_mask = graspable_mask[i]
+            cur_idx = torch.nonzero(cur_mask, as_tuple=False).squeeze(1)
+            graspable_num_batch += float(cur_mask.sum().item())
+
+            if cur_idx.numel() == 0:
+                # fallback should still respect token/depth validity
+                cur_idx = torch.nonzero(valid_tok[i], as_tuple=False).squeeze(1)
+    
+            if cur_idx.numel() == 0:
+                cur_idx = torch.arange(Ntok, device=img.device)
+
+            cur_feat = seed_features_flipped[i][:, cur_idx]   # (C,Ng)
+            cur_seed_xyz = seed_xyz[i][cur_idx]               # (Ng,3)
+
+            if cur_seed_xyz.shape[0] >= M:
+                cur_seed_xyz_ = cur_seed_xyz.unsqueeze(0).contiguous()
+                fps_idxs = furthest_point_sample(cur_seed_xyz_, M)
+                cur_seed_xyz = gather_operation(cur_seed_xyz_.transpose(1, 2).contiguous(), fps_idxs).transpose(1, 2).squeeze(0).contiguous()
+                cur_feat = gather_operation(cur_feat.unsqueeze(0).contiguous(), fps_idxs).squeeze(0).contiguous()
+                cur_idx_sel = cur_idx[fps_idxs.squeeze(0).long()]
+            else:
+                rep = torch.randint(0, cur_seed_xyz.shape[0], (M,), device=img.device)
+                cur_seed_xyz = cur_seed_xyz[rep]
+                cur_feat = cur_feat[:, rep]
+                cur_idx_sel = cur_idx[rep]
+
+            seed_features_graspable.append(cur_feat)
+            seed_xyz_graspable.append(cur_seed_xyz)
+            token_sel_idx.append(cur_idx_sel)
+
+        seed_xyz_graspable = torch.stack(seed_xyz_graspable, 0)
+        seed_features_graspable = torch.stack(seed_features_graspable, 0)  # (B,C,M)
+        token_sel_idx = torch.stack(token_sel_idx, 0)
+
+        end_points['xyz_graspable'] = seed_xyz_graspable
+        end_points['token_sel_idx'] = token_sel_idx
+        end_points['token_sel_xyz'] = seed_xyz_graspable
+        end_points['D: Graspable Points'] = torch.tensor(graspable_num_batch / float(B), device=img.device)
+
+        if (self.vis_dir is not None) and (self._vis_iter % self.vis_every == 0):
+            try:
+                self._save_map_png(grasp_sel[0].view(H, W), os.path.join(self.vis_dir, f'dpt_grasp_map_it{self._vis_iter:06d}.png'), cmap='viridis')
+                self._save_map_png(objectness_pred[0].view(H, W).float(), os.path.join(self.vis_dir, f'dpt_objectness_it{self._vis_iter:06d}.png'), cmap='gray')
+                self._save_map_png(
+                    depth_448[0, 0],
+                    os.path.join(self.vis_dir, f'dpt_final_depth_it{self._vis_iter:06d}.png'),
+                    cmap='magma',
+                    vmin=self.min_depth,
+                    vmax=self.max_depth,
+                )
+
+                self._save_map_png(
+                    depth_448[0, 0],
+                    os.path.join(self.vis_dir, f'dpt_final_depth_it{self._vis_iter:06d}.png'),
+                    cmap='magma',
+                    vmin=self.min_depth,
+                    vmax=self.max_depth,
+                    title='final depth',
+                )
+
+                self._save_map_png(
+                    depth_net_pred_448[0, 0],
+                    os.path.join(self.vis_dir, f'dpt_depth_head_abs_debug_it{self._vis_iter:06d}.png'),
+                    cmap='magma',
+                    vmin=self.min_depth,
+                    vmax=self.max_depth,
+                    title='depth head sigmoid(abs) debug',
+                )
+
+                self._save_map_png(
+                    depth_head_raw_448[0, 0],
+                    os.path.join(self.vis_dir, f'dpt_depth_head_raw_it{self._vis_iter:06d}.png'),
+                    cmap='coolwarm',
+                    title='depth head raw output',
+                )
+
+                if self.use_obs_depth:
+                    self._save_map_png(
+                        obs_depth_448[0, 0],
+                        os.path.join(self.vis_dir, f'dpt_obs_depth_it{self._vis_iter:06d}.png'),
+                        cmap='magma',
+                        vmin=self.min_depth,
+                        vmax=self.max_depth,
+                        title='observed depth',
+                    )
+
+                    self._save_map_png(
+                        depth_confidence_448[0, 0],
+                        os.path.join(self.vis_dir, f'dpt_depth_confidence_it{self._vis_iter:06d}.png'),
+                        cmap='viridis',
+                        vmin=0.0,
+                        vmax=1.0,
+                        title='confidence of network predicted depth',
+                    )
+
+                    self._save_map_png(
+                        depth_refined_correction_448[0, 0],
+                        os.path.join(self.vis_dir, f'dpt_depth_refined_correction_it{self._vis_iter:06d}.png'),
+                        cmap='coolwarm',
+                        title='final depth - observed depth',
+                    )
+
+                    oor_mask = (
+                        (~torch.isfinite(depth_448))
+                        | (depth_448 <= self.min_depth)
+                        | (depth_448 >= self.max_depth)
+                    ).float()
+
+                    self._save_map_png(
+                        oor_mask[0, 0],
+                        os.path.join(self.vis_dir, f'dpt_final_depth_out_of_range_it{self._vis_iter:06d}.png'),
+                        cmap='gray',
+                        vmin=0.0,
+                        vmax=1.0,
+                        title='final depth out-of-range mask',
+                    )
+
+                if 'gt_depth_m' in end_points:
+                    gt_depth = end_points['gt_depth_m']
+                    if gt_depth.dim() == 3:
+                        gt_depth = gt_depth.unsqueeze(1)
+                    elif gt_depth.dim() == 4:
+                        gt_depth = gt_depth[:, :1]
+
+                    gt_depth = gt_depth.to(device=depth_448.device, dtype=depth_448.dtype)
+
+                    if gt_depth.shape[-2:] != (H, W):
+                        gt_depth = F.interpolate(gt_depth, size=(H, W), mode='nearest')
+
+                    gt_valid = (
+                        torch.isfinite(gt_depth)
+                        & (gt_depth > self.min_depth)
+                        & (gt_depth < self.max_depth)
+                    ).float()
+
+                    final_abs_err = (depth_448 - gt_depth).abs() * gt_valid
+                    net_abs_err = (depth_net_pred_448 - gt_depth).abs() * gt_valid
+                    
+                    self._save_map_png(
+                        final_abs_err[0, 0],
+                        os.path.join(self.vis_dir, f'dpt_final_depth_abs_err_it{self._vis_iter:06d}.png'),
+                        cmap='magma',
+                        vmin=0.0,
+                        title='|final depth - GT|',
+                    )
+
+                    self._save_map_png(
+                        net_abs_err[0, 0],
+                        os.path.join(self.vis_dir, f'dpt_depth_net_pred_abs_err_it{self._vis_iter:06d}.png'),
+                        cmap='magma',
+                        vmin=0.0,
+                        title='|network predicted depth - GT|',
+                    )
+
+                    if self.use_obs_depth:
+                        correction_target = gt_depth - obs_depth_448
+                        correction_err = (depth_refined_correction_448 - correction_target).abs() * gt_valid
+
+                        self._save_map_png(
+                            correction_target[0, 0],
+                            os.path.join(self.vis_dir, f'dpt_depth_correction_target_it{self._vis_iter:06d}.png'),
+                            cmap='coolwarm',
+                            title='GT - observed depth',
+                        )
+
+                        self._save_map_png(
+                            correction_err[0, 0],
+                            os.path.join(self.vis_dir, f'dpt_depth_correction_abs_err_it{self._vis_iter:06d}.png'),
+                            cmap='magma',
+                            vmin=0.0,
+                            title='|fused correction - target correction|',
+                        )
+
+                pts_uv = torch.stack([(token_sel_idx[0] % W).float(), (token_sel_idx[0] // W).float()], dim=-1)
+                self._save_overlay_points(img[0], pts_uv, os.path.join(self.vis_dir, f'dpt_seed_overlay_it{self._vis_iter:06d}.png'))
+                if 'gt_depth_m' in end_points:
+                    gt_depth = end_points['gt_depth_m']
+                    if gt_depth.dim() == 3:
+                        gt_depth = gt_depth.unsqueeze(1)
+                    z_all_gt = gt_depth.view(B, -1, 1).contiguous().clamp_min(1e-6)
+                    xyz_all_gt = self._backproject_uvz(uv_all, z_all_gt, K)
+                    self._save_pred_gt_cloud_ply(xyz_all_pred, xyz_all_gt, end_points)
+                    
+            except Exception:
+                pass
+
+        # # ------------------------------------------------------------------
+        # # 10) view + labels + grouping + head
+        # # ------------------------------------------------------------------
+        # # end_points, res_feat = self.view(seed_features_graspable, end_points)
+        # end_points, res_feat = self.view(
+        #     seed_features=seed_features_graspable,   # (B,C,M)
+        #     token_sel_idx=token_sel_idx,             # (B,M)
+        #     K=K,
+        #     depth_map=depth_448,                     # (B,1,448,448)
+        #     depth_prob=None,               # (B,D,448,448)
+        #     end_points=end_points,
+        # )
+        # seed_features_graspable = seed_features_graspable + res_feat
+
+        # if self.is_training:
+        #     if self.use_depth_comp:
+        #         grasp_top_views_rot, end_points = process_grasp_labels_depth_cls_compensated(
+        #             end_points,
+        #             point_match_thresh=0.005,
+        #             tolerated_depth=0.03,
+        #             depth_start=0.01,
+        #             depth_interval=0.01,
+        #             approach_axis_col=0,
+        #             approach_axis_sign=1.0,
+        #             depth_adjust_sign=1.0,
+        #         )
+        #     else:
+        #         grasp_top_views_rot, end_points = process_grasp_labels(end_points)
+        #     end_points = self._add_topview_quality_logs(end_points)
+        # else:
+        #     grasp_top_views_rot = end_points["grasp_top_view_rot"]
+
+        # # group_features = self.cy_group(seed_xyz_graspable, seed_features_graspable, grasp_top_views_rot)
+        # group_features = self.local_region_group(
+        #     seed_features=seed_features_graspable,
+        #     token_sel_idx=token_sel_idx,
+        #     seed_xyz=seed_xyz_graspable,
+        #     top_view_rot=grasp_top_views_rot,
+        #     feat_map=feat_grid,
+        #     depth_map=depth_448,
+        #     depth_prob=None,
+        #     objectness_logits=objectness_logits_448,
+        #     graspness_map=grasp_sel.view(B, 1, H, W).contiguous(),
+        #     K=K,
+        #     end_points=end_points,
+        # )
+        
+        # end_points = self.grasp_head(group_features, end_points)
+
+        # ------------------------------------------------------------------
+        # 10) Dense RotNet proposal + sparse full-rotation local decoder
+        # ------------------------------------------------------------------
+        # Separate two notions that were previously conflated:
+        #   has_grasp_labels: this run has GT labels (train + validation).
+        #   proposal_is_training: PyTorch module mode controlling sampled vs
+        #                         deterministic top-L proposal selection.
+        has_grasp_labels = bool(self.is_training)
+        proposal_is_training = bool(self.training)
+
+        forced_rotation_inds = None
+        if has_grasp_labels:
+            # Dense proposal supervision must be generated at the original M
+            # seeds, before the wrapper expands proposals to Q=M*L.
+            end_points['xyz_graspable'] = seed_xyz_graspable
+            end_points['token_sel_idx'] = token_sel_idx
+            end_points['token_sel_xyz'] = seed_xyz_graspable
+            end_points = self._prepare_dense_rotation_labels(end_points)
+
+            # GT forcing is a training-only curriculum. Never inject GT
+            # proposals during validation, otherwise validation no longer
+            # reflects top-L inference behavior.
+            if proposal_is_training and self.rot_force_gt_train:
+                forced_rotation_inds = self._gt_best_rotation_inds(end_points)
+
+            # This second processor is called inside the sparse local decoder
+            # after proposals have been flattened to Q=M*L.
+            process_fn = process_grasp_labels_extend_angle
+        else:
+            process_fn = None
+
+        end_points["D: RotNet proposal train mode"] = seed_xyz_graspable.new_tensor(
+            float(proposal_is_training)
+        ).reshape(())
+        end_points["D: RotNet has GT labels"] = seed_xyz_graspable.new_tensor(
+            float(has_grasp_labels)
+        ).reshape(())
+
+        end_points = self.grasp_module(
+            seed_features=seed_features_graspable,
+            seed_xyz=seed_xyz_graspable,
+            token_sel_idx=token_sel_idx,
+            feat_map=feat_grid,
+            depth_map=depth_448,
+            camera_K=K,
+            end_points=end_points,
+            # Sample proposals only in model.train(); validation/inference
+            # model.eval() use deterministic top-L, while labels can still be
+            # processed because process_fn is independent of this flag.
+            is_training=proposal_is_training,
+            process_grasp_labels_fn=process_fn,
+            process_grasp_labels_kwargs=None,
+            objectness_logits=objectness_logits_448,
+            graspness_map=grasp_sel.view(B, 1, H, W).contiguous(),
+            forced_rotation_inds=forced_rotation_inds,
+        )
+
+        with torch.no_grad():
+            end_points["D: Depth final mean"] = depth_448.detach().mean()
+            end_points["D: Depth final min"] = depth_448.detach().min()
+            end_points["D: Depth final max"] = depth_448.detach().max()
+            end_points["D: Depth final out-of-range ratio"] = (
+                (~torch.isfinite(depth_448))
+                | (depth_448 <= self.min_depth)
+                | (depth_448 >= self.max_depth)
+            ).float().mean()
+
+            if "gt_depth_m" in end_points:
+                gt_depth_dbg = end_points["gt_depth_m"]
+                if gt_depth_dbg.dim() == 3:
+                    gt_depth_dbg = gt_depth_dbg.unsqueeze(1)
+                elif gt_depth_dbg.dim() == 4:
+                    gt_depth_dbg = gt_depth_dbg[:, :1]
+
+                gt_depth_dbg = gt_depth_dbg.to(depth_448)
+
+                if gt_depth_dbg.shape[-2:] != depth_448.shape[-2:]:
+                    gt_depth_dbg = F.interpolate(
+                        gt_depth_dbg,
+                        size=depth_448.shape[-2:],
+                        mode="nearest",
+                    )
+
+                valid_dbg = (
+                    torch.isfinite(gt_depth_dbg)
+                    & (gt_depth_dbg > self.min_depth)
+                    & (gt_depth_dbg < self.max_depth)
+                )
+
+                if valid_dbg.any():
+                    end_points["D: Depth final MAE"] = (
+                        depth_448 - gt_depth_dbg
+                    ).abs()[valid_dbg].mean()
+
+                    end_points["D: Depth net pred MAE"] = (
+                        depth_net_pred_448 - gt_depth_dbg
+                    ).abs()[valid_dbg].mean()
+                    
+                    if self.use_obs_depth:
+                        end_points["D: ObsDepth MAE"] = (
+                            obs_depth_448 - gt_depth_dbg
+                        ).abs()[valid_dbg].mean()
+
+                        correction_target_dbg = gt_depth_dbg - obs_depth_448
+                        end_points["D: Depth correction target abs"] = (
+                            correction_target_dbg.abs()[valid_dbg].mean()
+                        )
+                        end_points["D: Depth correction MAE"] = (
+                            depth_refined_correction_448 - correction_target_dbg
+                        ).abs()[valid_dbg].mean()
+
+                        end_points["D: Depth refine gain"] = (
+                            end_points["D: ObsDepth MAE"] -
+                            end_points["D: Depth final MAE"]
+                        )
+                
+        if (self._vis_iter % self.debug_print_every == 0):
+            with torch.no_grad():
+                msg = (
+                    f"[economicgrasp_dpt] it={self._vis_iter} "
+                    f"obs={int(self.use_obs_depth)} "
+                    f"graspable={end_points['D: Graspable Points'].item():.1f} "
+                    f"cand={end_points['D: PredCand#(thr)'].item():.1f} "
+                    f"obj={end_points['D: PredObj#'].item():.1f} "
+                    f"grasp_mean={end_points['D: GraspSel mean'].item():.4f} "
+                    f"z_mean={end_points['D: Depth final mean'].item():.4f} "
+                    f"z_oor={end_points['D: Depth final out-of-range ratio'].item():.4f}"
+                )
+                if "D: Depth final MAE" in end_points:
+                    msg += f" z_mae={end_points['D: Depth final MAE'].item():.4f}"
+                if "D: Depth refine gain" in end_points:
+                    msg += f" refine_gain={end_points['D: Depth refine gain'].item():.4f}"
+                print(msg)
+
+        self._vis_iter += 1
+        return end_points
+    
+
+
+
+
+def _expected_from_score_logits(score_logits: torch.Tensor) -> torch.Tensor:
+    """Convert score-bin logits [C,Q] to expected score [Q]."""
+    C = int(score_logits.shape[0])
+    bins = torch.linspace(
+        0.0,
+        1.0,
+        steps=C,
+        device=score_logits.device,
+        dtype=score_logits.dtype,
+    ).view(C, 1)
+    prob = F.softmax(score_logits, dim=0)
+    return (prob * bins).sum(dim=0)
+
+
+def _decode_depth_from_logits(depth_logits: torch.Tensor) -> torch.Tensor:
+    """Decode depth logits [D+1,Q] into metric depth [Q,1].
+
+    The last channel is treated as invalid and is not selected as a physical
+    depth bin. If the tensor has no invalid channel, all channels are used.
+    """
+    C, Q = depth_logits.shape
+    cfg_num_depth = int(getattr(cfgs, "num_depth", max(C - 1, 1)))
+
+    if C >= cfg_num_depth + 1:
+        valid_depth_logits = depth_logits[:cfg_num_depth, :]
+    else:
+        valid_depth_logits = depth_logits
+
+    depth_idx = torch.argmax(valid_depth_logits, dim=0)  # [Q]
+    depth = (depth_idx.to(depth_logits.dtype) + 1.0) * 0.01
+    return depth.view(Q, 1)
+
+
+def _get_full_rotation(end_points, batch_idx: int, Q: int) -> torch.Tensor:
+    """Return direct full rotation [Q,3,3]."""
+    if "grasp_top_rotation" in end_points:
+        rot = end_points["grasp_top_rotation"][batch_idx].float()
+    elif "grasp_top_view_rot" in end_points:
+        # In the RotNet-CVA module this is already the full rotation proposal,
+        # not only an approach-view rotation.
+        rot = end_points["grasp_top_view_rot"][batch_idx].float()
+    else:
+        raise KeyError(
+            "RotNet-CVA pred_decode requires end_points['grasp_top_rotation'] "
+            "or end_points['grasp_top_view_rot']."
+        )
+
+    if rot.shape[:2] != (Q, 3) or rot.shape[-1] != 3:
+        raise RuntimeError(f"Expected rotation [Q,3,3] with Q={Q}, got {tuple(rot.shape)}")
+    return rot
+
+
+def pred_decode_rotnet_cva(end_points):
+    """Decode RotNet + FullRotation CVA predictions.
+
+    Differences from the original EconomicGrasp-DPT decoder:
+      1. Uses direct full rotation from grasp_top_rotation; no angle reconstruction.
+      2. Uses actual Q=M*L, not cfgs.m_point.
+      3. Applies softmax to score logits before expected-score estimation.
+      4. Ignores the invalid depth class during physical depth decode.
+    """
+    xyz = end_points["xyz_graspable"].float()  # [B,Q,3]
+    batch_size = xyz.shape[0]
+    grasp_preds = []
+
+    for i in range(batch_size):
+        grasp_center = xyz[i].float()  # [Q,3]
+        Q = int(grasp_center.shape[0])
+
+        # ------------------------------------------------------------
+        # Score: logits [6,Q] -> expected score [Q,1]
+        # ------------------------------------------------------------
+        score_logits = end_points["grasp_score_pred"][i].float()
+        if score_logits.dim() != 2 or score_logits.shape[1] != Q:
+            raise RuntimeError(
+                f"grasp_score_pred[{i}] must be [C,Q] with Q={Q}, got {tuple(score_logits.shape)}"
+            )
+        grasp_score = _expected_from_score_logits(score_logits).view(Q, 1)
+
+        # ------------------------------------------------------------
+        # Depth: logits [D+1,Q] -> depth [Q,1]
+        # ------------------------------------------------------------
+        depth_logits = end_points["grasp_depth_pred"][i].float()
+        if depth_logits.dim() != 2 or depth_logits.shape[1] != Q:
+            raise RuntimeError(
+                f"grasp_depth_pred[{i}] must be [D+1,Q] with Q={Q}, got {tuple(depth_logits.shape)}"
+            )
+        grasp_depth = _decode_depth_from_logits(depth_logits)
+
+        # ------------------------------------------------------------
+        # Width: same convention as EconomicGrasp-DPT.
+        # ------------------------------------------------------------
+        width_pred = end_points["grasp_width_pred"][i].float()
+        if width_pred.dim() == 2:
+            # [1,Q]
+            width_pred = width_pred.squeeze(0)
+        elif width_pred.dim() != 1:
+            raise RuntimeError(f"grasp_width_pred[{i}] must be [1,Q] or [Q], got {tuple(width_pred.shape)}")
+        if width_pred.shape[0] != Q:
+            raise RuntimeError(f"width Q mismatch: expected {Q}, got {width_pred.shape[0]}")
+
+        grasp_width = 1.2 * width_pred.view(Q, 1) / 10.0
+        grasp_width = torch.clamp(
+            grasp_width,
+            min=0.0,
+            max=float(getattr(cfgs, "grasp_max_width", 0.1)),
+        )
+
+        # ------------------------------------------------------------
+        # Rotation: use full rotation proposal directly.
+        # ------------------------------------------------------------
+        grasp_rot = _get_full_rotation(end_points, i, Q).contiguous().view(Q, 9)
+
+        # ------------------------------------------------------------
+        # Merge predictions.
+        # ------------------------------------------------------------
+        grasp_height = 0.02 * torch.ones_like(grasp_score)
+        obj_ids = -1 * torch.ones_like(grasp_score)
+        grasp_preds.append(
+            torch.cat(
+                [
+                    grasp_score,
+                    grasp_width,
+                    grasp_height,
+                    grasp_depth,
+                    grasp_rot,
+                    grasp_center,
+                    obj_ids,
+                ],
                 dim=-1,
             )
         )
