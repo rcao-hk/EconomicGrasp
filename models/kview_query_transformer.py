@@ -433,12 +433,21 @@ class KViewQueryTransformerConfig:
     head_num_layers: int = 2
     head_num_heads: int = 4
     head_attn_dropout: float = 0.05
+    # The branch-token attention flattens B*Q*A into the MHA batch
+    # dimension. Top-4 inference can exceed CUDA SDPA grid limits, so
+    # process this independent dimension in bounded chunks.
+    head_branch_attn_chunk_size: int = 16384
     head_dropout_p: float = 0.15
     use_view_embedding: bool = True
     use_xyz_embedding: bool = True
     predict_view_quality: bool = True
     use_collision_head: bool = False
-    
+
+    # Embedded evaluator-aligned CDF head.  The current GraspNet protocol uses
+    # six friction thresholds: 0.2, ..., 1.2.
+    num_cdf_thresholds: int = 6
+    cdf_increment_bias: float = -4.0
+
     # Debug / visualization.
     vis_dir: Optional[str] = None
     vis_every: int = 500
@@ -2208,24 +2217,25 @@ class SimpleAttentionModule(nn.Module):
 
 
 class CenterViewAngleCandidateDecoder(nn.Module):
-    """Simple D4RT-style query decoder for center-view-angle candidates.
+    """Decode complete center-view-angle-depth candidates.
 
-    Input:
-        group_features_angle: [B,C,Q*A]
-        end_points['kview_angle_query_base_q'] = Q
-        end_points['kview_angle_query_num_angle'] = A
+    The Transformer representation remains angle-level [B,Q,A,C].  The heads
+    expand only their output dimensions:
 
-    Candidate outputs:
-        grasp_depth_pred_angle:     [B,D+1,Q,A]
-        grasp_score_pred_angle:     [B,6,Q,A]
-        grasp_width_pred_angle:     [B,1,Q,A]
-        grasp_collision_pred_angle: [B,1,Q,A]  if enabled
+      grasp_depth_pred_angle:          [B,D+1,Q,A]   (unchanged auxiliary head)
+      grasp_width_pred_angle_depth:    [B,D,Q,A]
+      grasp_cdf_pred_angle_depth:      [B,T,Q,A,D]
 
-    Compatibility outputs are collapsed by score-expected selected angle:
-        grasp_depth_pred:     [B,D+1,Q]
-        grasp_score_pred:     [B,6,Q]
-        grasp_width_pred:     [B,1,Q]
-        grasp_collision_pred: [B,1,Q]          if enabled
+    T cumulative success probabilities correspond to friction thresholds
+    {0.2, 0.4, ..., 1.2}.  Their mean is a candidate's evaluator-aligned
+    utility.  Inference selects the best joint (angle, depth) candidate rather
+    than separately collapsing angle and depth.
+
+    For compatibility with existing CVA utilities, the decoder also exposes
+    depth-collapsed tensors under grasp_score_pred_angle / grasp_width_pred_angle
+    and selected-candidate tensors under grasp_score_pred / grasp_width_pred.
+    The score tensors are CDF logits, not legacy softmax-class logits; the flag
+    end_points['grasp_score_pred_is_cdf'] is therefore always set.
     """
 
     def __init__(
@@ -2238,243 +2248,374 @@ class CenterViewAngleCandidateDecoder(nn.Module):
         num_heads: int = 4,
         dropout_p: float = 0.15,
         attn_dropout: float = 0.05,
+        branch_attn_chunk_size: int = 16384,
         use_collision_head: bool = False,
+        num_cdf_thresholds: int = 6,
+        cdf_increment_bias: float = -4.0,
         debug_prefix: str = "D: CVA",
     ):
         super().__init__()
         self.num_angle = int(num_angle)
         self.num_depth = int(num_depth)
+        self.num_cdf_thresholds = int(num_cdf_thresholds)
+        self.cdf_increment_bias = float(cdf_increment_bias)
         self.hidden_dim = int(hidden_dim)
+        self.branch_attn_chunk_size = int(branch_attn_chunk_size)
+        if self.branch_attn_chunk_size <= 0:
+            raise ValueError(
+                "branch_attn_chunk_size must be positive, got "
+                f"{self.branch_attn_chunk_size}."
+            )
         self.debug_prefix = debug_prefix
-        self.use_collision_head = bool(use_collision_head)
+
+        # Collision is intentionally excluded from this version.  Invalidity is
+        # encoded directly by an all-zero CDF target.
+        if bool(use_collision_head):
+            raise ValueError(
+                "The CDF CVA decoder does not use an independent collision head. "
+                "Set kview_use_collision=False."
+            )
+        self.use_collision_head = False
+
+        if self.num_cdf_thresholds < 2:
+            raise ValueError("num_cdf_thresholds must be at least 2.")
 
         self.input_proj = nn.Conv1d(in_dim, hidden_dim, 1)
         self.angle_embed = nn.Embedding(self.num_angle, hidden_dim)
         self.layers = nn.ModuleList([
-            SimpleAttentionModule(hidden_dim, n_head=num_heads, dropout=attn_dropout)
+            SimpleAttentionModule(
+                hidden_dim,
+                n_head=num_heads,
+                dropout=attn_dropout,
+            )
             for _ in range(int(num_layers))
         ])
 
-        # EconomicGrasp-style lightweight branch interaction.
+        # Preserve the old branch projections so a previous CVA checkpoint can
+        # initialize all representation layers and the score projection.  Only
+        # the final width/CDF output layers change shape.
         self.depth_proj = nn.Conv1d(hidden_dim, 64, 1)
         self.width_proj = nn.Conv1d(hidden_dim, 64, 1)
         self.score_proj = nn.Conv1d(hidden_dim, 64, 1)
-
-        if self.use_collision_head:
-            # Separate collision branch, same spirit as Grasp_Head_Local_Interaction_Collision.
-            self.collision_proj = nn.Conv1d(hidden_dim, 64, 1)
-
-        # MHA supports variable token length, so 3 tokens when disabled,
-        # and 4 tokens when collision head is enabled.
-        self.branch_attn = nn.MultiheadAttention(64, 1, dropout=attn_dropout, batch_first=True)
+        self.branch_attn = nn.MultiheadAttention(
+            64, 1, dropout=attn_dropout, batch_first=True
+        )
 
         self.depth_dropout = nn.Dropout(dropout_p)
         self.width_dropout = nn.Dropout(dropout_p)
         self.score_dropout = nn.Dropout(dropout_p)
 
         self.depth_head = nn.Conv1d(64, self.num_depth + 1, 1)
-        self.width_head = nn.Conv1d(64, 1, 1)
-        self.score_head = nn.Conv1d(64, 6, 1)
+        self.width_head = nn.Conv1d(64, self.num_depth, 1)
+        self.cdf_head = nn.Conv1d(
+            64,
+            self.num_depth * self.num_cdf_thresholds,
+            1,
+        )
 
-        if self.use_collision_head:
-            self.collision_dropout = nn.Dropout(dropout_p)
-            self.collision_head = nn.Conv1d(64, 1, 1)
+    def _run_branch_attention(self, tokens: torch.Tensor) -> torch.Tensor:
+        """Apply 3-token branch attention in bounded independent chunks.
 
-    @staticmethod
-    def _expected_score(score_logits_angle: torch.Tensor) -> torch.Tensor:
-        # score_logits_angle: [B,6,Q,A]
-        bins = torch.tensor(
-            [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-            device=score_logits_angle.device,
-            dtype=score_logits_angle.dtype,
-        ).view(1, 6, 1, 1)
-        prob = F.softmax(score_logits_angle, dim=1)
-        return (prob * bins).sum(dim=1)  # [B,Q,A]
+        ``tokens`` has shape [B*Q*A, 3, 64].  In Top-4 inference, the first
+        dimension can exceed the launch-grid limits of PyTorch's fused
+        scaled-dot-product-attention CUDA kernel.  Every row is independent,
+        so chunking this dimension is mathematically equivalent in eval mode
+        and avoids the invalid-configuration launch.
+        """
+        if tokens.dim() != 3 or tokens.shape[1:] != (3, 64):
+            raise ValueError(
+                "branch-attention tokens must be [N,3,64], got "
+                f"{tuple(tokens.shape)}"
+            )
+
+        n = int(tokens.shape[0])
+        chunk = self.branch_attn_chunk_size
+        if n <= chunk:
+            out, _ = self.branch_attn(
+                tokens,
+                tokens,
+                tokens,
+                need_weights=False,
+            )
+            return out
+
+        outputs = []
+        for start in range(0, n, chunk):
+            token_chunk = tokens[start : start + chunk]
+            out_chunk, _ = self.branch_attn(
+                token_chunk,
+                token_chunk,
+                token_chunk,
+                need_weights=False,
+            )
+            outputs.append(out_chunk)
+        return torch.cat(outputs, dim=0)
+
+    def _monotonic_cdf_logits(self, raw: torch.Tensor) -> torch.Tensor:
+        """Convert [B,D,T,Q,A] raw outputs to monotonic CDF logits."""
+        if raw.dim() != 5 or raw.shape[2] != self.num_cdf_thresholds:
+            raise RuntimeError(
+                f"raw CDF tensor must be [B,D,T,Q,A], got {tuple(raw.shape)}"
+            )
+        base = raw[:, :, :1]
+        increments = F.softplus(
+            raw[:, :, 1:] + self.cdf_increment_bias
+        )
+        return torch.cat(
+            [base, base + torch.cumsum(increments, dim=2)],
+            dim=2,
+        )
 
     @staticmethod
     def _gather_angle(x: torch.Tensor, angle_idx: torch.Tensor) -> torch.Tensor:
-        """Gather candidate tensor along final angle dimension.
-
-        Args:
-            x: [B,C,Q,A]
-            angle_idx: [B,Q]
-
-        Returns:
-            [B,C,Q]
-        """
+        """Gather x [B,C,Q,A] at angle_idx [B,Q] -> [B,C,Q]."""
         B, C, Q, A = x.shape
-        idx = angle_idx.long().clamp(0, A - 1).view(B, 1, Q, 1).expand(B, C, Q, 1)
+        idx = angle_idx.long().clamp(0, A - 1).view(B, 1, Q, 1)
+        idx = idx.expand(B, C, Q, 1)
         return torch.gather(x, dim=-1, index=idx).squeeze(-1)
+
+    @staticmethod
+    def _gather_joint(
+        x: torch.Tensor,
+        angle_idx: torch.Tensor,
+        depth_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        """Gather x [B,C,Q,A,D] at joint indices -> [B,C,Q]."""
+        B, C, Q, A, D = x.shape
+        flat = x.reshape(B, C, Q, A * D)
+        joint = (
+            angle_idx.long().clamp(0, A - 1) * D
+            + depth_idx.long().clamp(0, D - 1)
+        )
+        gather_idx = joint.view(B, 1, Q, 1).expand(B, C, Q, 1)
+        return torch.gather(flat, dim=-1, index=gather_idx).squeeze(-1)
 
     @torch.no_grad()
     def _add_debug(
         self,
         end_points: Dict[str, Any],
-        score_angle: torch.Tensor,
-        depth_angle: torch.Tensor,
+        cdf_logits: torch.Tensor,
+        depth_logits: torch.Tensor,
         selected_angle: torch.Tensor,
-        collision_angle: Optional[torch.Tensor] = None,
+        selected_depth: torch.Tensor,
     ) -> None:
         p = self.debug_prefix
-        score_expected = self._expected_score(score_angle)  # [B,Q,A]
-        B, Q, A = score_expected.shape
+        prob = torch.sigmoid(cdf_logits)  # [B,T,Q,A,D]
+        utility = prob.mean(dim=1)        # [B,Q,A,D]
+        B, Q, A, D = utility.shape
 
-        end_points[f"{p} score angle expected"] = score_expected.mean()
-        end_points[f"{p} selected angle bin0 ratio"] = (selected_angle == 0).float().mean()
+        flat = utility.reshape(B, Q, A * D)
+        topk = torch.topk(flat, k=min(2, A * D), dim=-1).values
+        margin = topk[..., 0] - topk[..., -1]
+
+        end_points[f"{p} CDF utility mean"] = utility.mean()
+        end_points[f"{p} CDF utility max"] = utility.max()
+        end_points[f"{p} joint margin"] = margin.mean()
         end_points[f"{p} selected angle mean"] = selected_angle.float().mean()
-        end_points[f"{p} score max-angle margin"] = (
-            torch.topk(score_expected, k=min(2, A), dim=-1).values[..., 0]
-            - torch.topk(score_expected, k=min(2, A), dim=-1).values[..., -1]
-        ).mean()
+        end_points[f"{p} selected depth mean"] = selected_depth.float().mean()
+        end_points[f"{p} selected depth01 ratio"] = (
+            selected_depth <= 1
+        ).float().mean()
 
-        # Candidate depth shallow statistics under selected angle.
-        depth_sel = self._gather_angle(depth_angle, selected_angle)  # [B,D+1,Q]
-        depth_idx = torch.argmax(depth_sel[:, :self.num_depth, :], dim=1)
-        end_points[f"{p} selected depth01 ratio"] = (depth_idx <= 1).float().mean()
+        # Monotonicity is structural, but log it to catch reshape mistakes.
+        monotonic_violation = (
+            prob[:, 1:] + 1e-7 < prob[:, :-1]
+        ).float().mean()
+        end_points[f"{p} CDF monotonic violation"] = monotonic_violation
 
-        if self.use_collision_head and torch.is_tensor(collision_angle):
-            collision_sel = self._gather_angle(collision_angle, selected_angle)  # [B,1,Q]
-            collision_prob = torch.sigmoid(collision_sel)
-            # Keep same debug key as Grasp_Head_Local_Interaction_Collision.
-            end_points["D: GH collision prob"] = collision_prob.mean()
-            end_points[f"{p} collision prob"] = collision_prob.mean()
-            end_points[f"{p} collision prob max"] = collision_prob.max()
-
-        # If extended labels are available, compare score-selected angle to best-score GT angle.
-        label_score = end_points.get("batch_grasp_score_angle", None)
-        valid = end_points.get("batch_grasp_angle_valid_mask", None)
-        if torch.is_tensor(label_score) and label_score.shape == (B, Q, A):
-            best_label_angle = torch.argmax(label_score.float(), dim=-1)
-            if torch.is_tensor(valid) and valid.shape == (B, Q, A):
-                m = valid.any(dim=-1)
-            else:
-                m = torch.ones((B, Q), dtype=torch.bool, device=label_score.device)
-
-            if bool(m.any()):
-                end_points[f"{p} selected angle acc vs label-score-best"] = (
-                    selected_angle[m] == best_label_angle[m]
-                ).float().mean()
-                label_hist = _bincount_float(best_label_angle[m], A)
-                _add_hist_to_endpoints(
-                    end_points,
-                    "cva_debug_label_best_angle_hist",
-                    label_hist.cpu(),
-                    f"{p} label best angle",
+        label_bins = end_points.get(
+            "batch_grasp_cdf_bins_angle_depth", None
+        )
+        valid = end_points.get("batch_grasp_cdf_valid_mask", None)
+        if (
+            torch.is_tensor(label_bins)
+            and torch.is_tensor(valid)
+            and tuple(label_bins.shape) == (B, Q, A, D)
+        ):
+            valid = valid.bool()
+            target_utility = (
+                label_bins.gt(0).float()
+                * (
+                    self.num_cdf_thresholds
+                    - label_bins.clamp_min(1).float()
+                    + 1.0
                 )
+                / float(self.num_cdf_thresholds)
+            )
+            if bool(valid.any()):
+                end_points[f"{p} CDF utility target valid"] = (
+                    target_utility[valid].mean()
+                )
+                end_points[f"{p} CDF utility MAE valid"] = (
+                    utility[valid] - target_utility[valid]
+                ).abs().mean()
 
-    def forward(self, group_features_angle: torch.Tensor, end_points: Dict[str, Any]) -> Dict[str, Any]:
+    def forward(
+        self,
+        group_features_angle: torch.Tensor,
+        end_points: Dict[str, Any],
+    ) -> Dict[str, Any]:
         B, C, QA = group_features_angle.shape
         Q = int(end_points["kview_angle_query_base_q"])
         A = int(end_points["kview_angle_query_num_angle"])
         if A != self.num_angle or QA != Q * A:
-            raise RuntimeError(f"Expected QA=Q*A ({Q}*{A}), got {QA}.")
+            raise RuntimeError(
+                f"Expected QA=Q*A ({Q}*{A}), got {QA}."
+            )
 
-        x = self.input_proj(group_features_angle)  # [B,H,Q*A]
-        x = x.transpose(1, 2).contiguous().view(B, Q, A, self.hidden_dim)
-
+        x = self.input_proj(group_features_angle)
+        x = x.transpose(1, 2).contiguous().view(
+            B, Q, A, self.hidden_dim
+        )
         angle_ids = torch.arange(A, device=x.device).view(1, 1, A)
         x = x + self.angle_embed(angle_ids)
 
-        # D4RT-style: decoder answers a set of query tokens.
-        # Here the set is the A angle candidates of one center-view query.
         x = x.view(B * Q, A, self.hidden_dim)
         for layer in self.layers:
             x = layer(x)
 
-        # Preserve the angle-candidate representation before the legacy
-        # depth/width/score branches collapse operation factors.  The
-        # evaluator-aligned joint utility scorer combines this feature with a
-        # concrete depth candidate and exact evaluator supervision.  Do not
-        # detach here: the same endpoint can later support end-to-end fine-tuning.
         angle_feature = x.view(B, Q, A, self.hidden_dim).contiguous()
-        end_points["cva_angle_feature"] = angle_feature
+        # Exporting the full hidden tensor is useful for offline scorer mining,
+        # but retaining it in end_points during end-to-end training extends its
+        # lifetime through backward.  eval() keeps the old behavior.
+        force_full_decode = bool(end_points.get("cva_force_full_decode", False))
+        full_decode = (not self.training) or force_full_decode
+        if full_decode or bool(end_points.get("cva_export_angle_feature", False)):
+            end_points["cva_angle_feature"] = angle_feature
 
-        x = (
-            angle_feature
-            .reshape(B, Q * A, self.hidden_dim)
-            .transpose(1, 2)
-            .contiguous()
-        )  # [B,H,Q*A]
+        x = angle_feature.reshape(B, Q * A, self.hidden_dim)
+        x = x.transpose(1, 2).contiguous()
 
-        depth_feat = self.depth_proj(x)  # [B,64,Q*A]
+        depth_feat = self.depth_proj(x)
         width_feat = self.width_proj(x)
-        score_feat = self.score_proj(x)
+        cdf_feat = self.score_proj(x)
 
-        if self.use_collision_head:
-            collision_feat = self.collision_proj(x)
-
-        # Branch interaction per candidate.
-        # Disabled: [depth, width, score]      -> [B*Q*A,3,64]
-        # Enabled:  [depth, width, score, col] -> [B*Q*A,4,64]
         depth_tok = depth_feat.permute(0, 2, 1).reshape(B * Q * A, 1, 64)
         width_tok = width_feat.permute(0, 2, 1).reshape(B * Q * A, 1, 64)
-        score_tok = score_feat.permute(0, 2, 1).reshape(B * Q * A, 1, 64)
+        cdf_tok = cdf_feat.permute(0, 2, 1).reshape(B * Q * A, 1, 64)
+        tokens = torch.cat([depth_tok, width_tok, cdf_tok], dim=1)
+        tokens = self._run_branch_attention(tokens)
 
-        if self.use_collision_head:
-            collision_tok = collision_feat.permute(0, 2, 1).reshape(B * Q * A, 1, 64)
-            tokens = torch.cat([depth_tok, width_tok, score_tok, collision_tok], dim=1)
-        else:
-            tokens = torch.cat([depth_tok, width_tok, score_tok], dim=1)
+        depth_feat = tokens[:, 0].view(B, Q * A, 64)
+        depth_feat = depth_feat.permute(0, 2, 1).contiguous()
+        width_feat = tokens[:, 1].view(B, Q * A, 64)
+        width_feat = width_feat.permute(0, 2, 1).contiguous()
+        cdf_feat = tokens[:, 2].view(B, Q * A, 64)
+        cdf_feat = cdf_feat.permute(0, 2, 1).contiguous()
 
-        tokens, _ = self.branch_attn(tokens, tokens, tokens, need_weights=False)
+        depth_logits_flat = self.depth_head(
+            self.depth_dropout(depth_feat)
+        )
+        width_flat = self.width_head(
+            self.width_dropout(width_feat)
+        )
+        cdf_raw_flat = self.cdf_head(
+            self.score_dropout(cdf_feat)
+        )
 
-        depth_feat = tokens[:, 0].view(B, Q * A, 64).permute(0, 2, 1).contiguous()
-        width_feat = tokens[:, 1].view(B, Q * A, 64).permute(0, 2, 1).contiguous()
-        score_feat = tokens[:, 2].view(B, Q * A, 64).permute(0, 2, 1).contiguous()
+        depth_angle = depth_logits_flat.view(
+            B, self.num_depth + 1, Q, A
+        )
+        width_angle_depth = width_flat.view(
+            B, self.num_depth, Q, A
+        )
+        cdf_raw = cdf_raw_flat.view(
+            B,
+            self.num_depth,
+            self.num_cdf_thresholds,
+            Q,
+            A,
+        )
+        cdf_mono = self._monotonic_cdf_logits(cdf_raw)
+        cdf_angle_depth = cdf_mono.permute(
+            0, 2, 3, 4, 1
+        ).contiguous()  # [B,T,Q,A,D]
 
-        if self.use_collision_head:
-            collision_feat = tokens[:, 3].view(B, Q * A, 64).permute(0, 2, 1).contiguous()
-
-        depth_logits_flat = self.depth_head(self.depth_dropout(depth_feat))  # [B,D+1,Q*A]
-        score_logits_flat = self.score_head(self.score_dropout(score_feat))  # [B,6,Q*A]
-        width_flat = self.width_head(self.width_dropout(width_feat))         # [B,1,Q*A]
-
-        depth_angle = depth_logits_flat.view(B, self.num_depth + 1, Q, A)
-        score_angle = score_logits_flat.view(B, 6, Q, A)
-        width_angle = width_flat.view(B, 1, Q, A)
-
-        collision_angle = None
-        if self.use_collision_head:
-            collision_flat = self.collision_head(self.collision_dropout(collision_feat))  # [B,1,Q*A]
-            collision_angle = collision_flat.view(B, 1, Q, A)
-
-        # Candidate tensors for extended-angle losses.
+        # These are the only decoder tensors required by the training losses.
         end_points["grasp_depth_pred_angle"] = depth_angle
-        end_points["grasp_score_pred_angle"] = score_angle
+        end_points["grasp_width_pred_angle_depth"] = width_angle_depth
+        end_points["grasp_cdf_pred_angle_depth"] = cdf_angle_depth
+
+        # Training does not need sigmoid utility, joint argmax, collapsed
+        # compatibility aliases, or decoder debug.  Returning here shortens the
+        # lifetime of several [B,Q,A,D,T] / [B,Q,A,D] tensors without changing
+        # the logits or any gradient used by depth/width/CDF losses.
+        if not full_decode:
+            return end_points
+
+        cdf_prob = torch.sigmoid(cdf_angle_depth)
+        utility = cdf_prob.mean(dim=1)  # [B,Q,A,D]
+        joint_idx = utility.reshape(B, Q, A * self.num_depth).argmax(dim=-1)
+        selected_angle = torch.div(
+            joint_idx, self.num_depth, rounding_mode="floor"
+        )
+        selected_depth = torch.remainder(joint_idx, self.num_depth)
+
+        # Depth-collapsed compatibility tensors per angle.
+        depth_per_angle = utility.argmax(dim=-1)  # [B,Q,A]
+        width_qad = width_angle_depth.permute(0, 2, 3, 1).contiguous()
+        width_angle = torch.gather(
+            width_qad,
+            dim=-1,
+            index=depth_per_angle.unsqueeze(-1),
+        ).squeeze(-1).unsqueeze(1)  # [B,1,Q,A]
+
+        cdf_bqadt = cdf_angle_depth.permute(0, 2, 3, 4, 1).contiguous()
+        cdf_angle = torch.gather(
+            cdf_bqadt,
+            dim=3,
+            index=depth_per_angle.unsqueeze(-1).unsqueeze(-1).expand(
+                B, Q, A, 1, self.num_cdf_thresholds
+            ),
+        ).squeeze(3).permute(0, 3, 1, 2).contiguous()
+
+        cdf_selected = self._gather_joint(
+            cdf_angle_depth,
+            selected_angle,
+            selected_depth,
+        )  # [B,T,Q]
+        width_full = width_qad.unsqueeze(1)  # [B,1,Q,A,D]
+        width_selected = self._gather_joint(
+            width_full,
+            selected_angle,
+            selected_depth,
+        )  # [B,1,Q]
+
+        per_angle_utility = utility.max(dim=-1).values  # [B,Q,A]
+        angle_logits_valid = per_angle_utility.permute(0, 2, 1).contiguous()
+        invalid = angle_logits_valid.new_full((B, 1, Q), -20.0)
+
+        end_points["grasp_cdf_utility_angle_depth"] = utility
+
+        # Compatibility aliases.  Score aliases contain CDF logits and must be
+        # decoded with sigmoid-mean rather than softmax expectation.
+        end_points["grasp_score_pred_angle"] = cdf_angle
         end_points["grasp_width_pred_angle"] = width_angle
-
-        if self.use_collision_head:
-            end_points["grasp_collision_pred_angle"] = collision_angle
-
-        # Inference/compatibility collapse:
-        # keep selected angle based on candidate expected score only.
-        # Collision is not used here by default.
-        score_expected = self._expected_score(score_angle)  # [B,Q,A]
-        selected_angle = torch.argmax(score_expected, dim=-1)  # [B,Q]
+        end_points["grasp_score_pred_is_cdf"] = True
 
         end_points["cva_selected_angle"] = selected_angle
-        end_points["cva_score_expected_angle"] = score_expected.detach()
+        end_points["cva_selected_depth"] = selected_depth
+        end_points["cva_selected_utility"] = self._gather_joint(
+            utility.unsqueeze(1),
+            selected_angle,
+            selected_depth,
+        ).squeeze(1)
 
-        # Pseudo angle prediction for existing pred_decode:
-        # valid angle logits = score expected.
-        angle_logits_valid = score_expected.permute(0, 2, 1).contiguous()  # [B,A,Q]
-        invalid = angle_logits_valid.new_full((B, 1, Q), -20.0)
-        end_points["grasp_angle_pred"] = torch.cat([angle_logits_valid, invalid], dim=1)
-
-        end_points["grasp_depth_pred"] = self._gather_angle(depth_angle, selected_angle)
-        end_points["grasp_score_pred"] = self._gather_angle(score_angle, selected_angle)
-        end_points["grasp_width_pred"] = self._gather_angle(width_angle, selected_angle)
-
-        if self.use_collision_head:
-            # Same key as Grasp_Head_Local_Interaction_Collision.
-            end_points["grasp_collision_pred"] = self._gather_angle(collision_angle, selected_angle)
+        end_points["grasp_angle_pred"] = torch.cat(
+            [angle_logits_valid, invalid], dim=1
+        )
+        end_points["grasp_depth_pred"] = self._gather_angle(
+            depth_angle, selected_angle
+        )
+        end_points["grasp_score_pred"] = cdf_selected
+        end_points["grasp_width_pred"] = width_selected
 
         self._add_debug(
             end_points=end_points,
-            score_angle=score_angle,
-            depth_angle=depth_angle,
+            cdf_logits=cdf_angle_depth,
+            depth_logits=depth_angle,
             selected_angle=selected_angle,
-            collision_angle=collision_angle,
+            selected_depth=selected_depth,
         )
         return end_points
 
@@ -2533,7 +2674,12 @@ class CenterViewAngleQueryTransformerLocalGraspModule(nn.Module):
             num_heads=max(int(self.config.head_num_heads), 1),
             dropout_p=float(self.config.head_dropout_p),
             attn_dropout=float(self.config.head_attn_dropout),
+            branch_attn_chunk_size=int(
+                self.config.head_branch_attn_chunk_size
+            ),
             use_collision_head=bool(self.config.use_collision_head),
+            num_cdf_thresholds=int(self.config.num_cdf_thresholds),
+            cdf_increment_bias=float(self.config.cdf_increment_bias),
             debug_prefix="D: CVA",
         )
 
@@ -2892,7 +3038,10 @@ class CenterViewAngleQueryTransformerLocalGraspModule(nn.Module):
             end_points=end_points,
         )
 
-        # 6) Candidate decoder.
+        # 6) Candidate decoder.  Visualization requires compatibility decode
+        # tensors even in train mode; ordinary training keeps only loss inputs.
+        if self.config.vis_dir is not None:
+            end_points["cva_force_full_decode"] = True
         end_points = self.decoder(group_features_a, end_points)
 
         # 7) Internal PNG-only visualization.  No .npy/.npz files are saved.

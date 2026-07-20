@@ -34,7 +34,7 @@ from dataset.graspnet_dataset import GraspNetMultiDataset, collate_fn
 
 # ----------- GLOBAL CONFIG ------------
 EPOCH_CNT = 0
-CHECKPOINT_PATH = cfgs.checkpoint_path if cfgs.checkpoint_path is not None and cfgs.resume else None
+CHECKPOINT_PATH = cfgs.checkpoint_path if cfgs.checkpoint_path is not None else None
 
 
 def get_rank():
@@ -357,12 +357,21 @@ class Trainer:
         self.net.to(self.device)
 
         if self.distributed:
+            # self.net = DDP(
+            #     self.net,
+            #     device_ids=[self.local_rank],
+            #     output_device=self.local_rank,
+            #     broadcast_buffers=False,
+            #     find_unused_parameters=True,
+            # )
             self.net = DDP(
                 self.net,
                 device_ids=[self.local_rank],
                 output_device=self.local_rank,
                 broadcast_buffers=False,
-                find_unused_parameters=True,
+                find_unused_parameters=False,
+                gradient_as_bucket_view=True,
+                static_graph=True,
             )
 
         self.optimizer = self.build_optimizer()
@@ -370,10 +379,59 @@ class Trainer:
         self.start_epoch = 0
         if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
             checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu')
-            self.unwrap_model().load_state_dict(checkpoint['model_state_dict'], strict=True)
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            self.start_epoch = checkpoint['epoch']
-            self.log_string(f'-> loaded checkpoint {CHECKPOINT_PATH} (epoch: {self.start_epoch})')
+            state_dict = (
+                checkpoint['model_state_dict']
+                if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint
+                else checkpoint
+            )
+
+            if bool(getattr(cfgs, 'resume', False)):
+                # Resume is strict: it must be a checkpoint produced by the same
+                # CDF/depth-wise-width architecture.
+                self.unwrap_model().load_state_dict(state_dict, strict=True)
+                if not (
+                    isinstance(checkpoint, dict)
+                    and 'optimizer_state_dict' in checkpoint
+                    and 'epoch' in checkpoint
+                ):
+                    raise RuntimeError(
+                        '--resume requires a full training checkpoint with model, '
+                        'optimizer, and epoch states.'
+                    )
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                self.start_epoch = int(checkpoint['epoch'])
+                self.log_string(
+                    f'-> resumed checkpoint {CHECKPOINT_PATH} '
+                    f'(epoch: {self.start_epoch})'
+                )
+            else:
+                # Initialization from the previous CVA model: load every tensor
+                # whose name and shape still match.  New CDF/width heads are
+                # intentionally initialized from scratch.
+                model = self.unwrap_model()
+                current = model.state_dict()
+                compatible = {}
+                skipped_shape = []
+                unexpected = []
+                for key, value in state_dict.items():
+                    if key not in current:
+                        unexpected.append(key)
+                    elif tuple(value.shape) != tuple(current[key].shape):
+                        skipped_shape.append(
+                            (key, tuple(value.shape), tuple(current[key].shape))
+                        )
+                    else:
+                        compatible[key] = value
+                load_result = model.load_state_dict(compatible, strict=False)
+                self.log_string(
+                    f'-> initialized from {CHECKPOINT_PATH}: '
+                    f'loaded={len(compatible)}, shape_skipped={len(skipped_shape)}, '
+                    f'unexpected={len(unexpected)}, missing={len(load_result.missing_keys)}'
+                )
+                for key, old_shape, new_shape in skipped_shape[:20]:
+                    self.log_string(
+                        f'   [INIT-SKIP] {key}: {old_shape} -> {new_shape}'
+                    )
 
     def unwrap_model(self):
         return self.net.module if hasattr(self.net, 'module') else self.net

@@ -17,11 +17,13 @@ def get_loss(end_points):
     # depth_loss, end_points = compute_depth_loss(end_points)
     # score_loss, end_points = compute_score_loss_cls(end_points)
     # width_loss, end_points = compute_width_loss(end_points)
-    score_loss, end_points = compute_cva_score_loss(end_points)
+    # Embedded evaluator-aligned heads.  The score loss is CDF-only; an
+    # independent collision head is intentionally disabled because collision,
+    # empty, and force-closure failures are all represented by an all-zero CDF.
+    score_loss, end_points = compute_cva_cdf_loss(end_points, balanced=True)
     depth_loss, end_points = compute_cva_depth_loss(end_points)
-    width_loss, end_points = compute_cva_width_loss(end_points)
-    collision_loss, end_points = compute_cva_collision_loss(end_points, balanced=False)
-    # collision_loss, end_points = compute_collision_loss(end_points, True)
+    width_loss, end_points = compute_cva_width_depth_loss(end_points)
+    collision_loss = 0.0 * score_loss
     
     obj_loss = cfgs.objectness_loss_weight * objectness_loss
     grasp_loss = (
@@ -34,8 +36,6 @@ def get_loss(end_points):
     )
 
     depth_reg_loss = cfgs.depth_prob_loss_weight * depth_reg_loss
-    collision_loss = cfgs.collision_loss_weight  * collision_loss
-    grasp_loss = grasp_loss + collision_loss
     loss = obj_loss + grasp_loss + depth_reg_loss
 
     end_points['A: Objectness Loss'] = objectness_loss
@@ -470,6 +470,207 @@ def _score_to_cls(score: torch.Tensor) -> torch.Tensor:
     # Match current EconomicGrasp score classification:
     # grasp_score_label = (batch_grasp_score * 10 / 2).long()
     return (score.float() * 10.0 / 2.0).long().clamp(0, 5)
+
+
+def _cdf_bins_to_target(
+    bins: torch.Tensor,
+    num_thresholds: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Expand compact CDF bins [..] to binary cumulative targets [..,T]."""
+    if bins.min() < 0 or bins.max() > num_thresholds:
+        raise ValueError(
+            f"CDF bins must be in [0,{num_thresholds}], got "
+            f"min={int(bins.min())}, max={int(bins.max())}"
+        )
+    ids = torch.arange(
+        num_thresholds,
+        device=bins.device,
+        dtype=bins.dtype,
+    )
+    return (
+        (bins.unsqueeze(-1) > 0)
+        & (ids >= bins.unsqueeze(-1) - 1)
+    ).to(dtype=dtype)
+
+
+def compute_cva_cdf_loss(end_points, balanced: bool = True):
+    """CDF-only loss for complete center-view-angle-depth candidates.
+
+    Required:
+      grasp_cdf_pred_angle_depth:          [B,T,Q,A,D]
+      batch_grasp_cdf_bins_angle_depth:   [B,Q,A,D], values 0..T
+      batch_grasp_cdf_valid_mask:          [B,Q,A,D]
+
+    Each threshold is balanced independently between positive and negative
+    candidates.  This matches the validated external J0 scorer objective while
+    preserving an absolute probability scale across views/centers/objects.
+    """
+    pred = end_points["grasp_cdf_pred_angle_depth"]
+    if pred.dim() != 5:
+        raise ValueError(
+            "grasp_cdf_pred_angle_depth must be [B,T,Q,A,D], got "
+            f"{tuple(pred.shape)}"
+        )
+    B, T, Q, A, D = pred.shape
+    bins = end_points["batch_grasp_cdf_bins_angle_depth"].long().to(pred.device)
+    valid = end_points["batch_grasp_cdf_valid_mask"].bool().to(pred.device)
+    expected = (B, Q, A, D)
+    if bins.shape != expected or valid.shape != expected:
+        raise ValueError(
+            f"CDF label shapes must be {expected}, got bins={tuple(bins.shape)}, "
+            f"valid={tuple(valid.shape)}"
+        )
+
+    thresholds = end_points.get("batch_grasp_cdf_thresholds", None)
+    if torch.is_tensor(thresholds) and thresholds.numel() != T:
+        raise ValueError(
+            f"Model predicts T={T} thresholds but label cache has "
+            f"{thresholds.numel()}."
+        )
+
+    target = _cdf_bins_to_target(bins, T, pred.dtype)  # [B,Q,A,D,T]
+    logits = pred.permute(0, 2, 3, 4, 1).contiguous() # [B,Q,A,D,T]
+    loss_map = F.binary_cross_entropy_with_logits(
+        logits, target, reduction="none"
+    )
+
+    pieces = []
+    for t in range(T):
+        loss_t = loss_map[..., t]
+        target_t = target[..., t]
+        if not bool(valid.any()):
+            pieces.append(0.0 * loss_t.sum())
+            continue
+        if balanced:
+            pos = valid & (target_t > 0.5)
+            neg = valid & (~pos)
+            sub = []
+            if bool(pos.any()):
+                sub.append(loss_t[pos].mean())
+            if bool(neg.any()):
+                sub.append(loss_t[neg].mean())
+            pieces.append(
+                torch.stack(sub).mean() if sub else 0.0 * loss_t.sum()
+            )
+        else:
+            pieces.append(loss_t[valid].mean())
+    loss = torch.stack(pieces).mean()
+
+    end_points["B: Score Loss"] = loss
+    end_points["B: CDF Loss"] = loss
+
+    run_diag = end_points.get("cva_compute_diagnostics", True)
+    if torch.is_tensor(run_diag):
+        run_diag = bool(run_diag.detach().item())
+    else:
+        run_diag = bool(run_diag)
+
+    # These metrics allocate sigmoid probabilities, utility maps, binary maps,
+    # and flattened selection tensors.  They are observational only; computing
+    # them every N steps is sufficient and does not change the loss/gradient.
+    if run_diag:
+        with torch.no_grad():
+            prob = torch.sigmoid(logits)
+            utility = prob.mean(dim=-1)          # [B,Q,A,D]
+            target_utility = target.mean(dim=-1)
+            pred_binary = prob >= 0.5
+            target_binary = target >= 0.5
+
+            if bool(valid.any()):
+                end_points["D: CDF Acc"] = (
+                    pred_binary[valid] == target_binary[valid]
+                ).float().mean()
+                end_points["D: CDF Utility Pred"] = utility[valid].mean()
+                end_points["D: CDF Utility Target"] = target_utility[valid].mean()
+                end_points["D: CDF Utility MAE"] = (
+                    utility[valid] - target_utility[valid]
+                ).abs().mean()
+                end_points["D: CDF Positive Ratio"] = (
+                    bins[valid] > 0
+                ).float().mean()
+
+                # Candidate-selection diagnostic: target utility of the model's
+                # best angle-depth candidate for every matched center-view query.
+                valid_q = valid.any(dim=-1).any(dim=-1)  # [B,Q]
+                masked_utility = utility.masked_fill(~valid, -1e6)
+                selected = masked_utility.reshape(B, Q, A * D).argmax(dim=-1)
+                selected_target = target_utility.reshape(B, Q, A * D).gather(
+                    -1, selected.unsqueeze(-1)
+                ).squeeze(-1)
+                oracle_target = target_utility.masked_fill(~valid, -1.0)
+                oracle_target = oracle_target.reshape(B, Q, A * D).max(dim=-1).values
+                if bool(valid_q.any()):
+                    end_points["D: CDF Selected Target Utility"] = (
+                        selected_target[valid_q].mean()
+                    )
+                    end_points["D: CDF Oracle Target Utility"] = (
+                        oracle_target[valid_q].mean()
+                    )
+                    end_points["D: CDF Selection Regret"] = (
+                        oracle_target[valid_q] - selected_target[valid_q]
+                    ).mean()
+            else:
+                z = loss.detach() * 0.0
+                end_points["D: CDF Acc"] = z
+                end_points["D: CDF Utility Pred"] = z
+                end_points["D: CDF Utility Target"] = z
+                end_points["D: CDF Utility MAE"] = z
+                end_points["D: CDF Positive Ratio"] = z
+
+            monotonic_violation = (
+                prob[..., 1:] + 1e-7 < prob[..., :-1]
+            ).float().mean()
+            end_points["D: CDF Monotonic Violation"] = monotonic_violation
+
+    return loss, end_points
+
+
+def compute_cva_width_depth_loss(end_points):
+    """Depth-wise width regression for all evaluator-valid candidates.
+
+    Required:
+      grasp_width_pred_angle_depth:               [B,D,Q,A]
+      batch_grasp_width_angle_depth:              [B,Q,A,D], meters
+      batch_grasp_width_valid_mask_angle_depth:   [B,Q,A,D]
+    """
+    pred = end_points["grasp_width_pred_angle_depth"]
+    if pred.dim() != 4:
+        raise ValueError(
+            "grasp_width_pred_angle_depth must be [B,D,Q,A], got "
+            f"{tuple(pred.shape)}"
+        )
+    pred = pred.permute(0, 2, 3, 1).contiguous()  # [B,Q,A,D]
+    label = end_points["batch_grasp_width_angle_depth"].to(
+        device=pred.device, dtype=pred.dtype
+    ) * 10.0
+    valid = end_points[
+        "batch_grasp_width_valid_mask_angle_depth"
+    ].bool().to(pred.device)
+
+    if pred.shape != label.shape or pred.shape != valid.shape:
+        raise ValueError(
+            f"Depth-wise width shapes must match, pred={tuple(pred.shape)}, "
+            f"label={tuple(label.shape)}, valid={tuple(valid.shape)}"
+        )
+
+    loss_map = F.smooth_l1_loss(pred, label, reduction="none")
+    if not bool(valid.any()):
+        loss = 0.0 * loss_map.sum()
+    else:
+        loss = loss_map[valid].mean()
+
+    end_points["B: Width Loss"] = loss
+    end_points["B: Width Depth Loss"] = loss
+    with torch.no_grad():
+        if bool(valid.any()):
+            end_points["D: Width Depth MAE x10"] = (
+                pred[valid] - label[valid]
+            ).abs().mean()
+            end_points["D: Width Depth Label mean"] = label[valid].mean() / 10.0
+            end_points["D: Width Depth Pred mean"] = pred[valid].mean() / 10.0
+            end_points["D: Width Depth valid ratio"] = valid.float().mean()
+    return loss, end_points
 
 
 def compute_cva_score_loss(end_points):

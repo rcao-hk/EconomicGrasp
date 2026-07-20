@@ -99,26 +99,28 @@ parser.add_argument(
 parser.add_argument("--extend_angle", action='store_true')
 parser.add_argument("--vis_dir", type=str)
 parser.add_argument("--vis_every", type=int, default=1000)
+parser.add_argument("--use_top4_view_infer", action='store_true')
 
-parser.add_argument(
-    '--dataset',
-    default='graspnet',
-    choices=['graspnet', 'gc6d', 'mixed'],
-    help='Dataset mode: graspnet, gc6d, or mixed.'
-)
-parser.add_argument(
-    '--train_split',
-    default='train',
-    choices=['train', 'train_remove_overlap'],
-    help='Training split. For GC6D use train_remove_overlap.'
-)
-parser.add_argument(
-    '--test_split',
-    default='test',
-    help='Evaluation split. For GC6D usually test.'
-)
-parser.add_argument("--enable_eval", action='store_true')
-parser.add_argument("--model_variant", type=str, default='A1')
+# parser.add_argument(
+#     '--dataset',
+#     default='graspnet',
+#     choices=['graspnet', 'gc6d', 'mixed'],
+#     help='Dataset mode: graspnet, gc6d, or mixed.'
+# )
+# parser.add_argument(
+#     '--train_split',
+#     default='train',
+#     choices=['train', 'train_remove_overlap'],
+#     help='Training split. For GC6D use train_remove_overlap.'
+# )
+# parser.add_argument(
+#     '--test_split',
+#     default='test',
+#     help='Evaluation split. For GC6D usually test.'
+# )
+# parser.add_argument("--enable_eval", action='store_true')
+# parser.add_argument("--model_variant", type=str, default='A1')
+
 # parser.add_argument('--rerank_modes', type=str,
 #                     default='base,g,g_ent,g_ent_view,g_ent_view_align')
 # parser.add_argument('--rerank_primary_mode', type=str, default='base')

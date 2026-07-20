@@ -198,7 +198,8 @@ if cfgs.multi_modal:
     #     vis_every=500)
     
     from models.economicgrasp_bip3d import economicgrasp_dpt
-    from models.economicgrasp_bip3d import pred_decode_center_view_angle as pred_decode
+    # from models.economicgrasp_bip3d import pred_decode_center_view_angle as pred_decode
+    from models.economicgrasp_bip3d import pred_decode_center_view_angle_cdf as pred_decode
     # from models.economicgrasp_bip3d import economicgrasp_dpt_rotnet as economicgrasp_dpt
     # from models.economicgrasp_bip3d import pred_decode_rotnet_cva as pred_decode
     # # # from models.economicgrasp_bip3d import pred_decode_collision as pred_decode

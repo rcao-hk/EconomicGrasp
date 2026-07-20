@@ -6551,8 +6551,20 @@ class economicgrasp_dpt(nn.Module):
             view_dirs=self.view_dirs,
             batch_viewpoint_params_to_matrix_fn=batch_viewpoint_params_to_matrix,  # direct repo function, no fallback
             config=KViewQueryTransformerConfig(
-                mode=getattr(cfgs, 'kview_mode', 'A1'),
-                num_query_views=getattr(cfgs, 'kview_k', 1),
+                # A2 keeps the original single-view sampling during training,
+                # while expanding deterministic Top-4 ViewNet hypotheses at
+                # standalone inference.  The decoder flag alone cannot create
+                # missing view queries, so configure the selector here as well.
+                mode=(
+                    'A2'
+                    if bool(getattr(cfgs, 'use_top4_view_infer', False))
+                    else getattr(cfgs, 'kview_mode', 'A1')
+                ),
+                num_query_views=(
+                    4
+                    if bool(getattr(cfgs, 'use_top4_view_infer', False))
+                    else getattr(cfgs, 'kview_k', 1)
+                ),
                 sample_temperature=getattr(cfgs, 'kview_tau', 1.0),
                 sample_from=getattr(cfgs, 'kview_sample_from', 'minmax_norm'),
 
@@ -6572,8 +6584,13 @@ class economicgrasp_dpt(nn.Module):
                 head_num_heads=getattr(cfgs, 'kview_head_heads', 4),
                 head_attn_dropout=getattr(cfgs, 'kview_attn_dropout', 0.05),
                 head_dropout_p=getattr(cfgs, 'kview_head_dropout', 0.15),
-                use_collision_head=getattr(cfgs, 'kview_use_collision', True),
-                
+                # Invalid/collision candidates are represented by an all-zero
+                # evaluator-aligned CDF target.  Do not instantiate a separate
+                # collision branch in the embedded-CDF model.
+                use_collision_head=False,
+                num_cdf_thresholds=6,
+                cdf_increment_bias=-4.0,
+
                 vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'kview_query_grasp'),
                 vis_every=self.vis_every,
                 vis_num_queries=256,
@@ -7492,6 +7509,9 @@ class economicgrasp_dpt(nn.Module):
                     "grasp_score_pred_angle",
                     "grasp_depth_pred_angle",
                     "grasp_width_pred_angle",
+                    "grasp_cdf_pred_angle_depth",
+                    "grasp_cdf_utility_angle_depth",
+                    "grasp_width_pred_angle_depth",
                     "grasp_collision_pred_angle",
                 )
                 prediction_snapshot = {
@@ -7735,15 +7755,21 @@ def pred_decode_collision_filter(end_points):
 
 
 
-def _score_expected_from_logits(score_logits: torch.Tensor) -> torch.Tensor:
-    """Return expected score from raw class logits.
+def _score_expected_from_logits(
+    score_logits: torch.Tensor,
+    is_cdf: bool = False,
+) -> torch.Tensor:
+    """Return utility from either legacy class logits or CDF logits.
 
     Args:
-        score_logits: [C, Q] or [C, Q, A], raw logits over score bins.
-
-    Returns:
-        [Q] or [Q, A] expected score in [0, 1].
+        score_logits: [C,Q] or [C,Q,A].
+        is_cdf: when True, channels are cumulative success logits and utility
+            is mean(sigmoid(logit)); otherwise use legacy softmax-bin expected
+            quality.
     """
+    if is_cdf:
+        return torch.sigmoid(score_logits).mean(dim=0)
+
     C = score_logits.shape[0]
     bins = torch.linspace(
         0.0,
@@ -7773,91 +7799,409 @@ def _gather_angle_candidate(x: torch.Tensor, angle_idx: torch.Tensor) -> torch.T
     return torch.gather(x, dim=-1, index=idx).squeeze(-1)
 
 
-def pred_decode_center_view_angle(end_points, batch_viewpoint_params_to_matrix_fn=None):
-    """Decode Center-View-Angle Query Transformer predictions.
+def _gather_joint_candidate(
+    x: torch.Tensor,
+    angle_idx: torch.Tensor,
+    depth_idx: torch.Tensor,
+) -> torch.Tensor:
+    """Gather x [C,Q,A,D] at per-query joint indices -> [C,Q]."""
+    if x.dim() != 4:
+        raise ValueError(f"Expected x [C,Q,A,D], got {tuple(x.shape)}")
+    C, Q, A, D = x.shape
+    flat = x.reshape(C, Q, A * D)
+    joint = (
+        angle_idx.long().clamp(0, A - 1) * D
+        + depth_idx.long().clamp(0, D - 1)
+    )
+    idx = joint.view(1, Q, 1).expand(C, Q, 1)
+    return torch.gather(flat, dim=-1, index=idx).squeeze(-1)
 
-    This function prefers candidate-level CVA outputs.  If they are absent, it
-    falls back to collapsed compatibility outputs.
 
-    Output format for each batch item:
-        [score, width, height, depth, rot(9), center(3), obj_id]
+
+def _cdf_decode_query_indices(
+    end_points,
+    batch_i: int,
+    total_q: int,
+    use_top4_view: bool,
+) -> torch.Tensor:
+    """Choose query rows for strict CDF decoding.
+
+    K-view selector layout:
+        parent query: [B,Q], values 0..M-1
+        view rank:    [B,Q], values 0..K-1 at deterministic inference
+
+    Top-4 mode keeps all four view hypotheses for every base center and thus
+    returns 4*M grasps.  Top-1 mode keeps only rank-0 when K-view endpoints are
+    present; otherwise it decodes all queries (the normal K=1 path).
+    """
+    device = end_points["xyz_graspable"].device
+    parent_all = end_points.get("kview_query_parent", None)
+    rank_all = end_points.get("kview_query_view_rank", None)
+
+    has_mapping = (
+        torch.is_tensor(parent_all)
+        and torch.is_tensor(rank_all)
+        and parent_all.dim() == 2
+        and rank_all.dim() == 2
+        and parent_all.shape == rank_all.shape
+        and parent_all.shape[0] > batch_i
+        and parent_all.shape[1] == total_q
+    )
+
+    if not has_mapping:
+        if use_top4_view:
+            raise KeyError(
+                "Top-4 CDF decode requires kview_query_parent and "
+                "kview_query_view_rank. Configure the model selector with "
+                "KView mode A2 and num_query_views=4."
+            )
+        return torch.arange(total_q, device=device, dtype=torch.long)
+
+    parent = parent_all[batch_i].long()
+    rank = rank_all[batch_i].long()
+
+    if use_top4_view:
+        selected = (rank >= 0) & (rank < 4)
+        query_idx = torch.nonzero(selected, as_tuple=False).flatten()
+        if query_idx.numel() == 0:
+            raise RuntimeError("No rank-0..3 K-view queries found for Top-4 decode.")
+
+        selected_parent = parent.index_select(0, query_idx)
+        selected_rank = rank.index_select(0, query_idx)
+        unique_parent = torch.unique(selected_parent, sorted=True)
+
+        # Require exactly one query for each (parent, rank) pair.  This catches
+        # accidentally running a K=1 model while cfgs.use_top4_view_infer=True,
+        # duplicate sampled views, or a malformed query reshape.
+        expected_count = int(unique_parent.numel()) * 4
+        if int(query_idx.numel()) != expected_count:
+            raise RuntimeError(
+                "Top-4 decode expects exactly four queries per base center, "
+                f"but got {int(query_idx.numel())} queries for "
+                f"{int(unique_parent.numel())} centers."
+            )
+        for r in range(4):
+            counts = torch.bincount(
+                selected_parent[selected_rank == r],
+                minlength=(int(unique_parent.max().item()) + 1),
+            )
+            parent_counts = counts.index_select(0, unique_parent)
+            if not bool(torch.all(parent_counts == 1)):
+                raise RuntimeError(
+                    f"Top-4 decode requires one rank-{r} query per center."
+                )
+        return query_idx
+
+    # Flag disabled: retain only the deterministic top-1 query if the model
+    # happened to generate multiple views; normal K=1 endpoints also use rank 0.
+    rank0 = torch.nonzero(rank == 0, as_tuple=False).flatten()
+    if rank0.numel() > 0:
+        rank0_parent = parent.index_select(0, rank0)
+        if torch.unique(rank0_parent).numel() != rank0.numel():
+            raise RuntimeError("Duplicate rank-0 K-view queries found.")
+        return rank0
+
+    # Sampled single-view training endpoints may use negative rank sentinels.
+    # They are not expected during standalone inference, but decoding all rows
+    # is still equivalent to the K=1 path.
+    effective_k = int(end_points.get("kview_effective_k_int", 1))
+    if effective_k == 1:
+        return torch.arange(total_q, device=device, dtype=torch.long)
+    raise RuntimeError(
+        "Top-1 decode could not locate rank-0 queries in a multi-view endpoint."
+    )
+
+
+def pred_decode_center_view_angle_cdf(
+    end_points,
+    batch_viewpoint_params_to_matrix_fn=None,
+):
+    """Strict CDF decoder with optional Top-4 view expansion.
+
+    Required endpoints:
+        xyz_graspable:                    [B,Q,3]
+        grasp_top_view_xyz:               [B,Q,3]
+        grasp_cdf_pred_angle_depth:       [B,T,Q,A,D]
+        grasp_width_pred_angle_depth:     [B,D,Q,A]
+
+    Behavior controlled by ``cfgs.use_top4_view_infer``:
+        False: emit one grasp per base center (rank-0 view).
+        True:  emit four grasps per base center, one per Top-4 view.  Each view
+               independently selects its best joint (angle, depth) candidate
+               using mean CDF success probability.
+
+    No legacy score/depth decoding branch is provided.  The auxiliary depth
+    classification head is intentionally not used for final candidate choice.
     """
     if batch_viewpoint_params_to_matrix_fn is None:
-        # In your existing pred_decode file, batch_viewpoint_params_to_matrix is
-        # usually already imported.  This lookup keeps the function drop-in.
-        batch_viewpoint_params_to_matrix_fn = globals()["batch_viewpoint_params_to_matrix"]
+        batch_viewpoint_params_to_matrix_fn = globals()[
+            "batch_viewpoint_params_to_matrix"
+        ]
 
-    grasp_centers = end_points["xyz_graspable"]  # [B,Q,3]
-    batch_size = grasp_centers.shape[0]
+    required = (
+        "xyz_graspable",
+        "grasp_top_view_xyz",
+        "grasp_cdf_pred_angle_depth",
+        "grasp_width_pred_angle_depth",
+    )
+    missing = [key for key in required if key not in end_points]
+    if missing:
+        raise KeyError(
+            "Missing required CDF endpoints: " + ", ".join(missing)
+        )
+
+    grasp_centers = end_points["xyz_graspable"]
+    top_views = end_points["grasp_top_view_xyz"]
+    cdf_preds = end_points["grasp_cdf_pred_angle_depth"]
+    width_preds = end_points["grasp_width_pred_angle_depth"]
+
+    if grasp_centers.dim() != 3 or grasp_centers.shape[-1] != 3:
+        raise ValueError(
+            "xyz_graspable must be [B,Q,3], got "
+            f"{tuple(grasp_centers.shape)}"
+        )
+    if top_views.shape != grasp_centers.shape:
+        raise ValueError(
+            "grasp_top_view_xyz must match xyz_graspable, got "
+            f"views={tuple(top_views.shape)}, "
+            f"centers={tuple(grasp_centers.shape)}"
+        )
+    if cdf_preds.dim() != 5:
+        raise ValueError(
+            "grasp_cdf_pred_angle_depth must be [B,T,Q,A,D], got "
+            f"{tuple(cdf_preds.shape)}"
+        )
+    if width_preds.dim() != 4:
+        raise ValueError(
+            "grasp_width_pred_angle_depth must be [B,D,Q,A], got "
+            f"{tuple(width_preds.shape)}"
+        )
+
+    batch_size, total_q, _ = grasp_centers.shape
+    B_cdf, T, Q_cdf, A, D = cdf_preds.shape
+    B_width, D_width, Q_width, A_width = width_preds.shape
+    if (
+        B_cdf != batch_size
+        or B_width != batch_size
+        or Q_cdf != total_q
+        or Q_width != total_q
+        or D_width != D
+        or A_width != A
+    ):
+        raise ValueError(
+            "CDF/width/query shape mismatch: "
+            f"centers={tuple(grasp_centers.shape)}, "
+            f"cdf={tuple(cdf_preds.shape)}, "
+            f"width={tuple(width_preds.shape)}"
+        )
+    if T <= 0 or A <= 0 or D <= 0:
+        raise ValueError(f"Invalid CDF dimensions T={T}, A={A}, D={D}.")
+
+    use_top4_view = bool(
+        getattr(cfgs, "use_top4_view_infer", False)
+    )
     grasp_preds = []
 
     for i in range(batch_size):
-        grasp_center = grasp_centers[i].float()  # [Q,3]
-        Q = grasp_center.shape[0]
+        query_idx = _cdf_decode_query_indices(
+            end_points=end_points,
+            batch_i=i,
+            total_q=total_q,
+            use_top4_view=use_top4_view,
+        )
+        q_out = int(query_idx.numel())
 
-        # Candidate-level logits.
-        score_logits_angle = end_points["grasp_score_pred_angle"][i].float()  # [6,Q,A]
-        depth_logits_angle = end_points["grasp_depth_pred_angle"][i].float()  # [D+1,Q,A]
-        width_pred_angle = end_points["grasp_width_pred_angle"][i].float()    # [1,Q,A]
+        grasp_center = grasp_centers[i].float().index_select(0, query_idx)
+        approaching = -top_views[i].float().index_select(0, query_idx)
+        cdf_logits = cdf_preds[i].float().index_select(1, query_idx)
+        width_dqa = width_preds[i].float().index_select(1, query_idx)
 
-        if score_logits_angle.dim() != 3:
-            raise ValueError(
-                f"grasp_score_pred_angle[{i}] must be [6,Q,A], "
-                f"got {tuple(score_logits_angle.shape)}"
+        if not bool(torch.isfinite(cdf_logits).all()):
+            raise FloatingPointError(
+                f"Non-finite CDF logits in batch sample {i}."
             )
-        if score_logits_angle.shape[1] != Q:
-            raise ValueError(
-                f"Q mismatch: xyz_graspable has Q={Q}, "
-                f"score_pred_angle has Q={score_logits_angle.shape[1]}"
+        if not bool(torch.isfinite(width_dqa).all()):
+            raise FloatingPointError(
+                f"Non-finite width predictions in batch sample {i}."
             )
 
-        num_angle = score_logits_angle.shape[-1]
-        score_expected_angle = _score_expected_from_logits(score_logits_angle)  # [Q,A]
-        angle_inds = torch.argmax(score_expected_angle, dim=-1)                # [Q]
-        grasp_score = torch.gather(
-            score_expected_angle,
-            dim=-1,
-            index=angle_inds.view(Q, 1),
-        )  # [Q,1]
+        # [T,Qo,A,D] -> [Qo,A,D].  Each retained view query independently
+        # chooses its highest expected evaluator utility angle-depth candidate.
+        utility_qad = torch.sigmoid(cdf_logits).mean(dim=0)
+        utility_flat = utility_qad.reshape(q_out, A * D)
+        joint_idx = utility_flat.argmax(dim=-1)
+        angle_inds = torch.div(
+            joint_idx, D, rounding_mode="floor"
+        )
+        depth_inds = torch.remainder(joint_idx, D)
 
-        # Gather depth/width from the score-selected angle.
-        depth_logits = _gather_angle_candidate(depth_logits_angle, angle_inds)  # [D+1,Q]
-        width_pred = _gather_angle_candidate(width_pred_angle, angle_inds)      # [1,Q]
+        row = torch.arange(q_out, device=joint_idx.device)
+        grasp_score = utility_flat[row, joint_idx].unsqueeze(-1)
 
-        # The last depth class is the invalid class.  Do not decode it as a
-        # physical depth bin.  Original EconomicGrasp code used all classes;
-        # for CVA this valid-bin-only decode is safer.
-        num_depth_cfg = int(getattr(cfgs, "num_depth", depth_logits.shape[0] - 1))
-        num_depth_valid = max(1, min(num_depth_cfg, depth_logits.shape[0] - 1))
-        depth_inds = torch.argmax(depth_logits[:num_depth_valid, :], dim=0)  # [Q]
-        grasp_depth = (depth_inds.float() + 1.0) * 0.01
-        grasp_depth = grasp_depth.view(Q, 1)
+        # [D,Qo,A] -> [Qo,A,D], then gather the joint candidate.
+        width_qad = width_dqa.permute(1, 2, 0)
+        width_pred = width_qad[
+            row, angle_inds, depth_inds
+        ].unsqueeze(-1)
 
-        grasp_angle = angle_inds.float() * (np.pi / float(num_angle))  # [Q]
-
-
-        # Same width convention as EconomicGrasp-DPT.
-        grasp_width = 1.2 * width_pred.squeeze(0).view(Q, 1) / 10.0
+        grasp_depth = (
+            depth_inds.to(torch.float32).unsqueeze(-1) + 1.0
+        ) * 0.01
+        grasp_angle = (
+            angle_inds.to(torch.float32) * (np.pi / float(A))
+        )
+        grasp_width = 1.2 * width_pred / 10.0
         grasp_width = torch.clamp(
             grasp_width,
             min=0.0,
             max=float(getattr(cfgs, "grasp_max_width", 0.1)),
         )
 
-        approaching = -end_points["grasp_top_view_xyz"][i].float()  # [Q,3]
+        grasp_rot = batch_viewpoint_params_to_matrix_fn(
+            approaching, grasp_angle
+        ).reshape(q_out, 9)
+        grasp_height = torch.full_like(grasp_score, 0.02)
+        obj_ids = torch.full_like(grasp_score, -1.0)
+
+        pred = torch.cat(
+            [
+                grasp_score,   # 1
+                grasp_width,   # 1
+                grasp_height,  # 1
+                grasp_depth,   # 1
+                grasp_rot,     # 9
+                grasp_center,  # 3
+                obj_ids,       # 1
+            ],
+            dim=-1,
+        )
+        if pred.shape != (q_out, 17):
+            raise RuntimeError(
+                f"Decoded grasp tensor must be [{q_out},17], got "
+                f"{tuple(pred.shape)}"
+            )
+        grasp_preds.append(pred)
+
+    return grasp_preds
+
+def pred_decode_center_view_angle(
+    end_points,
+    batch_viewpoint_params_to_matrix_fn=None,
+):
+    """Decode CVA predictions, preferring full angle-depth CDF outputs."""
+    if batch_viewpoint_params_to_matrix_fn is None:
+        batch_viewpoint_params_to_matrix_fn = globals()[
+            "batch_viewpoint_params_to_matrix"
+        ]
+
+    grasp_centers = end_points["xyz_graspable"]
+    batch_size = grasp_centers.shape[0]
+    grasp_preds = []
+    use_cdf = "grasp_cdf_pred_angle_depth" in end_points
+
+    for i in range(batch_size):
+        grasp_center = grasp_centers[i].float()
+        Q = grasp_center.shape[0]
+
+        if use_cdf:
+            cdf_logits = end_points["grasp_cdf_pred_angle_depth"][i].float()
+            width_depth = end_points["grasp_width_pred_angle_depth"][i].float()
+            if cdf_logits.dim() != 4:
+                raise ValueError(
+                    "grasp_cdf_pred_angle_depth must be [T,Q,A,D], got "
+                    f"{tuple(cdf_logits.shape)}"
+                )
+            T, Q_pred, A, D = cdf_logits.shape
+            if Q_pred != Q or width_depth.shape != (D, Q, A):
+                raise ValueError(
+                    f"CDF/width shape mismatch: cdf={tuple(cdf_logits.shape)}, "
+                    f"width={tuple(width_depth.shape)}, Q={Q}"
+                )
+
+            utility = torch.sigmoid(cdf_logits).mean(dim=0)  # [Q,A,D]
+            joint_idx = utility.reshape(Q, A * D).argmax(dim=-1)
+            angle_inds = torch.div(joint_idx, D, rounding_mode="floor")
+            depth_inds = torch.remainder(joint_idx, D)
+            grasp_score = utility.reshape(Q, A * D).gather(
+                1, joint_idx.view(Q, 1)
+            )
+
+            width_cqad = width_depth.permute(1, 2, 0).unsqueeze(0)
+            width_pred = _gather_joint_candidate(
+                width_cqad,
+                angle_inds,
+                depth_inds,
+            ).squeeze(0)
+            grasp_depth = (depth_inds.float() + 1.0).view(Q, 1) * 0.01
+            grasp_angle = angle_inds.float() * (np.pi / float(A))
+            grasp_width = 1.2 * width_pred.view(Q, 1) / 10.0
+        else:
+            score_logits_angle = end_points["grasp_score_pred_angle"][i].float()
+            depth_logits_angle = end_points["grasp_depth_pred_angle"][i].float()
+            width_pred_angle = end_points["grasp_width_pred_angle"][i].float()
+            if score_logits_angle.dim() != 3 or score_logits_angle.shape[1] != Q:
+                raise ValueError(
+                    f"Legacy score prediction must be [C,Q,A], got "
+                    f"{tuple(score_logits_angle.shape)}"
+                )
+            num_angle = score_logits_angle.shape[-1]
+            score_expected_angle = _score_expected_from_logits(
+                score_logits_angle,
+                is_cdf=bool(end_points.get("grasp_score_pred_is_cdf", False)),
+            )
+            angle_inds = torch.argmax(score_expected_angle, dim=-1)
+            grasp_score = torch.gather(
+                score_expected_angle,
+                dim=-1,
+                index=angle_inds.view(Q, 1),
+            )
+            depth_logits = _gather_angle_candidate(
+                depth_logits_angle, angle_inds
+            )
+            width_pred = _gather_angle_candidate(
+                width_pred_angle, angle_inds
+            ).squeeze(0)
+            num_depth_cfg = int(
+                getattr(cfgs, "num_depth", depth_logits.shape[0] - 1)
+            )
+            num_depth_valid = max(
+                1, min(num_depth_cfg, depth_logits.shape[0] - 1)
+            )
+            depth_inds = torch.argmax(
+                depth_logits[:num_depth_valid], dim=0
+            )
+            grasp_depth = (depth_inds.float() + 1.0).view(Q, 1) * 0.01
+            grasp_angle = angle_inds.float() * (
+                np.pi / float(num_angle)
+            )
+            grasp_width = 1.2 * width_pred.view(Q, 1) / 10.0
+
+        grasp_width = torch.clamp(
+            grasp_width,
+            min=0.0,
+            max=float(getattr(cfgs, "grasp_max_width", 0.1)),
+        )
+        approaching = -end_points["grasp_top_view_xyz"][i].float()
         if approaching.shape[0] != Q:
             raise ValueError(
-                f"Q mismatch: xyz_graspable has Q={Q}, "
-                f"grasp_top_view_xyz has Q={approaching.shape[0]}"
+                f"Q mismatch: centers={Q}, views={approaching.shape[0]}"
             )
-        grasp_rot = batch_viewpoint_params_to_matrix_fn(approaching, grasp_angle)
-        grasp_rot = grasp_rot.view(Q, 9)
-
+        grasp_rot = batch_viewpoint_params_to_matrix_fn(
+            approaching, grasp_angle
+        ).view(Q, 9)
         grasp_height = 0.02 * torch.ones_like(grasp_score)
         obj_ids = -1 * torch.ones_like(grasp_score)
         grasp_preds.append(
             torch.cat(
-                [grasp_score, grasp_width, grasp_height, grasp_depth, grasp_rot, grasp_center, obj_ids],
+                [
+                    grasp_score,
+                    grasp_width,
+                    grasp_height,
+                    grasp_depth,
+                    grasp_rot,
+                    grasp_center,
+                    obj_ids,
+                ],
                 dim=-1,
             )
         )
@@ -7865,16 +8209,39 @@ def pred_decode_center_view_angle(end_points, batch_viewpoint_params_to_matrix_f
     return grasp_preds
 
 
-def _norm_entropy_from_prob(prob: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
-    n = prob.shape[dim]
-    if n <= 1:
-        shape = list(prob.shape)
-        shape.pop(dim if dim >= 0 else prob.dim() + dim)
-        return prob.new_zeros(shape)
-    p = prob.clamp_min(eps)
-    ent = -(p * p.log()).sum(dim=dim)
-    return (ent / math.log(float(n))).clamp(0.0, 1.0)
 
+def _norm_entropy_from_prob(
+    prob: torch.Tensor,
+    dim: int = -1,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Compute entropy normalized to [0, 1] along ``dim``.
+
+    ``prob`` is expected to contain probabilities (typically a softmax output).
+    The helper is used only by inference diagnostics / confidence features; it
+    does not change the CDF or width prediction heads.
+    """
+    dim = dim if dim >= 0 else prob.dim() + dim
+    if dim < 0 or dim >= prob.dim():
+        raise IndexError(
+            f"Invalid entropy dim={dim} for tensor with shape {tuple(prob.shape)}"
+        )
+
+    n = int(prob.shape[dim])
+    if n <= 1:
+        out_shape = list(prob.shape)
+        out_shape.pop(dim)
+        return prob.new_zeros(out_shape)
+
+    # Be robust to small numerical errors and to callers passing an
+    # approximately normalized distribution.
+    p = torch.nan_to_num(
+        prob, nan=0.0, posinf=0.0, neginf=0.0
+    ).clamp_min(0.0)
+    p = p / p.sum(dim=dim, keepdim=True).clamp_min(eps)
+    p_safe = p.clamp_min(eps)
+    entropy = -(p * p_safe.log()).sum(dim=dim)
+    return (entropy / math.log(float(n))).clamp(0.0, 1.0)
 
 def _query_graspness_from_endpoints(end_points, batch_i: int, Q: int, device, dtype) -> torch.Tensor:
     """Return [Q] token-level graspness in [0,1]. Fallback: ones."""
@@ -8095,7 +8462,10 @@ def pred_decode_center_view_angle_diag(
         # ------------------------------------------------------------
         # 1) Base CVA angle selection. Keep this fixed for pure re-ranking.
         # ------------------------------------------------------------
-        score_expected_angle = _score_expected_from_logits(score_logits_angle)  # [Q,A]
+        score_expected_angle = _score_expected_from_logits(
+            score_logits_angle,
+            is_cdf=bool(end_points.get("grasp_score_pred_is_cdf", False)),
+        )  # [Q,A]
         angle_inds = torch.argmax(score_expected_angle, dim=-1)                # [Q]
         base_score = torch.gather(
             score_expected_angle,
@@ -8465,7 +8835,10 @@ def pred_decode_center_view_angle_oracle(
                 )
 
         # Predicted and label-best in-plane angles.
-        score_expected_angle = _score_expected_from_logits(score_logits_angle)
+        score_expected_angle = _score_expected_from_logits(
+            score_logits_angle,
+            is_cdf=bool(end_points.get("grasp_score_pred_is_cdf", False)),
+        )
         pred_angle_idx = score_expected_angle.argmax(dim=-1)
         oracle_angle_idx, has_pos_angle, has_valid_angle = (
             _select_oracle_angle_from_labels(
