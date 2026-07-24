@@ -57,6 +57,12 @@ parser.add_argument('--inference', action='store_true', help='Whether to inferen
 parser.add_argument('--multi_modal', action='store_true', help='Whether use multi-modal model')
 parser.add_argument('--pin_memory', action='store_true', help='Whether use pin memory in dataloader')
 parser.add_argument('--num_workers', type=int, default=2)
+parser.add_argument(
+    '--eval_num_workers',
+    type=int,
+    default=1,
+    help='Validation DataLoader workers. Kept separate to reduce DDP eval stragglers.',
+)
 parser.add_argument('--use_gt_depth', action='store_true', help='Whether use gt depth for label matching')
 parser.add_argument('--use_fuse_depth', action='store_true', help='Whether use fuse depth for background')
 parser.add_argument('--min_depth', type=float, default=0.2, help='Minimum depth for depth probability')
@@ -94,12 +100,36 @@ parser.add_argument("--kview_mode", type=str, default='A1')
 parser.add_argument(
     "--kview_use_collision",
     action="store_true",
-    help="Enable collision prediction head for CVA decoder.",
+    help=(
+        "Deprecated for the CDF-only CVA model. Passing this flag raises an "
+        "error because collision/empty/failure are encoded by the CDF target."
+    ),
 )
-parser.add_argument("--extend_angle", action='store_true')
+parser.add_argument(
+    "--extend_angle",
+    action="store_true",
+    help=(
+        "Required for CDF training. Loads the depth-wise CDF/width label cache."
+    ),
+)
 parser.add_argument("--vis_dir", type=str)
 parser.add_argument("--vis_every", type=int, default=1000)
+parser.add_argument("--cdf_vis_num_queries", type=int, default=32)
+parser.add_argument(
+    "--cdf_diag_interval",
+    type=int,
+    default=20,
+    help="Compute expensive CDF diagnostics every N train iterations; 0 disables.",
+)
+parser.add_argument(
+    "--cdf_eval_diag_interval",
+    type=int,
+    default=50,
+    help="Compute expensive CDF diagnostics every N validation iterations; 0 disables.",
+)
 parser.add_argument("--use_top4_view_infer", action='store_true')
+parser.add_argument("--enable_eval", action='store_true')
+parser.add_argument("--seed", type=int, default=0)
 
 # parser.add_argument(
 #     '--dataset',

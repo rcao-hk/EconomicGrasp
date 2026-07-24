@@ -4,43 +4,40 @@ import torch.nn.functional as F
 from utils.arguments import cfgs
 
 
+def _require_endpoint(end_points, key):
+    if key not in end_points:
+        raise KeyError(f"CDF loss is missing required endpoint: {key}")
+    return end_points[key]
+
+
 def get_loss(end_points):
+    """Strict CDF-only CVA objective.
+
+    The grasp operation is supervised only by the view field, depth-wise width,
+    and evaluator-aligned CDF.  There is no auxiliary depth head, legacy score
+    branch, or collision branch in this model.
+    """
     depth_reg_loss, end_points = compute_depth_reg_loss(end_points)
-
-    # choose token-level or point-level supervision
     objectness_loss, end_points = compute_objectness_loss_tok(end_points)
-    graspness_loss, end_points  = compute_graspness_loss_tok(end_points)
-
-    # EcoGrasp head losses (on selected M seeds)
-    view_loss, end_points  = compute_view_graspness_loss(end_points)
-    # angle_loss, end_points = compute_angle_loss(end_points)
-    # depth_loss, end_points = compute_depth_loss(end_points)
-    # score_loss, end_points = compute_score_loss_cls(end_points)
-    # width_loss, end_points = compute_width_loss(end_points)
-    # Embedded evaluator-aligned heads.  The score loss is CDF-only; an
-    # independent collision head is intentionally disabled because collision,
-    # empty, and force-closure failures are all represented by an all-zero CDF.
-    score_loss, end_points = compute_cva_cdf_loss(end_points, balanced=True)
-    depth_loss, end_points = compute_cva_depth_loss(end_points)
+    graspness_loss, end_points = compute_graspness_loss_tok(end_points)
+    view_loss, end_points = compute_view_graspness_loss(end_points)
+    cdf_loss, end_points = compute_cva_cdf_loss(
+        end_points, balanced=False
+    )
     width_loss, end_points = compute_cva_width_depth_loss(end_points)
-    collision_loss = 0.0 * score_loss
-    
+
     obj_loss = cfgs.objectness_loss_weight * objectness_loss
     grasp_loss = (
-        cfgs.graspness_loss_weight * graspness_loss +
-        cfgs.view_loss_weight      * view_loss +
-        # cfgs.angle_loss_weight     * angle_loss +
-        cfgs.depth_loss_weight     * depth_loss +
-        cfgs.score_loss_weight     * score_loss +
-        cfgs.width_loss_weight     * width_loss
+        cfgs.graspness_loss_weight * graspness_loss
+        + cfgs.view_loss_weight * view_loss
+        + cfgs.score_loss_weight * cdf_loss
+        + cfgs.width_loss_weight * width_loss
     )
-
     depth_reg_loss = cfgs.depth_prob_loss_weight * depth_reg_loss
     loss = obj_loss + grasp_loss + depth_reg_loss
 
     end_points['A: Objectness Loss'] = objectness_loss
     end_points['A: Grasp Loss'] = grasp_loss
-    end_points['A: Collision Loss'] = collision_loss
     end_points['A: DepthReg Loss'] = depth_reg_loss
     end_points['A: Overall Loss'] = loss
     return loss, end_points
@@ -506,15 +503,19 @@ def compute_cva_cdf_loss(end_points, balanced: bool = True):
     candidates.  This matches the validated external J0 scorer objective while
     preserving an absolute probability scale across views/centers/objects.
     """
-    pred = end_points["grasp_cdf_pred_angle_depth"]
+    pred = _require_endpoint(end_points, "grasp_cdf_pred_angle_depth")
     if pred.dim() != 5:
         raise ValueError(
             "grasp_cdf_pred_angle_depth must be [B,T,Q,A,D], got "
             f"{tuple(pred.shape)}"
         )
     B, T, Q, A, D = pred.shape
-    bins = end_points["batch_grasp_cdf_bins_angle_depth"].long().to(pred.device)
-    valid = end_points["batch_grasp_cdf_valid_mask"].bool().to(pred.device)
+    bins = _require_endpoint(
+        end_points, "batch_grasp_cdf_bins_angle_depth"
+    ).long().to(pred.device)
+    valid = _require_endpoint(
+        end_points, "batch_grasp_cdf_valid_mask"
+    ).bool().to(pred.device)
     expected = (B, Q, A, D)
     if bins.shape != expected or valid.shape != expected:
         raise ValueError(
@@ -522,8 +523,15 @@ def compute_cva_cdf_loss(end_points, balanced: bool = True):
             f"valid={tuple(valid.shape)}"
         )
 
-    thresholds = end_points.get("batch_grasp_cdf_thresholds", None)
-    if torch.is_tensor(thresholds) and thresholds.numel() != T:
+    thresholds = _require_endpoint(
+        end_points, "batch_grasp_cdf_thresholds"
+    )
+    if not torch.is_tensor(thresholds) or thresholds.dim() != 1:
+        raise TypeError(
+            "batch_grasp_cdf_thresholds must be a 1D tensor, got "
+            f"{type(thresholds).__name__}"
+        )
+    if thresholds.numel() != T:
         raise ValueError(
             f"Model predicts T={T} thresholds but label cache has "
             f"{thresholds.numel()}."
@@ -560,7 +568,7 @@ def compute_cva_cdf_loss(end_points, balanced: bool = True):
     end_points["B: Score Loss"] = loss
     end_points["B: CDF Loss"] = loss
 
-    run_diag = end_points.get("cva_compute_diagnostics", True)
+    run_diag = end_points.get("cva_compute_diagnostics", False)
     if torch.is_tensor(run_diag):
         run_diag = bool(run_diag.detach().item())
     else:
@@ -634,19 +642,23 @@ def compute_cva_width_depth_loss(end_points):
       batch_grasp_width_angle_depth:              [B,Q,A,D], meters
       batch_grasp_width_valid_mask_angle_depth:   [B,Q,A,D]
     """
-    pred = end_points["grasp_width_pred_angle_depth"]
+    pred = _require_endpoint(
+        end_points, "grasp_width_pred_angle_depth"
+    )
     if pred.dim() != 4:
         raise ValueError(
             "grasp_width_pred_angle_depth must be [B,D,Q,A], got "
             f"{tuple(pred.shape)}"
         )
     pred = pred.permute(0, 2, 3, 1).contiguous()  # [B,Q,A,D]
-    label = end_points["batch_grasp_width_angle_depth"].to(
+    label = _require_endpoint(
+        end_points, "batch_grasp_width_angle_depth"
+    ).to(
         device=pred.device, dtype=pred.dtype
     ) * 10.0
-    valid = end_points[
-        "batch_grasp_width_valid_mask_angle_depth"
-    ].bool().to(pred.device)
+    valid = _require_endpoint(
+        end_points, "batch_grasp_width_valid_mask_angle_depth"
+    ).bool().to(pred.device)
 
     if pred.shape != label.shape or pred.shape != valid.shape:
         raise ValueError(
@@ -662,266 +674,24 @@ def compute_cva_width_depth_loss(end_points):
 
     end_points["B: Width Loss"] = loss
     end_points["B: Width Depth Loss"] = loss
-    with torch.no_grad():
-        if bool(valid.any()):
-            end_points["D: Width Depth MAE x10"] = (
-                pred[valid] - label[valid]
-            ).abs().mean()
-            end_points["D: Width Depth Label mean"] = label[valid].mean() / 10.0
-            end_points["D: Width Depth Pred mean"] = pred[valid].mean() / 10.0
-            end_points["D: Width Depth valid ratio"] = valid.float().mean()
-    return loss, end_points
-
-
-def compute_cva_score_loss(end_points):
-    criterion = nn.CrossEntropyLoss(reduction="none")
-    pred = end_points["grasp_score_pred_angle"]       # [B,6,Q,A]
-    label = _score_to_cls(end_points["batch_grasp_score_angle"])  # [B,Q,A]
-    valid = end_points["batch_grasp_angle_valid_mask"].bool()     # [B,Q,A]
-
-    loss_map = criterion(pred, label)  # [B,Q,A]
-    if valid.sum() == 0:
-        loss = 0.0 * loss_map.sum()
-        acc = 0.0 * loss_map.sum()
-    else:
-        loss = loss_map[valid].mean()
-        acc = (torch.argmax(pred, dim=1) == label)[valid].float().mean()
-
-    end_points["B: Score Loss"] = loss
-    end_points["D: Score Acc"] = acc
-
-    with torch.no_grad():
-        score_prob = F.softmax(pred, dim=1)
-        bins = torch.tensor([0, .2, .4, .6, .8, 1.0], device=pred.device, dtype=pred.dtype).view(1, 6, 1, 1)
-        score_exp = (score_prob * bins).sum(dim=1)  # [B,Q,A]
-        if valid.any():
-            end_points["D: CVA score label raw min"] = end_points["batch_grasp_score_angle"].float()[valid].min()
-            end_points["D: CVA score label raw max"] = end_points["batch_grasp_score_angle"].float()[valid].max()
-            end_points["D: CVA score expected valid"] = score_exp[valid].mean()
-            end_points["D: CVA score label valid"] = end_points["batch_grasp_score_angle"].float()[valid].mean()
-        pos = end_points.get("batch_grasp_angle_pos_mask", None)
-        if torch.is_tensor(pos):
-            pos = pos.bool()
-            neg = valid & (~pos)
-            if pos.any():
-                end_points["D: CVA score expected pos"] = score_exp[pos].mean()
-            if neg.any():
-                end_points["D: CVA score expected neg"] = score_exp[neg].mean()
-        
-        label_score = end_points["batch_grasp_score_angle"].float()  # [B,Q,A]
-        valid_q = end_points["batch_valid_mask"].bool()              # [B,Q], if available
-
-        pred_angle = score_exp.argmax(dim=-1)       # [B,Q]
-        label_angle = label_score.argmax(dim=-1)    # [B,Q]
-
-        # only evaluate where point-view has at least one positive angle
-        has_pos = end_points["batch_grasp_angle_pos_mask"].bool().any(dim=-1)
-
-        m = has_pos
-        if m.any():
-            end_points["D: CVA selected angle acc"] = (pred_angle[m] == label_angle[m]).float().mean()
-            end_points["D: CVA selected angle bin0 ratio"] = (pred_angle[m] == 0).float().mean()
-            end_points["D: CVA label best angle bin0 ratio"] = (label_angle[m] == 0).float().mean()
-
-            pred_sel_score = torch.gather(score_exp, -1, pred_angle.unsqueeze(-1)).squeeze(-1)
-            label_best_score = torch.gather(label_score, -1, label_angle.unsqueeze(-1)).squeeze(-1)
-            end_points["D: CVA selected score expected"] = pred_sel_score[m].mean()
-            end_points["D: CVA label best score"] = label_best_score[m].mean()
-    
-    return loss, end_points
-
-
-def compute_cva_depth_loss(end_points):
-    criterion = nn.CrossEntropyLoss(reduction="none")
-    pred = end_points["grasp_depth_pred_angle"]       # [B,D+1,Q,A]
-    label = end_points["batch_grasp_depth_angle"].long()  # [B,Q,A]
-    pos = end_points["batch_grasp_angle_pos_mask"].bool() # [B,Q,A]
-
-    loss_map = criterion(pred, label)
-    if pos.sum() == 0:
-        loss = 0.0 * loss_map.sum()
-        acc = 0.0 * loss_map.sum()
-    else:
-        loss = loss_map[pos].mean()
-        acc = (torch.argmax(pred, dim=1) == label)[pos].float().mean()
-
-    end_points["B: Depth Loss"] = loss
-    end_points["D: Depth Acc"] = acc
-    with torch.no_grad():
-        pred_idx = torch.argmax(pred, dim=1)
-        if pos.any():
-            end_points["D: CVA pred depth01 pos"] = (pred_idx[pos] <= 1).float().mean()
-            end_points["D: CVA label depth01 pos"] = (label[pos] <= 1).float().mean()
-    return loss, end_points
-
-
-def compute_cva_width_loss(end_points):
-    criterion = nn.SmoothL1Loss(reduction="none")
-    pred = end_points["grasp_width_pred_angle"].squeeze(1)  # [B,Q,A]
-    label = end_points["batch_grasp_width_angle"].float() * 10.0
-    pos = end_points["batch_grasp_angle_pos_mask"].bool()
-
-    loss_map = criterion(pred, label)
-    if pos.sum() == 0:
-        loss = 0.0 * loss_map.sum()
-    else:
-        loss = loss_map[pos].mean()
-
-    end_points["B: Width Loss"] = loss
-    with torch.no_grad():
-        valid = end_points.get("batch_grasp_angle_valid_mask", None)
-        if torch.is_tensor(valid) and valid.bool().any():
-            end_points["D: Width Loss allangle-valid"] = loss_map[valid.bool()].mean()
-    return loss, end_points
-
-
-def compute_cva_collision_loss(end_points, balanced=False):
-    """
-    Angle-level CVA collision loss.
-
-    Required:
-      - grasp_collision_pred_angle:   [B,1,Q,A]
-      - batch_grasp_collision_angle:  [B,Q,A]
-      - batch_grasp_angle_valid_mask: [B,Q,A]
-
-    Label convention:
-      - 1: collision / invalid grasp
-      - 0: non-collision / valid grasp
-
-    Args:
-        end_points: dict
-        balanced: if True, average positive and negative losses equally.
-
-    Returns:
-        loss, end_points
-    """
-    required_keys = [
-        "grasp_collision_pred_angle",
-        "batch_grasp_collision_angle",
-        "batch_grasp_angle_valid_mask",
-    ]
-    for k in required_keys:
-        if k not in end_points:
-            raise KeyError(f"compute_cva_collision_loss requires end_points['{k}'].")
-
-    pred = end_points["grasp_collision_pred_angle"]  # [B,1,Q,A]
-    if pred.dim() != 4 or pred.shape[1] != 1:
-        raise ValueError(
-            "grasp_collision_pred_angle must be [B,1,Q,A], "
-            f"got {tuple(pred.shape)}"
-        )
-
-    pred = pred.squeeze(1)  # [B,Q,A]
-
-    label = end_points["batch_grasp_collision_angle"].to(
-        device=pred.device,
-        dtype=pred.dtype,
-    )  # [B,Q,A]
-
-    valid_mask = end_points["batch_grasp_angle_valid_mask"].bool().to(pred.device)
-
-    if label.shape != pred.shape:
-        raise ValueError(
-            "batch_grasp_collision_angle shape must match pred [B,Q,A], "
-            f"got label={tuple(label.shape)}, pred={tuple(pred.shape)}"
-        )
-
-    if valid_mask.shape != pred.shape:
-        raise ValueError(
-            "batch_grasp_angle_valid_mask shape must match pred [B,Q,A], "
-            f"got valid_mask={tuple(valid_mask.shape)}, pred={tuple(pred.shape)}"
-        )
-
-    loss_map = F.binary_cross_entropy_with_logits(
-        pred,
-        label,
-        reduction="none",
-    )  # [B,Q,A]
-
-    if valid_mask.sum() == 0:
-        loss = 0.0 * loss_map.sum()
-        acc = 0.0 * loss_map.sum()
-        pos_ratio = 0.0 * loss_map.sum()
-        pred_pos_ratio = 0.0 * loss_map.sum()
-        precision = 0.0 * loss_map.sum()
-        recall = 0.0 * loss_map.sum()
-    else:
-        if balanced:
-            pos_mask = valid_mask & (label > 0.5)
-            neg_mask = valid_mask & (label <= 0.5)
-
-            if pos_mask.any() and neg_mask.any():
-                loss = 0.5 * (
-                    loss_map[pos_mask].mean()
-                    + loss_map[neg_mask].mean()
-                )
-            else:
-                loss = loss_map[valid_mask].mean()
-        else:
-            loss = loss_map[valid_mask].mean()
-
+    run_diag = end_points.get("cva_compute_diagnostics", False)
+    if torch.is_tensor(run_diag):
+        run_diag = bool(run_diag.detach().item())
+    if bool(run_diag):
         with torch.no_grad():
-            prob = torch.sigmoid(pred)
-            pred_label = prob > 0.5
-            label_bool = label > 0.5
-
-            acc = (
-                pred_label[valid_mask]
-                == label_bool[valid_mask]
-            ).float().mean()
-
-            pos_ratio = label_bool[valid_mask].float().mean()
-            pred_pos_ratio = pred_label[valid_mask].float().mean()
-
-            tp = (pred_label & label_bool & valid_mask).float().sum()
-            fp = (pred_label & (~label_bool) & valid_mask).float().sum()
-            fn = ((~pred_label) & label_bool & valid_mask).float().sum()
-
-            precision = tp / (tp + fp + 1e-6)
-            recall = tp / (tp + fn + 1e-6)
-
-    end_points["B: CVA Collision Loss"] = loss
-
-    end_points["D: CVA Collision Label PosRatio"] = pos_ratio
-    end_points["D: CVA Collision Pred PosRatio"] = pred_pos_ratio
-    end_points["D: CVA Collision Acc"] = acc
-    end_points["D: CVA Collision Precision"] = precision
-    end_points["D: CVA Collision Recall"] = recall
-
-    return loss, end_points
-
-
-def compute_cva_candidate_rank_loss(end_points, margin: float = 0.1, weight: float = 0.0):
-    """Optional score ranking: best positive angle should beat best negative angle.
-
-    Set weight=0 to disable.  This is useful if score argmax over angles is used
-    at inference and you want an explicit positive-vs-negative angle ordering.
-    """
-    if weight <= 0:
-        dev = end_points["grasp_score_pred_angle"].device
-        loss = torch.zeros((), device=dev)
-        end_points["B: CVA Rank Loss"] = loss
-        return loss, end_points
-
-    score_logits = end_points["grasp_score_pred_angle"]  # [B,6,Q,A]
-    valid = end_points["batch_grasp_angle_valid_mask"].bool()
-    pos = end_points["batch_grasp_angle_pos_mask"].bool()
-    neg = valid & (~pos)
-
-    bins = torch.tensor([0, .2, .4, .6, .8, 1.0], device=score_logits.device, dtype=score_logits.dtype).view(1, 6, 1, 1)
-    score_exp = (F.softmax(score_logits, dim=1) * bins).sum(dim=1)  # [B,Q,A]
-
-    pos_score = score_exp.masked_fill(~pos, -1e6).max(dim=-1).values
-    neg_score = score_exp.masked_fill(~neg, -1e6).max(dim=-1).values
-    has_pos = pos.any(dim=-1)
-    has_neg = neg.any(dim=-1)
-    m = has_pos & has_neg
-    if m.sum() == 0:
-        loss = 0.0 * score_exp.sum()
-    else:
-        loss = F.relu(float(margin) - pos_score[m] + neg_score[m]).mean() * float(weight)
-
-    end_points["B: CVA Rank Loss"] = loss
+            if bool(valid.any()):
+                end_points["D: Width Depth MAE x10"] = (
+                    pred[valid] - label[valid]
+                ).abs().mean()
+                end_points["D: Width Depth Label mean"] = (
+                    label[valid].mean() / 10.0
+                )
+                end_points["D: Width Depth Pred mean"] = (
+                    pred[valid].mean() / 10.0
+                )
+                end_points["D: Width Depth valid ratio"] = (
+                    valid.float().mean()
+                )
     return loss, end_points
 
 

@@ -448,6 +448,18 @@ class KViewQueryTransformerConfig:
     num_cdf_thresholds: int = 6
     cdf_increment_bias: float = -4.0
 
+    # CDF diagnostics. Scalar diagnostics are controlled by the
+    # end_points['cva_compute_diagnostics'] flag from the training loop.
+    # PNG/NPZ diagnostics follow vis_dir/vis_every and are rank-0 only.
+    cdf_diag_num_bins: int = 10
+    cdf_diag_topk: int = 50
+    cdf_diag_max_scatter: int = 20000
+    cdf_diag_num_error_cases: int = 4
+    cdf_diag_high_confidence: float = 0.90
+    cdf_diag_safe_threshold: float = 0.80
+    cdf_diag_score_round_decimals: int = 4
+    cdf_diag_save_npz: bool = True
+
     # Debug / visualization.
     vis_dir: Optional[str] = None
     vis_every: int = 500
@@ -2217,25 +2229,17 @@ class SimpleAttentionModule(nn.Module):
 
 
 class CenterViewAngleCandidateDecoder(nn.Module):
-    """Decode complete center-view-angle-depth candidates.
+    """CDF-only decoder for complete center-view-angle-depth candidates.
 
-    The Transformer representation remains angle-level [B,Q,A,C].  The heads
-    expand only their output dimensions:
+    The shared CVA representation remains angle-level ``[B,Q,A,C]``.  Only
+    the prediction heads expand the physical depth dimension:
 
-      grasp_depth_pred_angle:          [B,D+1,Q,A]   (unchanged auxiliary head)
-      grasp_width_pred_angle_depth:    [B,D,Q,A]
-      grasp_cdf_pred_angle_depth:      [B,T,Q,A,D]
+      grasp_width_pred_angle_depth: [B,D,Q,A]
+      grasp_cdf_pred_angle_depth:   [B,T,Q,A,D]
 
-    T cumulative success probabilities correspond to friction thresholds
-    {0.2, 0.4, ..., 1.2}.  Their mean is a candidate's evaluator-aligned
-    utility.  Inference selects the best joint (angle, depth) candidate rather
-    than separately collapsing angle and depth.
-
-    For compatibility with existing CVA utilities, the decoder also exposes
-    depth-collapsed tensors under grasp_score_pred_angle / grasp_width_pred_angle
-    and selected-candidate tensors under grasp_score_pred / grasp_width_pred.
-    The score tensors are CDF logits, not legacy softmax-class logits; the flag
-    end_points['grasp_score_pred_is_cdf'] is therefore always set.
+    There is intentionally no depth-classification head and no legacy
+    score/width aliases.  Final depth selection is performed by the strict CDF
+    decoder from the complete ``A x D`` utility grid.
     """
 
     def __init__(
@@ -2261,51 +2265,48 @@ class CenterViewAngleCandidateDecoder(nn.Module):
         self.cdf_increment_bias = float(cdf_increment_bias)
         self.hidden_dim = int(hidden_dim)
         self.branch_attn_chunk_size = int(branch_attn_chunk_size)
-        if self.branch_attn_chunk_size <= 0:
-            raise ValueError(
-                "branch_attn_chunk_size must be positive, got "
-                f"{self.branch_attn_chunk_size}."
-            )
-        self.debug_prefix = debug_prefix
+        self.debug_prefix = str(debug_prefix)
 
-        # Collision is intentionally excluded from this version.  Invalidity is
-        # encoded directly by an all-zero CDF target.
         if bool(use_collision_head):
             raise ValueError(
-                "The CDF CVA decoder does not use an independent collision head. "
-                "Set kview_use_collision=False."
+                "The cleaned CDF decoder has no collision head. "
+                "Do not pass --kview_use_collision."
             )
-        self.use_collision_head = False
-
+        if self.num_angle <= 0 or self.num_depth <= 0:
+            raise ValueError(
+                f"num_angle/num_depth must be positive, got "
+                f"{self.num_angle}/{self.num_depth}."
+            )
         if self.num_cdf_thresholds < 2:
             raise ValueError("num_cdf_thresholds must be at least 2.")
+        if self.branch_attn_chunk_size <= 0:
+            raise ValueError("branch_attn_chunk_size must be positive.")
 
         self.input_proj = nn.Conv1d(in_dim, hidden_dim, 1)
         self.angle_embed = nn.Embedding(self.num_angle, hidden_dim)
-        self.layers = nn.ModuleList([
-            SimpleAttentionModule(
-                hidden_dim,
-                n_head=num_heads,
-                dropout=attn_dropout,
-            )
-            for _ in range(int(num_layers))
-        ])
+        self.layers = nn.ModuleList(
+            [
+                SimpleAttentionModule(
+                    hidden_dim,
+                    n_head=num_heads,
+                    dropout=attn_dropout,
+                )
+                for _ in range(max(int(num_layers), 1))
+            ]
+        )
 
-        # Preserve the old branch projections so a previous CVA checkpoint can
-        # initialize all representation layers and the score projection.  Only
-        # the final width/CDF output layers change shape.
-        self.depth_proj = nn.Conv1d(hidden_dim, 64, 1)
+        # Keep the representation projections compatible with the previous CVA
+        # checkpoint where possible.  The depth branch is removed entirely.
         self.width_proj = nn.Conv1d(hidden_dim, 64, 1)
         self.score_proj = nn.Conv1d(hidden_dim, 64, 1)
         self.branch_attn = nn.MultiheadAttention(
-            64, 1, dropout=attn_dropout, batch_first=True
+            64,
+            1,
+            dropout=attn_dropout,
+            batch_first=True,
         )
-
-        self.depth_dropout = nn.Dropout(dropout_p)
         self.width_dropout = nn.Dropout(dropout_p)
         self.score_dropout = nn.Dropout(dropout_p)
-
-        self.depth_head = nn.Conv1d(64, self.num_depth + 1, 1)
         self.width_head = nn.Conv1d(64, self.num_depth, 1)
         self.cdf_head = nn.Conv1d(
             64,
@@ -2314,20 +2315,12 @@ class CenterViewAngleCandidateDecoder(nn.Module):
         )
 
     def _run_branch_attention(self, tokens: torch.Tensor) -> torch.Tensor:
-        """Apply 3-token branch attention in bounded independent chunks.
-
-        ``tokens`` has shape [B*Q*A, 3, 64].  In Top-4 inference, the first
-        dimension can exceed the launch-grid limits of PyTorch's fused
-        scaled-dot-product-attention CUDA kernel.  Every row is independent,
-        so chunking this dimension is mathematically equivalent in eval mode
-        and avoids the invalid-configuration launch.
-        """
-        if tokens.dim() != 3 or tokens.shape[1:] != (3, 64):
+        """Apply width/CDF token attention in bounded independent chunks."""
+        if tokens.dim() != 3 or tokens.shape[1:] != (2, 64):
             raise ValueError(
-                "branch-attention tokens must be [N,3,64], got "
+                "branch-attention tokens must be [N,2,64], got "
                 f"{tuple(tokens.shape)}"
             )
-
         n = int(tokens.shape[0])
         chunk = self.branch_attn_chunk_size
         if n <= chunk:
@@ -2352,10 +2345,12 @@ class CenterViewAngleCandidateDecoder(nn.Module):
         return torch.cat(outputs, dim=0)
 
     def _monotonic_cdf_logits(self, raw: torch.Tensor) -> torch.Tensor:
-        """Convert [B,D,T,Q,A] raw outputs to monotonic CDF logits."""
-        if raw.dim() != 5 or raw.shape[2] != self.num_cdf_thresholds:
+        """Convert raw ``[B,D,T,Q,A]`` values to monotonic CDF logits."""
+        expected = (self.num_depth, self.num_cdf_thresholds)
+        if raw.dim() != 5 or raw.shape[1:3] != expected:
             raise RuntimeError(
-                f"raw CDF tensor must be [B,D,T,Q,A], got {tuple(raw.shape)}"
+                "raw CDF tensor must be [B,D,T,Q,A] with D/T="
+                f"{expected}, got {tuple(raw.shape)}"
             )
         base = raw[:, :, :1]
         increments = F.softplus(
@@ -2366,101 +2361,32 @@ class CenterViewAngleCandidateDecoder(nn.Module):
             dim=2,
         )
 
-    @staticmethod
-    def _gather_angle(x: torch.Tensor, angle_idx: torch.Tensor) -> torch.Tensor:
-        """Gather x [B,C,Q,A] at angle_idx [B,Q] -> [B,C,Q]."""
-        B, C, Q, A = x.shape
-        idx = angle_idx.long().clamp(0, A - 1).view(B, 1, Q, 1)
-        idx = idx.expand(B, C, Q, 1)
-        return torch.gather(x, dim=-1, index=idx).squeeze(-1)
-
-    @staticmethod
-    def _gather_joint(
-        x: torch.Tensor,
-        angle_idx: torch.Tensor,
-        depth_idx: torch.Tensor,
-    ) -> torch.Tensor:
-        """Gather x [B,C,Q,A,D] at joint indices -> [B,C,Q]."""
-        B, C, Q, A, D = x.shape
-        flat = x.reshape(B, C, Q, A * D)
-        joint = (
-            angle_idx.long().clamp(0, A - 1) * D
-            + depth_idx.long().clamp(0, D - 1)
-        )
-        gather_idx = joint.view(B, 1, Q, 1).expand(B, C, Q, 1)
-        return torch.gather(flat, dim=-1, index=gather_idx).squeeze(-1)
-
-    @torch.no_grad()
-    def _add_debug(
-        self,
-        end_points: Dict[str, Any],
-        cdf_logits: torch.Tensor,
-        depth_logits: torch.Tensor,
-        selected_angle: torch.Tensor,
-        selected_depth: torch.Tensor,
-    ) -> None:
-        p = self.debug_prefix
-        prob = torch.sigmoid(cdf_logits)  # [B,T,Q,A,D]
-        utility = prob.mean(dim=1)        # [B,Q,A,D]
-        B, Q, A, D = utility.shape
-
-        flat = utility.reshape(B, Q, A * D)
-        topk = torch.topk(flat, k=min(2, A * D), dim=-1).values
-        margin = topk[..., 0] - topk[..., -1]
-
-        end_points[f"{p} CDF utility mean"] = utility.mean()
-        end_points[f"{p} CDF utility max"] = utility.max()
-        end_points[f"{p} joint margin"] = margin.mean()
-        end_points[f"{p} selected angle mean"] = selected_angle.float().mean()
-        end_points[f"{p} selected depth mean"] = selected_depth.float().mean()
-        end_points[f"{p} selected depth01 ratio"] = (
-            selected_depth <= 1
-        ).float().mean()
-
-        # Monotonicity is structural, but log it to catch reshape mistakes.
-        monotonic_violation = (
-            prob[:, 1:] + 1e-7 < prob[:, :-1]
-        ).float().mean()
-        end_points[f"{p} CDF monotonic violation"] = monotonic_violation
-
-        label_bins = end_points.get(
-            "batch_grasp_cdf_bins_angle_depth", None
-        )
-        valid = end_points.get("batch_grasp_cdf_valid_mask", None)
-        if (
-            torch.is_tensor(label_bins)
-            and torch.is_tensor(valid)
-            and tuple(label_bins.shape) == (B, Q, A, D)
-        ):
-            valid = valid.bool()
-            target_utility = (
-                label_bins.gt(0).float()
-                * (
-                    self.num_cdf_thresholds
-                    - label_bins.clamp_min(1).float()
-                    + 1.0
-                )
-                / float(self.num_cdf_thresholds)
-            )
-            if bool(valid.any()):
-                end_points[f"{p} CDF utility target valid"] = (
-                    target_utility[valid].mean()
-                )
-                end_points[f"{p} CDF utility MAE valid"] = (
-                    utility[valid] - target_utility[valid]
-                ).abs().mean()
-
     def forward(
         self,
         group_features_angle: torch.Tensor,
         end_points: Dict[str, Any],
     ) -> Dict[str, Any]:
-        B, C, QA = group_features_angle.shape
+        for key in (
+            "kview_angle_query_base_q",
+            "kview_angle_query_num_angle",
+        ):
+            if key not in end_points:
+                raise KeyError(
+                    f"CDF decoder is missing required endpoint: {key}"
+                )
+
+        if group_features_angle.dim() != 3:
+            raise ValueError(
+                "group_features_angle must be [B,C,Q*A], got "
+                f"{tuple(group_features_angle.shape)}"
+            )
+        B, _C, QA = group_features_angle.shape
         Q = int(end_points["kview_angle_query_base_q"])
         A = int(end_points["kview_angle_query_num_angle"])
         if A != self.num_angle or QA != Q * A:
             raise RuntimeError(
-                f"Expected QA=Q*A ({Q}*{A}), got {QA}."
+                f"Expected QA=Q*A={Q}*{self.num_angle}, got "
+                f"QA={QA}, A={A}."
             )
 
         x = self.input_proj(group_features_angle)
@@ -2473,49 +2399,34 @@ class CenterViewAngleCandidateDecoder(nn.Module):
         x = x.view(B * Q, A, self.hidden_dim)
         for layer in self.layers:
             x = layer(x)
-
         angle_feature = x.view(B, Q, A, self.hidden_dim).contiguous()
-        # Exporting the full hidden tensor is useful for offline scorer mining,
-        # but retaining it in end_points during end-to-end training extends its
-        # lifetime through backward.  eval() keeps the old behavior.
-        force_full_decode = bool(end_points.get("cva_force_full_decode", False))
-        full_decode = (not self.training) or force_full_decode
-        if full_decode or bool(end_points.get("cva_export_angle_feature", False)):
+
+        if bool(end_points.get("cva_export_angle_feature", False)):
             end_points["cva_angle_feature"] = angle_feature
 
         x = angle_feature.reshape(B, Q * A, self.hidden_dim)
         x = x.transpose(1, 2).contiguous()
-
-        depth_feat = self.depth_proj(x)
         width_feat = self.width_proj(x)
         cdf_feat = self.score_proj(x)
 
-        depth_tok = depth_feat.permute(0, 2, 1).reshape(B * Q * A, 1, 64)
-        width_tok = width_feat.permute(0, 2, 1).reshape(B * Q * A, 1, 64)
-        cdf_tok = cdf_feat.permute(0, 2, 1).reshape(B * Q * A, 1, 64)
-        tokens = torch.cat([depth_tok, width_tok, cdf_tok], dim=1)
-        tokens = self._run_branch_attention(tokens)
+        width_tok = width_feat.permute(0, 2, 1).reshape(
+            B * Q * A, 1, 64
+        )
+        cdf_tok = cdf_feat.permute(0, 2, 1).reshape(
+            B * Q * A, 1, 64
+        )
+        tokens = self._run_branch_attention(
+            torch.cat([width_tok, cdf_tok], dim=1)
+        )
 
-        depth_feat = tokens[:, 0].view(B, Q * A, 64)
-        depth_feat = depth_feat.permute(0, 2, 1).contiguous()
-        width_feat = tokens[:, 1].view(B, Q * A, 64)
+        width_feat = tokens[:, 0].view(B, Q * A, 64)
         width_feat = width_feat.permute(0, 2, 1).contiguous()
-        cdf_feat = tokens[:, 2].view(B, Q * A, 64)
+        cdf_feat = tokens[:, 1].view(B, Q * A, 64)
         cdf_feat = cdf_feat.permute(0, 2, 1).contiguous()
 
-        depth_logits_flat = self.depth_head(
-            self.depth_dropout(depth_feat)
-        )
-        width_flat = self.width_head(
-            self.width_dropout(width_feat)
-        )
-        cdf_raw_flat = self.cdf_head(
-            self.score_dropout(cdf_feat)
-        )
+        width_flat = self.width_head(self.width_dropout(width_feat))
+        cdf_raw_flat = self.cdf_head(self.score_dropout(cdf_feat))
 
-        depth_angle = depth_logits_flat.view(
-            B, self.num_depth + 1, Q, A
-        )
         width_angle_depth = width_flat.view(
             B, self.num_depth, Q, A
         )
@@ -2526,97 +2437,17 @@ class CenterViewAngleCandidateDecoder(nn.Module):
             Q,
             A,
         )
-        cdf_mono = self._monotonic_cdf_logits(cdf_raw)
-        cdf_angle_depth = cdf_mono.permute(
+        cdf_angle_depth = self._monotonic_cdf_logits(cdf_raw).permute(
             0, 2, 3, 4, 1
-        ).contiguous()  # [B,T,Q,A,D]
+        ).contiguous()
 
-        # These are the only decoder tensors required by the training losses.
-        end_points["grasp_depth_pred_angle"] = depth_angle
+        if not torch.isfinite(width_angle_depth).all():
+            raise FloatingPointError("Non-finite depth-wise width predictions.")
+        if not torch.isfinite(cdf_angle_depth).all():
+            raise FloatingPointError("Non-finite CDF logits.")
+
         end_points["grasp_width_pred_angle_depth"] = width_angle_depth
         end_points["grasp_cdf_pred_angle_depth"] = cdf_angle_depth
-
-        # Training does not need sigmoid utility, joint argmax, collapsed
-        # compatibility aliases, or decoder debug.  Returning here shortens the
-        # lifetime of several [B,Q,A,D,T] / [B,Q,A,D] tensors without changing
-        # the logits or any gradient used by depth/width/CDF losses.
-        if not full_decode:
-            return end_points
-
-        cdf_prob = torch.sigmoid(cdf_angle_depth)
-        utility = cdf_prob.mean(dim=1)  # [B,Q,A,D]
-        joint_idx = utility.reshape(B, Q, A * self.num_depth).argmax(dim=-1)
-        selected_angle = torch.div(
-            joint_idx, self.num_depth, rounding_mode="floor"
-        )
-        selected_depth = torch.remainder(joint_idx, self.num_depth)
-
-        # Depth-collapsed compatibility tensors per angle.
-        depth_per_angle = utility.argmax(dim=-1)  # [B,Q,A]
-        width_qad = width_angle_depth.permute(0, 2, 3, 1).contiguous()
-        width_angle = torch.gather(
-            width_qad,
-            dim=-1,
-            index=depth_per_angle.unsqueeze(-1),
-        ).squeeze(-1).unsqueeze(1)  # [B,1,Q,A]
-
-        cdf_bqadt = cdf_angle_depth.permute(0, 2, 3, 4, 1).contiguous()
-        cdf_angle = torch.gather(
-            cdf_bqadt,
-            dim=3,
-            index=depth_per_angle.unsqueeze(-1).unsqueeze(-1).expand(
-                B, Q, A, 1, self.num_cdf_thresholds
-            ),
-        ).squeeze(3).permute(0, 3, 1, 2).contiguous()
-
-        cdf_selected = self._gather_joint(
-            cdf_angle_depth,
-            selected_angle,
-            selected_depth,
-        )  # [B,T,Q]
-        width_full = width_qad.unsqueeze(1)  # [B,1,Q,A,D]
-        width_selected = self._gather_joint(
-            width_full,
-            selected_angle,
-            selected_depth,
-        )  # [B,1,Q]
-
-        per_angle_utility = utility.max(dim=-1).values  # [B,Q,A]
-        angle_logits_valid = per_angle_utility.permute(0, 2, 1).contiguous()
-        invalid = angle_logits_valid.new_full((B, 1, Q), -20.0)
-
-        end_points["grasp_cdf_utility_angle_depth"] = utility
-
-        # Compatibility aliases.  Score aliases contain CDF logits and must be
-        # decoded with sigmoid-mean rather than softmax expectation.
-        end_points["grasp_score_pred_angle"] = cdf_angle
-        end_points["grasp_width_pred_angle"] = width_angle
-        end_points["grasp_score_pred_is_cdf"] = True
-
-        end_points["cva_selected_angle"] = selected_angle
-        end_points["cva_selected_depth"] = selected_depth
-        end_points["cva_selected_utility"] = self._gather_joint(
-            utility.unsqueeze(1),
-            selected_angle,
-            selected_depth,
-        ).squeeze(1)
-
-        end_points["grasp_angle_pred"] = torch.cat(
-            [angle_logits_valid, invalid], dim=1
-        )
-        end_points["grasp_depth_pred"] = self._gather_angle(
-            depth_angle, selected_angle
-        )
-        end_points["grasp_score_pred"] = cdf_selected
-        end_points["grasp_width_pred"] = width_selected
-
-        self._add_debug(
-            end_points=end_points,
-            cdf_logits=cdf_angle_depth,
-            depth_logits=depth_angle,
-            selected_angle=selected_angle,
-            selected_depth=selected_depth,
-        )
         return end_points
 
 
@@ -2760,6 +2591,842 @@ class CenterViewAngleQueryTransformerLocalGraspModule(nn.Module):
         except Exception:
             return None
 
+    @staticmethod
+    def _cdf_target_from_bins(
+        bins: torch.Tensor,
+        num_thresholds: int,
+    ) -> torch.Tensor:
+        ids = torch.arange(
+            num_thresholds,
+            device=bins.device,
+            dtype=bins.dtype,
+        )
+        return (
+            (bins.unsqueeze(-1) > 0)
+            & (ids >= bins.unsqueeze(-1) - 1)
+        ).float()
+
+    @staticmethod
+    def _cdf_ece(
+        prob: torch.Tensor,
+        target: torch.Tensor,
+        num_bins: int = 10,
+    ) -> float:
+        if prob.numel() == 0:
+            return float("nan")
+        edges = torch.linspace(
+            0.0,
+            1.0,
+            num_bins + 1,
+            device=prob.device,
+            dtype=prob.dtype,
+        )
+        ece = prob.new_zeros(())
+        for bin_i in range(num_bins):
+            if bin_i == num_bins - 1:
+                mask = (prob >= edges[bin_i]) & (prob <= edges[bin_i + 1])
+            else:
+                mask = (prob >= edges[bin_i]) & (prob < edges[bin_i + 1])
+            if bool(mask.any()):
+                weight = mask.float().mean()
+                ece = ece + weight * (
+                    prob[mask].mean() - target[mask].mean()
+                ).abs()
+        return float(ece.detach().cpu())
+
+
+    @staticmethod
+    def _flag_to_bool(value: Any) -> bool:
+        if torch.is_tensor(value):
+            if value.numel() != 1:
+                raise ValueError(
+                    "Diagnostic flag tensor must contain exactly one value, "
+                    f"got shape={tuple(value.shape)}."
+                )
+            return bool(value.detach().item())
+        return bool(value)
+
+    @staticmethod
+    def _pearson_corr(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        x = x.float().reshape(-1)
+        y = y.float().reshape(-1)
+        finite = torch.isfinite(x) & torch.isfinite(y)
+        x = x[finite]
+        y = y[finite]
+        if x.numel() < 2:
+            return torch.zeros((), device=x.device if x.numel() else y.device)
+        x = x - x.mean()
+        y = y - y.mean()
+        denom = torch.sqrt(
+            x.square().sum().clamp_min(1e-12)
+            * y.square().sum().clamp_min(1e-12)
+        )
+        return (x * y).sum() / denom
+
+    @staticmethod
+    def _reliability_curve(
+        prob: torch.Tensor,
+        target: torch.Tensor,
+        num_bins: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return confidence, accuracy and count for equal-width bins."""
+        p = prob.float().reshape(-1)
+        y = target.float().reshape(-1)
+        finite = torch.isfinite(p) & torch.isfinite(y)
+        p = p[finite].clamp(0.0, 1.0)
+        y = y[finite].clamp(0.0, 1.0)
+
+        conf = p.new_full((num_bins,), float("nan"))
+        acc = p.new_full((num_bins,), float("nan"))
+        count = p.new_zeros((num_bins,))
+        if p.numel() == 0:
+            return conf, acc, count
+
+        edges = torch.linspace(
+            0.0,
+            1.0,
+            num_bins + 1,
+            device=p.device,
+            dtype=p.dtype,
+        )
+        for bin_i in range(num_bins):
+            if bin_i == num_bins - 1:
+                mask = (p >= edges[bin_i]) & (p <= edges[bin_i + 1])
+            else:
+                mask = (p >= edges[bin_i]) & (p < edges[bin_i + 1])
+            if bool(mask.any()):
+                conf[bin_i] = p[mask].mean()
+                acc[bin_i] = y[mask].mean()
+                count[bin_i] = mask.sum()
+        return conf, acc, count
+
+    @staticmethod
+    def _cdf_onset_from_prob(
+        prob: torch.Tensor,
+        decision_threshold: float = 0.5,
+    ) -> torch.Tensor:
+        """Encode predicted CDF onset as 0=failure, 1..T=first success bin."""
+        hit = prob >= float(decision_threshold)
+        any_hit = hit.any(dim=-1)
+        first = hit.float().argmax(dim=-1).long() + 1
+        return torch.where(any_hit, first, torch.zeros_like(first))
+
+    def _cdf_threshold_values(
+        self,
+        end_points: Dict[str, Any],
+        num_thresholds: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        values = end_points.get("batch_grasp_cdf_thresholds", None)
+        if torch.is_tensor(values) and values.numel() == num_thresholds:
+            return values.detach().float().reshape(-1).to(device)
+        # Canonical GraspNet thresholds for T=6; otherwise use ordinal ids.
+        if num_thresholds == 6:
+            return torch.tensor(
+                [0.2, 0.4, 0.6, 0.8, 1.0, 1.2],
+                device=device,
+                dtype=torch.float32,
+            )
+        return torch.arange(
+            num_thresholds,
+            device=device,
+            dtype=torch.float32,
+        )
+
+    @torch.no_grad()
+    def _add_cdf_scalar_diagnostics(
+        self,
+        end_points: Dict[str, Any],
+    ) -> None:
+        """Add low-frequency CDF ranking/calibration scalars to end_points.
+
+        This method is a no-op unless the training/evaluation loop sets
+        ``end_points['cva_compute_diagnostics']``. It never runs inference
+        decode and all computations use detached tensors.
+        """
+        if not self._flag_to_bool(
+            end_points.get("cva_compute_diagnostics", False)
+        ):
+            return
+
+        required = (
+            "grasp_cdf_pred_angle_depth",
+            "batch_grasp_cdf_bins_angle_depth",
+            "batch_grasp_cdf_valid_mask",
+        )
+        missing = [key for key in required if key not in end_points]
+        if missing:
+            raise KeyError(
+                "CDF scalar diagnostics require endpoint(s): "
+                + ", ".join(missing)
+            )
+
+        logits = end_points["grasp_cdf_pred_angle_depth"].detach().float()
+        bins = end_points["batch_grasp_cdf_bins_angle_depth"].detach().long()
+        valid = end_points["batch_grasp_cdf_valid_mask"].detach().bool()
+
+        if logits.dim() != 5:
+            raise ValueError(
+                "grasp_cdf_pred_angle_depth must be [B,T,Q,A,D], got "
+                f"{tuple(logits.shape)}"
+            )
+        B, T, Q, A, D = logits.shape
+        if bins.shape != (B, Q, A, D):
+            raise ValueError(
+                "batch_grasp_cdf_bins_angle_depth must be [B,Q,A,D], got "
+                f"{tuple(bins.shape)}"
+            )
+        if valid.shape != bins.shape:
+            raise ValueError(
+                "batch_grasp_cdf_valid_mask shape mismatch: "
+                f"valid={tuple(valid.shape)}, bins={tuple(bins.shape)}"
+            )
+
+        prob = torch.sigmoid(logits).permute(0, 2, 3, 4, 1).contiguous()
+        target = self._cdf_target_from_bins(bins, T)
+        utility = prob.mean(dim=-1)
+        target_utility = target.mean(dim=-1)
+        pfx = "D: CDF"
+
+        end_points[f"{pfx} valid ratio"] = valid.float().mean().reshape(())
+        if not bool(valid.any()):
+            zero = utility.new_zeros(())
+            end_points[f"{pfx} utility mean"] = zero
+            end_points[f"{pfx} target utility mean"] = zero
+            end_points[f"{pfx} selected regret"] = zero
+            return
+
+        prob_valid = prob[valid]
+        target_valid = target[valid]
+        utility_valid = utility[valid]
+        target_utility_valid = target_utility[valid]
+
+        high_conf = float(self.config.cdf_diag_high_confidence)
+        end_points[f"{pfx} utility mean"] = utility_valid.mean().reshape(())
+        end_points[f"{pfx} utility std"] = utility_valid.std(
+            unbiased=False
+        ).reshape(())
+        end_points[f"{pfx} target utility mean"] = (
+            target_utility_valid.mean().reshape(())
+        )
+        end_points[f"{pfx} utility MAE"] = (
+            utility_valid - target_utility_valid
+        ).abs().mean().reshape(())
+        end_points[f"{pfx} utility pearson"] = self._pearson_corr(
+            utility_valid,
+            target_utility_valid,
+        ).reshape(())
+        end_points[f"{pfx} all saturation99"] = (
+            utility_valid >= 0.99
+        ).float().mean().reshape(())
+        end_points[f"{pfx} all highconf"] = (
+            utility_valid >= high_conf
+        ).float().mean().reshape(())
+        end_points[f"{pfx} all highconf falsepositive"] = (
+            (utility_valid >= high_conf)
+            & (target_utility_valid <= 0.0)
+        ).float().mean().reshape(())
+
+        # Verify monotonicity even though the parameterization should enforce it.
+        if T > 1:
+            monotonic_diff = prob_valid[:, 1:] - prob_valid[:, :-1]
+            end_points[f"{pfx} monotonic violation ratio"] = (
+                monotonic_diff < -1e-6
+            ).float().mean().reshape(())
+            end_points[f"{pfx} monotonic min delta"] = (
+                monotonic_diff.min().reshape(())
+            )
+
+        thresholds = self._cdf_threshold_values(
+            end_points,
+            T,
+            device=prob.device,
+        )
+        safe_idx = int(
+            torch.argmin(
+                (thresholds - float(self.config.cdf_diag_safe_threshold)).abs()
+            ).item()
+        )
+
+        eps = 1e-6
+        for threshold_i in range(T):
+            p = prob_valid[:, threshold_i].clamp(eps, 1.0 - eps)
+            y = target_valid[:, threshold_i]
+            ece = self._cdf_ece(
+                p,
+                y,
+                num_bins=max(int(self.config.cdf_diag_num_bins), 2),
+            )
+            nll = -(
+                y * torch.log(p) + (1.0 - y) * torch.log1p(-p)
+            ).mean()
+            brier = (p - y).square().mean()
+            end_points[f"{pfx} t{threshold_i} pred"] = p.mean().reshape(())
+            end_points[f"{pfx} t{threshold_i} target"] = y.mean().reshape(())
+            end_points[f"{pfx} t{threshold_i} gap"] = (
+                p.mean() - y.mean()
+            ).reshape(())
+            end_points[f"{pfx} t{threshold_i} ECE"] = p.new_tensor(
+                ece
+            ).reshape(())
+            end_points[f"{pfx} t{threshold_i} NLL"] = nll.reshape(())
+            end_points[f"{pfx} t{threshold_i} Brier"] = brier.reshape(())
+
+        # Query-level selected candidate diagnostics: one A x D candidate/query.
+        utility_flat = utility.reshape(B, Q, A * D)
+        target_flat = target_utility.reshape(B, Q, A * D)
+        valid_flat = valid.reshape(B, Q, A * D)
+        selected_idx = utility_flat.argmax(dim=-1)
+        selected_pred = torch.gather(
+            utility_flat,
+            dim=-1,
+            index=selected_idx.unsqueeze(-1),
+        ).squeeze(-1)
+        selected_target = torch.gather(
+            target_flat,
+            dim=-1,
+            index=selected_idx.unsqueeze(-1),
+        ).squeeze(-1)
+        selected_valid = torch.gather(
+            valid_flat,
+            dim=-1,
+            index=selected_idx.unsqueeze(-1),
+        ).squeeze(-1)
+        query_has_valid = valid_flat.any(dim=-1)
+        selected_mask = query_has_valid & selected_valid
+
+        oracle_target = target_flat.masked_fill(
+            ~valid_flat,
+            -1.0,
+        ).max(dim=-1).values.clamp_min(0.0)
+        selected_regret = (
+            oracle_target - selected_target
+        ).clamp_min(0.0)
+
+        if bool(selected_mask.any()):
+            sp = selected_pred[selected_mask]
+            st = selected_target[selected_mask]
+            sr = selected_regret[selected_mask]
+            end_points[f"{pfx} selected utility"] = sp.mean().reshape(())
+            end_points[f"{pfx} selected target"] = st.mean().reshape(())
+            end_points[f"{pfx} selected oracle"] = (
+                oracle_target[selected_mask].mean().reshape(())
+            )
+            end_points[f"{pfx} selected regret"] = sr.mean().reshape(())
+            end_points[f"{pfx} selected exact oracle"] = (
+                sr <= 1e-6
+            ).float().mean().reshape(())
+            end_points[f"{pfx} selected pearson"] = self._pearson_corr(
+                sp,
+                st,
+            ).reshape(())
+            end_points[f"{pfx} selected saturation99"] = (
+                sp >= 0.99
+            ).float().mean().reshape(())
+            end_points[f"{pfx} selected highconf falsepositive"] = (
+                (sp >= high_conf) & (st <= 0.0)
+            ).float().mean().reshape(())
+
+            rounded = torch.round(
+                sp * (10.0 ** int(self.config.cdf_diag_score_round_decimals))
+            )
+            unique_ratio = torch.unique(rounded).numel() / max(sp.numel(), 1)
+            end_points[f"{pfx} selected unique score ratio"] = (
+                sp.new_tensor(float(unique_ratio)).reshape(())
+            )
+
+            # Rank the selected query candidates as the inference decoder does.
+            selected_safe = torch.gather(
+                target[..., safe_idx].reshape(B, Q, A * D),
+                dim=-1,
+                index=selected_idx.unsqueeze(-1),
+            ).squeeze(-1)
+            rank_score = selected_pred.masked_fill(~selected_mask, -1.0)
+            for topk in (1, 10, int(self.config.cdf_diag_topk)):
+                topk = max(int(topk), 1)
+                target_means = []
+                safe_means = []
+                for batch_i in range(B):
+                    n_valid = int(selected_mask[batch_i].sum().item())
+                    if n_valid <= 0:
+                        continue
+                    k_eff = min(topk, n_valid)
+                    idx = torch.topk(
+                        rank_score[batch_i],
+                        k=k_eff,
+                        largest=True,
+                    ).indices
+                    target_means.append(
+                        selected_target[batch_i, idx].mean()
+                    )
+                    safe_means.append(
+                        selected_safe[batch_i, idx].mean()
+                    )
+                if target_means:
+                    end_points[f"{pfx} top{topk} target utility"] = (
+                        torch.stack(target_means).mean().reshape(())
+                    )
+                    end_points[f"{pfx} top{topk} safe"] = (
+                        torch.stack(safe_means).mean().reshape(())
+                    )
+
+        pred_onset = self._cdf_onset_from_prob(prob_valid)
+        target_onset = bins[valid]
+        end_points[f"{pfx} onset exact"] = (
+            pred_onset == target_onset
+        ).float().mean().reshape(())
+        end_points[f"{pfx} onset MAE"] = (
+            pred_onset.float() - target_onset.float()
+        ).abs().mean().reshape(())
+
+    @torch.no_grad()
+    def _save_cdf_extended_diagnostics(
+        self,
+        end_points: Dict[str, Any],
+    ) -> None:
+        """Save ranking, reliability, error-case and confusion diagnostics.
+
+        Called only from the periodic rank-0 visualization path.
+        """
+        required = (
+            "grasp_cdf_pred_angle_depth",
+            "batch_grasp_cdf_bins_angle_depth",
+            "batch_grasp_cdf_valid_mask",
+        )
+        if any(key not in end_points for key in required):
+            return
+
+        logits = end_points["grasp_cdf_pred_angle_depth"].detach().float()
+        bins = end_points["batch_grasp_cdf_bins_angle_depth"].detach().long()
+        valid = end_points["batch_grasp_cdf_valid_mask"].detach().bool()
+        if logits.dim() != 5:
+            return
+
+        B, T, Q, A, D = logits.shape
+        if bins.shape != (B, Q, A, D) or valid.shape != bins.shape:
+            return
+        if B <= 0 or not bool(valid[0].any()):
+            return
+
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except Exception as exc:
+            raise RuntimeError(
+                "Extended CDF diagnostics require Matplotlib."
+            ) from exc
+
+        os.makedirs(self.config.vis_dir, exist_ok=True)
+        prob = torch.sigmoid(logits[0]).permute(1, 2, 3, 0).contiguous()
+        target = self._cdf_target_from_bins(bins[0], T)
+        valid0 = valid[0]
+        utility = prob.mean(dim=-1)
+        target_utility = target.mean(dim=-1)
+        thresholds = self._cdf_threshold_values(
+            end_points,
+            T,
+            device=prob.device,
+        )
+        threshold_np = thresholds.detach().cpu().numpy()
+        safe_idx = int(
+            torch.argmin(
+                (
+                    thresholds
+                    - float(self.config.cdf_diag_safe_threshold)
+                ).abs()
+            ).item()
+        )
+
+        row = torch.arange(Q, device=utility.device)
+        flat_utility = utility.reshape(Q, A * D)
+        flat_target_utility = target_utility.reshape(Q, A * D)
+        flat_valid = valid0.reshape(Q, A * D)
+        selected_idx = flat_utility.argmax(dim=-1)
+        selected_pred = flat_utility[row, selected_idx]
+        selected_target = flat_target_utility[row, selected_idx]
+        selected_valid = flat_valid[row, selected_idx]
+        query_has_valid = flat_valid.any(dim=-1)
+        selected_mask = selected_valid & query_has_valid
+        angle_idx = torch.div(
+            selected_idx,
+            D,
+            rounding_mode="floor",
+        )
+        depth_idx = torch.remainder(selected_idx, D)
+
+        oracle_flat = flat_target_utility.masked_fill(~flat_valid, -1.0)
+        oracle_idx = oracle_flat.argmax(dim=-1)
+        oracle_target = oracle_flat[row, oracle_idx].clamp_min(0.0)
+        oracle_depth = torch.remainder(oracle_idx, D)
+        selected_safe = target[..., safe_idx].reshape(
+            Q, A * D
+        )[row, selected_idx]
+
+        # --------------------------------------------------------------
+        # 1) Rank-quality curve for decoder-selected candidates.
+        # --------------------------------------------------------------
+        rank_pool = torch.where(selected_mask)[0]
+        if rank_pool.numel() > 0:
+            order_local = torch.argsort(
+                selected_pred[rank_pool],
+                descending=True,
+            )
+            rank_idx = rank_pool[order_local]
+            n_rank = min(
+                max(int(self.config.cdf_diag_topk), 1),
+                int(rank_idx.numel()),
+            )
+            rank_idx = rank_idx[:n_rank]
+            rank_x = np.arange(1, n_rank + 1)
+            rank_pred = selected_pred[rank_idx].cpu().numpy()
+            rank_target = selected_target[rank_idx].cpu().numpy()
+            rank_safe = selected_safe[rank_idx].float()
+            rank_safe_cum = (
+                rank_safe.cumsum(dim=0)
+                / torch.arange(
+                    1,
+                    n_rank + 1,
+                    device=rank_safe.device,
+                    dtype=rank_safe.dtype,
+                )
+            ).cpu().numpy()
+
+            fig, ax1 = plt.subplots(figsize=(9.0, 4.0), dpi=160)
+            ax1.plot(rank_x, rank_pred, label="pred utility")
+            ax1.step(
+                rank_x,
+                rank_target,
+                where="mid",
+                label="target utility",
+            )
+            ax1.set_ylim(-0.05, 1.05)
+            ax1.set_xlabel("predicted rank")
+            ax1.set_ylabel("utility")
+            ax2 = ax1.twinx()
+            ax2.plot(
+                rank_x,
+                rank_safe_cum,
+                linestyle="--",
+                label=f"cumulative success@{float(thresholds[safe_idx]):.1f}",
+            )
+            ax2.set_ylim(-0.05, 1.05)
+            ax2.set_ylabel("cumulative success ratio")
+            h1, l1 = ax1.get_legend_handles_labels()
+            h2, l2 = ax2.get_legend_handles_labels()
+            ax1.legend(h1 + h2, l1 + l2, loc="best")
+            ax1.grid(alpha=0.2)
+            ax1.set_title("CDF selected-candidate rank quality")
+            fig.tight_layout()
+            fig.savefig(
+                os.path.join(
+                    self.config.vis_dir,
+                    f"cdf_rank_quality_it{self._vis_iter:06d}.png",
+                )
+            )
+            plt.close(fig)
+        else:
+            rank_idx = torch.empty(
+                0,
+                dtype=torch.long,
+                device=utility.device,
+            )
+
+        # --------------------------------------------------------------
+        # 2) Utility scatter: all valid candidates vs selected candidates.
+        # --------------------------------------------------------------
+        valid_candidate_idx = torch.where(valid0.reshape(-1))[0]
+        max_scatter = max(int(self.config.cdf_diag_max_scatter), 1)
+        if valid_candidate_idx.numel() > max_scatter:
+            choose = torch.linspace(
+                0,
+                valid_candidate_idx.numel() - 1,
+                steps=max_scatter,
+                device=valid_candidate_idx.device,
+            ).round().long()
+            valid_candidate_idx = valid_candidate_idx[choose]
+
+        pred_all = utility.reshape(-1)[valid_candidate_idx]
+        target_all = target_utility.reshape(-1)[valid_candidate_idx]
+        fig, axes = plt.subplots(1, 2, figsize=(8.5, 4.0), dpi=160)
+        axes[0].scatter(
+            target_all.cpu().numpy(),
+            pred_all.cpu().numpy(),
+            s=3,
+            alpha=0.18,
+        )
+        axes[0].plot([0, 1], [0, 1], linestyle="--")
+        axes[0].set_title("All valid candidates")
+        axes[0].set_xlabel("target utility")
+        axes[0].set_ylabel("predicted utility")
+        if bool(selected_mask.any()):
+            axes[1].scatter(
+                selected_target[selected_mask].cpu().numpy(),
+                selected_pred[selected_mask].cpu().numpy(),
+                s=6,
+                alpha=0.28,
+            )
+        axes[1].plot([0, 1], [0, 1], linestyle="--")
+        axes[1].set_title("Decoder-selected candidates")
+        axes[1].set_xlabel("target utility")
+        axes[1].set_ylabel("predicted utility")
+        for ax in axes:
+            ax.set_xlim(-0.05, 1.05)
+            ax.set_ylim(-0.05, 1.05)
+            ax.grid(alpha=0.2)
+        fig.tight_layout()
+        fig.savefig(
+            os.path.join(
+                self.config.vis_dir,
+                f"cdf_utility_scatter_it{self._vis_iter:06d}.png",
+            )
+        )
+        plt.close(fig)
+
+        # --------------------------------------------------------------
+        # 3) Reliability diagrams for every friction threshold.
+        # --------------------------------------------------------------
+        ncols = min(3, T)
+        nrows = int(np.ceil(T / float(ncols)))
+        fig, axes = plt.subplots(
+            nrows,
+            ncols,
+            figsize=(4.0 * ncols, 3.4 * nrows),
+            dpi=160,
+            squeeze=False,
+        )
+        num_bins = max(int(self.config.cdf_diag_num_bins), 2)
+        for threshold_i, ax in enumerate(axes.reshape(-1)):
+            if threshold_i >= T:
+                ax.axis("off")
+                continue
+            p = prob[..., threshold_i][valid0]
+            y = target[..., threshold_i][valid0]
+            conf, acc, count = self._reliability_curve(
+                p,
+                y,
+                num_bins=num_bins,
+            )
+            present = count > 0
+            if bool(present.any()):
+                ax.plot(
+                    conf[present].cpu().numpy(),
+                    acc[present].cpu().numpy(),
+                    marker="o",
+                )
+            ax.plot([0, 1], [0, 1], linestyle="--")
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+            ece = self._cdf_ece(p, y, num_bins=num_bins)
+            ax.set_title(
+                f"mu={float(thresholds[threshold_i]):.1f}, ECE={ece:.3f}"
+            )
+            ax.set_xlabel("confidence")
+            ax.set_ylabel("empirical success")
+            ax.grid(alpha=0.2)
+        fig.tight_layout()
+        fig.savefig(
+            os.path.join(
+                self.config.vis_dir,
+                f"cdf_reliability_it{self._vis_iter:06d}.png",
+            )
+        )
+        plt.close(fig)
+
+        # --------------------------------------------------------------
+        # 4) Hard false positives, missed positives and representative cases.
+        # --------------------------------------------------------------
+        flat_prob = prob.reshape(Q * A * D, T)
+        flat_target = target.reshape(Q * A * D, T)
+        flat_pred_u = utility.reshape(-1)
+        flat_target_u = target_utility.reshape(-1)
+        flat_valid_all = valid0.reshape(-1)
+        valid_ids = torch.where(flat_valid_all)[0]
+        ncase = max(int(self.config.cdf_diag_num_error_cases), 1)
+
+        fp_pool = torch.where(
+            flat_valid_all & (flat_target_u <= 0.0)
+        )[0]
+        if fp_pool.numel() > 0:
+            fp_ids = fp_pool[
+                torch.topk(
+                    flat_pred_u[fp_pool],
+                    k=min(ncase, int(fp_pool.numel())),
+                    largest=True,
+                ).indices
+            ]
+        else:
+            fp_ids = valid_ids[:0]
+
+        miss_pool = torch.where(
+            flat_valid_all & (flat_target[..., safe_idx].reshape(-1) > 0.5)
+        )[0]
+        if miss_pool.numel() > 0:
+            miss_error = (
+                flat_target_u[miss_pool] - flat_pred_u[miss_pool]
+            )
+            miss_ids = miss_pool[
+                torch.topk(
+                    miss_error,
+                    k=min(ncase, int(miss_pool.numel())),
+                    largest=True,
+                ).indices
+            ]
+        else:
+            miss_ids = valid_ids[:0]
+
+        if valid_ids.numel() > 0:
+            rep_pos = torch.linspace(
+                0,
+                valid_ids.numel() - 1,
+                steps=min(ncase, int(valid_ids.numel())),
+                device=valid_ids.device,
+            ).round().long()
+            rep_ids = valid_ids[rep_pos]
+        else:
+            rep_ids = valid_ids
+
+        case_rows = [
+            ("hard false positive", fp_ids),
+            ("missed safe positive", miss_ids),
+            ("representative valid", rep_ids),
+        ]
+        fig, axes = plt.subplots(
+            3,
+            ncase,
+            figsize=(3.1 * ncase, 8.0),
+            dpi=160,
+            squeeze=False,
+        )
+        for row_i, (row_name, ids) in enumerate(case_rows):
+            for col_i in range(ncase):
+                ax = axes[row_i, col_i]
+                if col_i >= ids.numel():
+                    ax.axis("off")
+                    continue
+                candidate_id = int(ids[col_i])
+                q = candidate_id // (A * D)
+                rem = candidate_id % (A * D)
+                a = rem // D
+                d = rem % D
+                ax.plot(
+                    threshold_np,
+                    flat_prob[candidate_id].cpu().numpy(),
+                    marker="o",
+                    label="pred",
+                )
+                ax.step(
+                    threshold_np,
+                    flat_target[candidate_id].cpu().numpy(),
+                    where="mid",
+                    label="target",
+                )
+                ax.set_ylim(-0.05, 1.05)
+                ax.set_title(
+                    f"{row_name}\nq={q},a={a},d={d + 1}cm,"
+                    f" U={float(flat_pred_u[candidate_id]):.2f}/"
+                    f"{float(flat_target_u[candidate_id]):.2f}",
+                    fontsize=8,
+                )
+                ax.grid(alpha=0.2)
+        h, l = axes[0, 0].get_legend_handles_labels()
+        if h:
+            fig.legend(h, l, loc="lower center", ncol=2)
+        fig.tight_layout(rect=(0, 0.04, 1, 1))
+        fig.savefig(
+            os.path.join(
+                self.config.vis_dir,
+                f"cdf_error_cases_it{self._vis_iter:06d}.png",
+            )
+        )
+        plt.close(fig)
+
+        # --------------------------------------------------------------
+        # 5) Predicted-vs-oracle depth and CDF-onset confusion matrices.
+        # --------------------------------------------------------------
+        query_mask = query_has_valid & selected_valid
+        depth_conf = torch.zeros(
+            (D, D),
+            device=utility.device,
+            dtype=torch.float32,
+        )
+        if bool(query_mask.any()):
+            pair = (
+                oracle_depth[query_mask] * D
+                + depth_idx[query_mask]
+            )
+            depth_conf = torch.bincount(
+                pair,
+                minlength=D * D,
+            ).float().view(D, D)
+
+        onset_pred = self._cdf_onset_from_prob(prob[valid0])
+        onset_target = bins[0][valid0]
+        onset_size = T + 1
+        onset_pair = onset_target * onset_size + onset_pred
+        onset_conf = torch.bincount(
+            onset_pair,
+            minlength=onset_size * onset_size,
+        ).float().view(onset_size, onset_size)
+
+        fig, axes = plt.subplots(1, 2, figsize=(9.0, 4.0), dpi=160)
+        im0 = axes[0].imshow(
+            depth_conf.cpu().numpy(),
+            interpolation="nearest",
+            aspect="equal",
+        )
+        axes[0].set_title("Depth confusion")
+        axes[0].set_xlabel("predicted depth index")
+        axes[0].set_ylabel("oracle depth index")
+        axes[0].set_xticks(np.arange(D))
+        axes[0].set_yticks(np.arange(D))
+        fig.colorbar(im0, ax=axes[0], fraction=0.045)
+
+        im1 = axes[1].imshow(
+            onset_conf.cpu().numpy(),
+            interpolation="nearest",
+            aspect="equal",
+        )
+        axes[1].set_title("CDF onset confusion")
+        axes[1].set_xlabel("predicted onset bin")
+        axes[1].set_ylabel("target onset bin")
+        axes[1].set_xticks(np.arange(onset_size))
+        axes[1].set_yticks(np.arange(onset_size))
+        fig.colorbar(im1, ax=axes[1], fraction=0.045)
+        fig.tight_layout()
+        fig.savefig(
+            os.path.join(
+                self.config.vis_dir,
+                f"cdf_confusion_it{self._vis_iter:06d}.png",
+            )
+        )
+        plt.close(fig)
+
+        # --------------------------------------------------------------
+        # 6) Compact machine-readable diagnostic snapshot.
+        # --------------------------------------------------------------
+        if bool(self.config.cdf_diag_save_npz):
+            dump = {
+                "thresholds": threshold_np.astype(np.float32),
+                "selected_pred_utility": selected_pred.cpu().numpy(),
+                "selected_target_utility": selected_target.cpu().numpy(),
+                "selected_valid": selected_mask.cpu().numpy().astype(np.uint8),
+                "selected_angle": angle_idx.cpu().numpy().astype(np.int16),
+                "selected_depth": depth_idx.cpu().numpy().astype(np.int16),
+                "oracle_target_utility": oracle_target.cpu().numpy(),
+                "oracle_depth": oracle_depth.cpu().numpy().astype(np.int16),
+                "depth_confusion": depth_conf.cpu().numpy(),
+                "onset_confusion": onset_conf.cpu().numpy(),
+                "rank_query_indices": rank_idx.cpu().numpy().astype(np.int32),
+            }
+            np.savez_compressed(
+                os.path.join(
+                    self.config.vis_dir,
+                    f"cdf_diagnostics_it{self._vis_iter:06d}.npz",
+                ),
+                **dump,
+            )
+
     @torch.no_grad()
     def _save_cva_visualization(
         self,
@@ -2767,182 +3434,431 @@ class CenterViewAngleQueryTransformerLocalGraspModule(nn.Module):
         img: Optional[torch.Tensor],
         image_hw: Tuple[int, int],
     ) -> None:
-        """Save PNG-only diagnostics for center-view-angle query decoding.
+        """Save CDF-specific PNG diagnostics without changing model outputs.
 
-        Saved files:
-          - cva_overlay_itXXXXXX.png: centers colored by score-selected angle;
-            red rings mark disagreement with label best-angle when labels exist.
-          - cva_angle_hist_itXXXXXX.png: selected-angle histogram vs label best-angle.
-          - cva_score_heatmap_itXXXXXX.png: predicted score over angle for selected queries;
-            label score over angle is shown below when available.
-
-        No .npy/.npz files are written by design.
+        Files:
+          cdf_overlay_*: spatial selected utility/angle/depth and large regret.
+          cdf_joint_utility_*: predicted and target A x D utility grids.
+          cdf_threshold_calibration_*: per-threshold mean probability, success,
+            and ECE.
+          cdf_selected_curves_*: predicted CDF curves for top candidates.
+          cdf_depth_hist_*: predicted selected depth vs target-oracle depth.
+          cdf_width_scatter_*: selected depth-wise width prediction vs label.
+          cdf_rank_quality_*: predicted rank, target utility and cumulative safe rate.
+          cdf_utility_scatter_*: all-candidate and selected-candidate calibration.
+          cdf_reliability_*: per-threshold reliability diagrams.
+          cdf_error_cases_*: hard false positives, misses and representative curves.
+          cdf_confusion_*: selected-depth and CDF-onset confusion matrices.
+          cdf_diagnostics_*.npz: compact machine-readable snapshot.
         """
         cfg = self.config
-        if cfg.vis_dir is None:
-            return
-        if int(cfg.vis_every) <= 0:
+        if cfg.vis_dir is None or int(cfg.vis_every) <= 0:
             return
         if self._vis_iter % int(cfg.vis_every) != 0:
             return
         if not _rank0_only():
             return
 
+        required = (
+            "grasp_cdf_pred_angle_depth",
+            "grasp_width_pred_angle_depth",
+            "token_sel_idx",
+        )
+        missing = [key for key in required if key not in end_points]
+        if missing:
+            raise KeyError(
+                "CDF visualization is missing required endpoints: "
+                + ", ".join(missing)
+            )
+
+        cdf_logits = end_points["grasp_cdf_pred_angle_depth"]
+        width_dqa = end_points["grasp_width_pred_angle_depth"]
+        token_idx = end_points["token_sel_idx"]
+        if cdf_logits.dim() != 5:
+            raise ValueError(
+                "grasp_cdf_pred_angle_depth must be [B,T,Q,A,D], got "
+                f"{tuple(cdf_logits.shape)}"
+            )
+        B, T, Q, A, D = cdf_logits.shape
+        if width_dqa.shape != (B, D, Q, A):
+            raise ValueError(
+                "grasp_width_pred_angle_depth must be [B,D,Q,A], got "
+                f"{tuple(width_dqa.shape)}"
+            )
+        if token_idx.shape != (B, Q):
+            raise ValueError(
+                f"token_sel_idx must be [B,Q], got {tuple(token_idx.shape)}"
+            )
+
         os.makedirs(cfg.vis_dir, exist_ok=True)
         H, W = image_hw
+        prob = torch.sigmoid(cdf_logits[0].float()).permute(
+            1, 2, 3, 0
+        ).contiguous()  # [Q,A,D,T]
+        utility = prob.mean(dim=-1)  # [Q,A,D]
+        flat = utility.reshape(Q, A * D)
+        joint_idx = flat.argmax(dim=-1)
+        angle_idx = torch.div(joint_idx, D, rounding_mode="floor")
+        depth_idx = torch.remainder(joint_idx, D)
+        row = torch.arange(Q, device=flat.device)
+        selected_utility = flat[row, joint_idx]
 
-        selected_angle = end_points.get("cva_selected_angle", None)       # [B,Q]
-        score_expected = end_points.get("cva_score_expected_angle", None) # [B,Q,A]
-        token_idx = end_points.get("token_sel_idx", None)                 # [B,Q]
-        patch_uv = end_points.get("kview_debug_patch_uv0", None)          # [Nqa,P,2], first batch preview
-        label_score = end_points.get("batch_grasp_score_angle", None)     # [B,Q,A]
-        valid_angle = end_points.get("batch_grasp_angle_valid_mask", None)
+        label_bins = end_points.get(
+            "batch_grasp_cdf_bins_angle_depth", None
+        )
+        valid = end_points.get("batch_grasp_cdf_valid_mask", None)
+        width_label = end_points.get("batch_grasp_width_angle_depth", None)
+        width_valid = end_points.get(
+            "batch_grasp_width_valid_mask_angle_depth", None
+        )
+        has_label = (
+            torch.is_tensor(label_bins)
+            and torch.is_tensor(valid)
+            and tuple(label_bins.shape) == (B, Q, A, D)
+            and tuple(valid.shape) == (B, Q, A, D)
+        )
 
-        if not (torch.is_tensor(selected_angle) and torch.is_tensor(score_expected)):
-            return
+        target = None
+        target_utility = None
+        selected_target = None
+        oracle_target = None
+        oracle_depth = None
+        valid0 = None
+        if has_label:
+            bins0 = label_bins[0].to(prob.device).long()
+            valid0 = valid[0].to(prob.device).bool()
+            target = self._cdf_target_from_bins(bins0, T)
+            target_utility = target.mean(dim=-1)
+            selected_target = target_utility.reshape(Q, A * D)[
+                row, joint_idx
+            ]
+            masked_target = target_utility.masked_fill(~valid0, -1.0)
+            oracle_joint = masked_target.reshape(Q, A * D).argmax(dim=-1)
+            oracle_target = masked_target.reshape(Q, A * D)[
+                row, oracle_joint
+            ].clamp_min(0.0)
+            oracle_depth = torch.remainder(oracle_joint, D)
 
-        A = int(score_expected.shape[-1])
-        B = int(score_expected.shape[0])
-        Q = int(score_expected.shape[1])
-        selected0 = selected_angle[0].detach().long().cpu()
-        score0 = score_expected[0].detach().float().cpu()
-        score_sel0 = torch.gather(score0, 1, selected0.view(-1, 1).clamp(0, A - 1)).squeeze(1)
+        nvis = min(
+            max(int(getattr(cfg, "vis_num_queries", 32)), 1),
+            Q,
+        )
+        q_sel = torch.topk(
+            selected_utility,
+            k=nvis,
+            largest=True,
+        ).indices
 
-        if torch.is_tensor(valid_angle) and tuple(valid_angle.shape[:3]) == tuple(score_expected.shape):
-            valid_q0 = valid_angle[0].detach().bool().cpu().any(dim=-1)
-        else:
-            valid_q0 = torch.ones(Q, dtype=torch.bool)
-
-        if torch.is_tensor(label_score) and tuple(label_score.shape[:3]) == tuple(score_expected.shape):
-            label0 = label_score[0].detach().float().cpu()
-            label_best0 = torch.argmax(label0, dim=-1)
-            has_label = True
-        else:
-            label0 = None
-            label_best0 = None
-            has_label = False
-
-        # Pick visualization query indices: top predicted-score valid queries.
-        q_pool = torch.where(valid_q0)[0]
-        nvis = min(max(int(cfg.vis_num_queries), 1), int(q_pool.numel()) if int(q_pool.numel()) > 0 else Q)
-        if int(q_pool.numel()) > 0:
-            pool_scores = score_sel0[q_pool]
-            top_local = torch.topk(pool_scores, k=min(nvis, int(q_pool.numel())), largest=True).indices
-            q_sel = q_pool[top_local]
-        else:
-            q_sel = torch.linspace(0, Q - 1, steps=nvis).long()
-
-        # ------------------------------------------------------------------
-        # 1) Overlay: centers colored by selected angle + selected-angle patch.
-        # ------------------------------------------------------------------
-        canvas = self._make_canvas(img[0], (H, W)) if torch.is_tensor(img) else None
-        if canvas is not None:
-            try:
-                import cv2
-                # Draw query centers.
-                if torch.is_tensor(token_idx):
-                    idx0 = token_idx[0].detach().long().cpu()
-                    for q in q_sel.tolist():
-                        t = int(idx0[q])
-                        u, v = int(t % W), int(t // W)
-                        if not (0 <= u < W and 0 <= v < H):
-                            continue
-                        a = int(selected0[q])
-                        color = self._angle_color(a, A)
-                        rad = 2 + int(min(max(float(score_sel0[q]) * 4.0, 0.0), 4.0))
-                        cv2.circle(canvas, (u, v), rad, color, thickness=-1, lineType=cv2.LINE_AA)
-                        # Red ring if selected angle disagrees with label-score-best.
-                        if has_label and int(label_best0[q]) != a:
-                            cv2.circle(canvas, (u, v), rad + 3, (0, 0, 255), thickness=1, lineType=cv2.LINE_AA)
-
-                # Draw selected-angle patch tokens for the first few base queries
-                # for which kview_debug_patch_uv0 is available.  The grouping
-                # preview is ordered as q0_a0..q0_aA, q1_a0.. .
-                if torch.is_tensor(patch_uv):
-                    puv = patch_uv.detach().float().cpu().numpy()
-                    max_base = min(int(puv.shape[0]) // max(A, 1), 8, Q)
-                    for q in range(max_base):
-                        a = int(selected0[q])
-                        qa = q * A + a
-                        if qa < puv.shape[0]:
-                            pts = puv[qa].reshape(-1, 2)
-                            color = self._angle_color(a, A)
-                            step = max(1, int(pts.shape[0]) // 24)
-                            for uu, vv in pts[::step]:
-                                u, v = int(round(float(uu))), int(round(float(vv)))
-                                if 0 <= u < W and 0 <= v < H:
-                                    cv2.circle(canvas, (u, v), 1, color, thickness=-1, lineType=cv2.LINE_AA)
-
-                txt = f"CVA it={self._vis_iter} Q={Q} A={A} mean_sel_score={float(score_sel0[valid_q0].mean()) if bool(valid_q0.any()) else float(score_sel0.mean()):.3f}"
-                cv2.putText(canvas, txt, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
-                cv2.putText(canvas, txt, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
-                cv2.imwrite(os.path.join(cfg.vis_dir, f"cva_overlay_it{self._vis_iter:06d}.png"), canvas)
-            except Exception:
-                pass
-
-        # ------------------------------------------------------------------
-        # 2) Angle histograms and 3) score-vs-angle heatmaps.
-        # ------------------------------------------------------------------
         try:
+            import cv2
             import matplotlib
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
+        except Exception as exc:
+            raise RuntimeError(
+                "CDF visualization requires OpenCV and Matplotlib."
+            ) from exc
 
-            m = valid_q0
-            if not bool(m.any()):
-                m = torch.ones_like(valid_q0)
+        # 1) Spatial overlay.
+        canvas = self._make_canvas(img[0], (H, W)) if torch.is_tensor(img) else None
+        if canvas is not None:
+            idx0 = token_idx[0].detach().long().cpu()
+            angle_cpu = angle_idx.detach().cpu()
+            depth_cpu = depth_idx.detach().cpu()
+            util_cpu = selected_utility.detach().cpu()
+            regret_cpu = (
+                (oracle_target - selected_target).clamp_min(0.0).detach().cpu()
+                if has_label
+                else None
+            )
+            for q in q_sel.detach().cpu().tolist():
+                t = int(idx0[q])
+                u, v = int(t % W), int(t // W)
+                if not (0 <= u < W and 0 <= v < H):
+                    continue
+                angle = int(angle_cpu[q])
+                depth = int(depth_cpu[q])
+                score = float(util_cpu[q])
+                color = self._angle_color(angle, A)
+                radius = 2 + int(round(4.0 * max(0.0, min(score, 1.0))))
+                cv2.circle(
+                    canvas,
+                    (u, v),
+                    radius,
+                    color,
+                    thickness=-1,
+                    lineType=cv2.LINE_AA,
+                )
+                if regret_cpu is not None and float(regret_cpu[q]) > (1.0 / T):
+                    cv2.circle(
+                        canvas,
+                        (u, v),
+                        radius + 3,
+                        (0, 0, 255),
+                        thickness=1,
+                        lineType=cv2.LINE_AA,
+                    )
+                cv2.putText(
+                    canvas,
+                    str(depth + 1),
+                    (u + radius + 1, v),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.28,
+                    (255, 255, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
+            txt = (
+                f"CDF Q={Q} meanU={float(selected_utility.mean()):.3f} "
+                f"maxU={float(selected_utility.max()):.3f}"
+            )
+            cv2.putText(
+                canvas,
+                txt,
+                (8, 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                canvas,
+                txt,
+                (8, 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 0, 0),
+                1,
+                cv2.LINE_AA,
+            )
+            cv2.imwrite(
+                os.path.join(
+                    cfg.vis_dir,
+                    f"cdf_overlay_it{self._vis_iter:06d}.png",
+                ),
+                canvas,
+            )
 
-            # Histogram: selected angle, and label-best angle if available.
-            fig, ax = plt.subplots(figsize=(7.5, 3.0), dpi=160)
-            xs = np.arange(A)
-            pred_hist = np.bincount(selected0[m].numpy(), minlength=A).astype(np.float32)
-            pred_hist = pred_hist / max(pred_hist.sum(), 1.0)
-            ax.bar(xs - (0.18 if has_label else 0.0), pred_hist, width=(0.36 if has_label else 0.7), label="selected")
-            if has_label:
-                lab_hist = np.bincount(label_best0[m].numpy(), minlength=A).astype(np.float32)
-                lab_hist = lab_hist / max(lab_hist.sum(), 1.0)
-                ax.bar(xs + 0.18, lab_hist, width=0.36, label="label-best")
-                acc = float((selected0[m] == label_best0[m]).float().mean())
-                ax.set_title(f"CVA selected-angle distribution, acc={acc:.3f}")
-            else:
-                ax.set_title("CVA selected-angle distribution")
-            ax.set_xlabel("angle bin")
-            ax.set_ylabel("ratio")
-            ax.set_xticks(xs)
-            ax.set_ylim(0.0, max(float(pred_hist.max()) * 1.25, 0.05))
-            ax.legend(loc="upper right")
+        # 2) Joint angle-depth utility heatmaps.
+        pred_heat = utility.index_select(0, q_sel).reshape(
+            nvis, A * D
+        ).detach().cpu().numpy()
+        if has_label:
+            target_heat = target_utility.index_select(0, q_sel).reshape(
+                nvis, A * D
+            ).detach().cpu().numpy()
+            fig, axes = plt.subplots(
+                2, 1, figsize=(10.0, 5.2), dpi=160, sharex=True
+            )
+            im0 = axes[0].imshow(
+                pred_heat,
+                aspect="auto",
+                interpolation="nearest",
+                vmin=0.0,
+                vmax=1.0,
+            )
+            axes[0].set_title("Predicted CDF utility over angle x depth")
+            axes[0].set_ylabel("query")
+            axes[1].imshow(
+                target_heat,
+                aspect="auto",
+                interpolation="nearest",
+                vmin=0.0,
+                vmax=1.0,
+            )
+            axes[1].set_title("Target CDF utility over angle x depth")
+            axes[1].set_ylabel("query")
+            axes[1].set_xlabel("flattened candidate (angle-major, depth-minor)")
+            fig.colorbar(im0, ax=axes, fraction=0.025, pad=0.02)
+        else:
+            fig, ax = plt.subplots(figsize=(10.0, 3.0), dpi=160)
+            im0 = ax.imshow(
+                pred_heat,
+                aspect="auto",
+                interpolation="nearest",
+                vmin=0.0,
+                vmax=1.0,
+            )
+            ax.set_title("Predicted CDF utility over angle x depth")
+            ax.set_ylabel("query")
+            ax.set_xlabel("flattened candidate (angle-major, depth-minor)")
+            fig.colorbar(im0, ax=ax, fraction=0.025, pad=0.02)
+        fig.tight_layout()
+        fig.savefig(
+            os.path.join(
+                cfg.vis_dir,
+                f"cdf_joint_utility_it{self._vis_iter:06d}.png",
+            )
+        )
+        plt.close(fig)
+
+        # 3) Threshold calibration and CDF curves.
+        thresholds = end_points.get("batch_grasp_cdf_thresholds", None)
+        if torch.is_tensor(thresholds) and thresholds.numel() == T:
+            threshold_values = thresholds.detach().float().cpu().numpy()
+        else:
+            threshold_values = np.arange(T, dtype=np.float32)
+
+        if has_label and bool(valid0.any()):
+            pred_mean = []
+            target_mean = []
+            ece = []
+            for threshold_i in range(T):
+                p = prob[..., threshold_i][valid0]
+                y = target[..., threshold_i][valid0]
+                pred_mean.append(float(p.mean()))
+                target_mean.append(float(y.mean()))
+                ece.append(self._cdf_ece(p, y))
+            xloc = np.arange(T)
+            fig, ax1 = plt.subplots(figsize=(8.0, 3.8), dpi=160)
+            ax1.bar(xloc - 0.18, pred_mean, width=0.36, label="pred mean")
+            ax1.bar(xloc + 0.18, target_mean, width=0.36, label="target rate")
+            ax1.set_ylim(0.0, 1.0)
+            ax1.set_ylabel("success probability")
+            ax1.set_xlabel("friction threshold")
+            ax1.set_xticks(xloc)
+            ax1.set_xticklabels([f"{x:.1f}" for x in threshold_values])
+            ax2 = ax1.twinx()
+            ax2.plot(xloc, ece, marker="o", label="ECE")
+            ax2.set_ylabel("ECE")
+            ax2.set_ylim(0.0, max(max(ece) * 1.25, 0.05))
+            lines1, labels1 = ax1.get_legend_handles_labels()
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            ax1.legend(lines1 + lines2, labels1 + labels2, loc="best")
+            ax1.set_title("CDF threshold calibration")
             fig.tight_layout()
-            fig.savefig(os.path.join(cfg.vis_dir, f"cva_angle_hist_it{self._vis_iter:06d}.png"))
+            fig.savefig(
+                os.path.join(
+                    cfg.vis_dir,
+                    f"cdf_threshold_calibration_it{self._vis_iter:06d}.png",
+                )
+            )
             plt.close(fig)
 
-            # Heatmap for up to 64 high-score queries.
-            nheat = min(64, int(q_sel.numel()))
-            qh = q_sel[:nheat]
-            pred_h = score0[qh].numpy()  # [N,A]
+        ncurve = min(12, nvis)
+        curve_q = q_sel[:ncurve]
+        fig, axes = plt.subplots(
+            3,
+            4,
+            figsize=(10.0, 7.0),
+            dpi=160,
+            squeeze=False,
+        )
+        for plot_i, ax in enumerate(axes.reshape(-1)):
+            if plot_i >= ncurve:
+                ax.axis("off")
+                continue
+            q = int(curve_q[plot_i])
+            a = int(angle_idx[q])
+            d = int(depth_idx[q])
+            pred_curve = prob[q, a, d].detach().cpu().numpy()
+            ax.plot(threshold_values, pred_curve, marker="o", label="pred")
             if has_label:
-                lab_h = label0[qh].numpy()
-                fig, axes = plt.subplots(2, 1, figsize=(8.0, 4.8), dpi=160, sharex=True)
-                im0 = axes[0].imshow(pred_h, aspect="auto", interpolation="nearest", vmin=0.0, vmax=1.0)
-                axes[0].set_title("predicted expected score over angle")
-                axes[0].set_ylabel("query")
-                im1 = axes[1].imshow(lab_h, aspect="auto", interpolation="nearest", vmin=0.0, vmax=max(1.0, float(np.nanmax(lab_h)) if lab_h.size else 1.0))
-                axes[1].set_title("label score over angle")
-                axes[1].set_ylabel("query")
-                axes[1].set_xlabel("angle bin")
-                fig.colorbar(im0, ax=axes[0], fraction=0.025, pad=0.02)
-                fig.colorbar(im1, ax=axes[1], fraction=0.025, pad=0.02)
-            else:
-                fig, ax = plt.subplots(figsize=(8.0, 2.8), dpi=160)
-                im0 = ax.imshow(pred_h, aspect="auto", interpolation="nearest", vmin=0.0, vmax=1.0)
-                ax.set_title("predicted expected score over angle")
-                ax.set_ylabel("query")
-                ax.set_xlabel("angle bin")
-                fig.colorbar(im0, ax=ax, fraction=0.025, pad=0.02)
-            fig.tight_layout()
-            fig.savefig(os.path.join(cfg.vis_dir, f"cva_score_heatmap_it{self._vis_iter:06d}.png"))
-            plt.close(fig)
-        except Exception:
-            return
+                target_curve = target[q, a, d].detach().cpu().numpy()
+                ax.step(
+                    threshold_values,
+                    target_curve,
+                    where="mid",
+                    label="target",
+                )
+            ax.set_ylim(-0.05, 1.05)
+            ax.set_title(
+                f"q={q}, a={a}, d={d + 1}cm, U={float(selected_utility[q]):.2f}",
+                fontsize=8,
+            )
+            ax.grid(alpha=0.2)
+        handles, labels = axes[0, 0].get_legend_handles_labels()
+        if handles:
+            fig.legend(handles, labels, loc="lower center", ncol=2)
+        fig.tight_layout(rect=(0, 0.04, 1, 1))
+        fig.savefig(
+            os.path.join(
+                cfg.vis_dir,
+                f"cdf_selected_curves_it{self._vis_iter:06d}.png",
+            )
+        )
+        plt.close(fig)
+
+        # 4) Depth-selection histogram and width regression scatter.
+        pred_depth_hist = torch.bincount(
+            depth_idx,
+            minlength=D,
+        ).float()
+        pred_depth_hist = (
+            pred_depth_hist / pred_depth_hist.sum().clamp_min(1.0)
+        ).cpu().numpy()
+        fig, ax = plt.subplots(figsize=(6.5, 3.2), dpi=160)
+        xs = np.arange(D)
+        if has_label:
+            valid_q = valid0.any(dim=-1).any(dim=-1)
+            oracle_hist = torch.bincount(
+                oracle_depth[valid_q],
+                minlength=D,
+            ).float()
+            oracle_hist = (
+                oracle_hist / oracle_hist.sum().clamp_min(1.0)
+            ).cpu().numpy()
+            ax.bar(xs - 0.18, pred_depth_hist, width=0.36, label="pred")
+            ax.bar(xs + 0.18, oracle_hist, width=0.36, label="target oracle")
+        else:
+            ax.bar(xs, pred_depth_hist, width=0.7, label="pred")
+        ax.set_xticks(xs)
+        ax.set_xticklabels([f"{d + 1} cm" for d in xs])
+        ax.set_ylabel("ratio")
+        ax.set_title("CDF-selected depth distribution")
+        ax.legend(loc="best")
+        fig.tight_layout()
+        fig.savefig(
+            os.path.join(
+                cfg.vis_dir,
+                f"cdf_depth_hist_it{self._vis_iter:06d}.png",
+            )
+        )
+        plt.close(fig)
+
+        if (
+            has_label
+            and torch.is_tensor(width_label)
+            and torch.is_tensor(width_valid)
+            and tuple(width_label.shape) == (B, Q, A, D)
+            and tuple(width_valid.shape) == (B, Q, A, D)
+        ):
+            width_qad = width_dqa[0].permute(1, 2, 0).float() / 10.0
+            pred_width = width_qad[row, angle_idx, depth_idx]
+            target_width = width_label[0].to(pred_width.device)[
+                row, angle_idx, depth_idx
+            ]
+            selected_width_valid = width_valid[0].to(pred_width.device).bool()[
+                row, angle_idx, depth_idx
+            ]
+            if bool(selected_width_valid.any()):
+                pw = pred_width[selected_width_valid].detach().cpu().numpy()
+                tw = target_width[selected_width_valid].detach().cpu().numpy()
+                max_n = min(2000, pw.shape[0])
+                pw, tw = pw[:max_n], tw[:max_n]
+                fig, ax = plt.subplots(figsize=(4.2, 4.2), dpi=160)
+                ax.scatter(tw, pw, s=5, alpha=0.35)
+                lim = max(float(np.max(tw)), float(np.max(pw)), 0.01)
+                ax.plot([0, lim], [0, lim], linestyle="--")
+                ax.set_xlim(0, lim)
+                ax.set_ylim(0, lim)
+                ax.set_xlabel("target width (m)")
+                ax.set_ylabel("predicted width (m)")
+                mae = float(np.mean(np.abs(pw - tw)))
+                ax.set_title(f"Depth-wise width, MAE={mae:.4f} m")
+                fig.tight_layout()
+                fig.savefig(
+                    os.path.join(
+                        cfg.vis_dir,
+                        f"cdf_width_scatter_it{self._vis_iter:06d}.png",
+                    )
+                )
+                plt.close(fig)
+
+        # Additional rank/calibration/error-case diagnostics reuse the same
+        # periodic visualization gate and detached model outputs.
+        self._save_cdf_extended_diagnostics(end_points)
 
     def forward(
         self,
@@ -3038,13 +3954,16 @@ class CenterViewAngleQueryTransformerLocalGraspModule(nn.Module):
             end_points=end_points,
         )
 
-        # 6) Candidate decoder.  Visualization requires compatibility decode
-        # tensors even in train mode; ordinary training keeps only loss inputs.
-        if self.config.vis_dir is not None:
-            end_points["cva_force_full_decode"] = True
+        # 6) CDF-only candidate decoder.  It always returns only the tensors
+        # required by the CDF/width losses and strict inference decoder.
         end_points = self.decoder(group_features_a, end_points)
 
-        # 7) Internal PNG-only visualization.  No .npy/.npz files are saved.
+        # Low-frequency scalar diagnostics are controlled by the training loop
+        # through end_points['cva_compute_diagnostics']; no inference decode is run.
+        self._add_cdf_scalar_diagnostics(end_points)
+
+        # 7) Periodic CDF visualizations are computed from the raw logits under
+        # no_grad; they do not force an inference decode or extend the graph.
         _, _, H, W = feat_map.shape
         self._save_cva_visualization(end_points, img=img, image_hw=(H, W))
         self._vis_iter += 1
