@@ -308,53 +308,168 @@ class RGBGeometryDiagnostics(nn.Module):
     def _candidate_rotation_and_utility(
         self,
         end_points: Dict[str, Any],
+        use_cdf: bool,
     ):
-        required = (
-            "grasp_cdf_pred_angle_depth",
-            "grasp_top_view_xyz",
-        )
-        missing = [key for key in required if key not in end_points]
+        """Decode one operation candidate per center-view query.
+
+        CDF mode:
+            choose the best joint angle-depth candidate by mean CDF utility.
+
+        Legacy mode:
+            choose angle/depth argmax from their physical classes and use the
+            expected six-bin score as the ranking utility.
+        """
+        required_common = ("grasp_top_view_xyz",)
+        missing = [
+            key for key in required_common
+            if key not in end_points
+        ]
         if missing:
             raise KeyError(
                 "RGB geometry diagnostics require endpoint(s): "
                 + ", ".join(missing)
             )
 
-        logits = end_points["grasp_cdf_pred_angle_depth"].detach().float()
         views = end_points["grasp_top_view_xyz"].detach().float()
-        if logits.dim() != 5:
-            raise ValueError(
-                "grasp_cdf_pred_angle_depth must be [B,T,Q,A,D], got "
-                f"{tuple(logits.shape)}"
+
+        if bool(use_cdf):
+            required = ("grasp_cdf_pred_angle_depth",)
+            missing = [
+                key for key in required
+                if key not in end_points
+            ]
+            if missing:
+                raise KeyError(
+                    "CDF geometry diagnostics require endpoint(s): "
+                    + ", ".join(missing)
+                )
+
+            logits = end_points[
+                "grasp_cdf_pred_angle_depth"
+            ].detach().float()
+            if logits.dim() != 5:
+                raise ValueError(
+                    "grasp_cdf_pred_angle_depth must be "
+                    "[B,T,Q,A,D], got "
+                    f"{tuple(logits.shape)}"
+                )
+            B, _T, Q, A, D = logits.shape
+            if A != self.num_angle or D != self.num_depth:
+                raise ValueError(
+                    "CDF A/D mismatch: expected "
+                    f"{self.num_angle}/{self.num_depth}, "
+                    f"got {A}/{D}"
+                )
+
+            utility = torch.sigmoid(logits).mean(dim=1)
+            flat = utility.reshape(B, Q, A * D)
+            joint_idx = flat.argmax(dim=-1)
+            angle_idx = torch.div(
+                joint_idx,
+                D,
+                rounding_mode="floor",
             )
-        B, T, Q, A, D = logits.shape
-        if A != self.num_angle or D != self.num_depth:
-            raise ValueError(
-                f"CDF A/D mismatch: expected {self.num_angle}/{self.num_depth}, "
-                f"got {A}/{D}"
+            depth_idx = torch.remainder(
+                joint_idx,
+                D,
             )
+            selected_utility = torch.gather(
+                flat,
+                dim=-1,
+                index=joint_idx.unsqueeze(-1),
+            ).squeeze(-1)
+        else:
+            required = (
+                "grasp_angle_pred",
+                "grasp_depth_pred",
+                "grasp_score_pred",
+            )
+            missing = [
+                key for key in required
+                if key not in end_points
+            ]
+            if missing:
+                raise KeyError(
+                    "Legacy geometry diagnostics require endpoint(s): "
+                    + ", ".join(missing)
+                )
+
+            angle_logits = end_points[
+                "grasp_angle_pred"
+            ].detach().float()
+            depth_logits = end_points[
+                "grasp_depth_pred"
+            ].detach().float()
+            score_logits = end_points[
+                "grasp_score_pred"
+            ].detach().float()
+
+            if (
+                angle_logits.dim() != 3
+                or angle_logits.shape[1] < self.num_angle
+            ):
+                raise ValueError(
+                    "grasp_angle_pred must be [B,A+1,Q], got "
+                    f"{tuple(angle_logits.shape)}"
+                )
+            if (
+                depth_logits.dim() != 3
+                or depth_logits.shape[1] < self.num_depth
+            ):
+                raise ValueError(
+                    "grasp_depth_pred must be [B,D+1,Q], got "
+                    f"{tuple(depth_logits.shape)}"
+                )
+            if (
+                score_logits.dim() != 3
+                or score_logits.shape[1] != 6
+            ):
+                raise ValueError(
+                    "grasp_score_pred must be [B,6,Q], got "
+                    f"{tuple(score_logits.shape)}"
+                )
+
+            B, _, Q = angle_logits.shape
+            A = self.num_angle
+            D = self.num_depth
+            if (
+                depth_logits.shape[0] != B
+                or depth_logits.shape[2] != Q
+                or score_logits.shape[0] != B
+                or score_logits.shape[2] != Q
+            ):
+                raise ValueError(
+                    "Legacy angle/depth/score query shapes do not match."
+                )
+
+            # Ignore the final dummy/invalid classes when decoding physical
+            # angle and depth candidates.
+            angle_idx = angle_logits[:, :A].argmax(dim=1)
+            depth_idx = depth_logits[:, :D].argmax(dim=1)
+            joint_idx = angle_idx * D + depth_idx
+
+            score_bins = torch.tensor(
+                [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+                device=score_logits.device,
+                dtype=score_logits.dtype,
+            ).view(1, 6, 1)
+            selected_utility = (
+                F.softmax(score_logits, dim=1)
+                * score_bins
+            ).sum(dim=1)
+            logits = score_logits
+            utility = None
+
         if views.shape != (B, Q, 3):
             raise ValueError(
                 "grasp_top_view_xyz must be [B,Q,3], got "
                 f"{tuple(views.shape)}"
             )
 
-        utility = torch.sigmoid(logits).mean(dim=1)  # [B,Q,A,D]
-        flat = utility.reshape(B, Q, A * D)
-        joint_idx = flat.argmax(dim=-1)
-        angle_idx = torch.div(
-            joint_idx,
-            D,
-            rounding_mode="floor",
+        angle_rad = (
+            angle_idx.float()
+            * (math.pi / float(self.num_angle))
         )
-        depth_idx = torch.remainder(joint_idx, D)
-        selected_utility = torch.gather(
-            flat,
-            dim=-1,
-            index=joint_idx.unsqueeze(-1),
-        ).squeeze(-1)
-
-        angle_rad = angle_idx.float() * (math.pi / float(A))
         rotation = self.batch_viewpoint_params_to_matrix_fn(
             -views.reshape(-1, 3),
             angle_rad.reshape(-1),
@@ -495,9 +610,13 @@ class RGBGeometryDiagnostics(nn.Module):
         img: Optional[torch.Tensor],
         step: int,
         modality: str,
+        use_cdf: bool,
     ) -> Dict[str, Any]:
         run_scalar = self._flag(
-            end_points.get("cva_compute_diagnostics", False)
+            end_points.get(
+                "geometry_compute_diagnostics",
+                False,
+            )
         )
         run_vis = (
             self.vis_dir is not None
@@ -545,7 +664,10 @@ class RGBGeometryDiagnostics(nn.Module):
             depth_idx,
             selected_utility,
             rotation,
-        ) = self._candidate_rotation_and_utility(end_points)
+        ) = self._candidate_rotation_and_utility(
+            end_points,
+            use_cdf=use_cdf,
+        )
         if selected_utility.shape != (B, Q):
             raise ValueError(
                 "CDF query count does not match token_sel_idx: "
@@ -645,53 +767,102 @@ class RGBGeometryDiagnostics(nn.Module):
             K,
         )
 
-        # Candidate target utility and selected-operation regret.
+        # Optional label-side score for geometry correlation.
+        # CDF mode also provides an A x D oracle and operation regret.
+        # Legacy mode provides only the selected query score target.
         selected_target = None
         oracle_target = None
         regret = None
         selected_label_valid = None
-        bins = end_points.get(
-            "batch_grasp_cdf_bins_angle_depth", None
-        )
-        candidate_valid = end_points.get(
-            "batch_grasp_cdf_valid_mask", None
-        )
-        if (
-            torch.is_tensor(bins)
-            and torch.is_tensor(candidate_valid)
-            and tuple(bins.shape[:2]) == (B, Q)
-            and candidate_valid.shape == bins.shape
-        ):
-            bins = bins.detach().long().to(pred.device)
-            candidate_valid = candidate_valid.detach().bool().to(pred.device)
-            T = int(
-                end_points["grasp_cdf_pred_angle_depth"].shape[1]
+
+        if bool(use_cdf):
+            bins = end_points.get(
+                "batch_grasp_cdf_bins_angle_depth",
+                None,
             )
-            target = self._cdf_target_from_bins(bins, T)
-            target_utility = target.mean(dim=-1)
-            flat_target = target_utility.reshape(
-                B, Q, self.num_angle * self.num_depth
+            candidate_valid = end_points.get(
+                "batch_grasp_cdf_valid_mask",
+                None,
             )
-            flat_valid = candidate_valid.reshape(
-                B, Q, self.num_angle * self.num_depth
+            if (
+                torch.is_tensor(bins)
+                and torch.is_tensor(candidate_valid)
+                and tuple(bins.shape[:2]) == (B, Q)
+                and candidate_valid.shape == bins.shape
+            ):
+                bins = bins.detach().long().to(pred.device)
+                candidate_valid = (
+                    candidate_valid.detach()
+                    .bool()
+                    .to(pred.device)
+                )
+                T = int(
+                    end_points[
+                        "grasp_cdf_pred_angle_depth"
+                    ].shape[1]
+                )
+                target = self._cdf_target_from_bins(
+                    bins,
+                    T,
+                )
+                target_utility = target.mean(dim=-1)
+                flat_target = target_utility.reshape(
+                    B,
+                    Q,
+                    self.num_angle * self.num_depth,
+                )
+                flat_valid = candidate_valid.reshape(
+                    B,
+                    Q,
+                    self.num_angle * self.num_depth,
+                )
+                selected_target = torch.gather(
+                    flat_target,
+                    dim=-1,
+                    index=joint_idx.unsqueeze(-1),
+                ).squeeze(-1)
+                selected_label_valid = torch.gather(
+                    flat_valid,
+                    dim=-1,
+                    index=joint_idx.unsqueeze(-1),
+                ).squeeze(-1)
+                oracle_target = flat_target.masked_fill(
+                    ~flat_valid,
+                    -1.0,
+                ).max(dim=-1).values.clamp_min(0.0)
+                regret = (
+                    oracle_target - selected_target
+                ).clamp_min(0.0)
+        else:
+            legacy_score = end_points.get(
+                "batch_grasp_score",
+                None,
             )
-            selected_target = torch.gather(
-                flat_target,
-                dim=-1,
-                index=joint_idx.unsqueeze(-1),
-            ).squeeze(-1)
-            selected_label_valid = torch.gather(
-                flat_valid,
-                dim=-1,
-                index=joint_idx.unsqueeze(-1),
-            ).squeeze(-1)
-            oracle_target = flat_target.masked_fill(
-                ~flat_valid,
-                -1.0,
-            ).max(dim=-1).values.clamp_min(0.0)
-            regret = (oracle_target - selected_target).clamp_min(0.0)
+            legacy_valid = end_points.get(
+                "batch_valid_mask",
+                None,
+            )
+            if (
+                torch.is_tensor(legacy_score)
+                and torch.is_tensor(legacy_valid)
+                and legacy_score.shape == (B, Q)
+                and legacy_valid.shape == (B, Q)
+            ):
+                selected_target = (
+                    legacy_score.detach()
+                    .float()
+                    .to(pred.device)
+                )
+                selected_label_valid = (
+                    legacy_valid.detach()
+                    .bool()
+                    .to(pred.device)
+                )
 
         p = "D: RGBGeom"
+        end_points[f"{p} uses CDF"] = pred.new_tensor(
+            float(bool(use_cdf))
+        ).reshape(())
         end_points[f"{p} GT available"] = pred.new_ones(())
         end_points[f"{p} center valid ratio"] = (
             center_valid.float().mean().reshape(())
@@ -805,16 +976,21 @@ class RGBGeometryDiagnostics(nn.Module):
                 normal_error,
                 normal_label_mask,
             )
-            end_points[f"{p} regret x center zerr"] = self._pearson(
-                regret,
-                center_z_error,
-                label_mask,
-            )
-            end_points[f"{p} regret x patch shapeerr"] = self._pearson(
-                regret,
-                patch_shape_error,
-                patch_label_mask,
-            )
+            if regret is not None:
+                end_points[f"{p} regret x center zerr"] = (
+                    self._pearson(
+                        regret,
+                        center_z_error,
+                        label_mask,
+                    )
+                )
+                end_points[f"{p} regret x patch shapeerr"] = (
+                    self._pearson(
+                        regret,
+                        patch_shape_error,
+                        patch_label_mask,
+                    )
+                )
 
         # Geometry quality among candidates that would dominate ranking.
         for topk in (10, self.topk):
@@ -881,6 +1057,7 @@ class RGBGeometryDiagnostics(nn.Module):
             end_points["rgbgeom_debug_selected_target0"] = (
                 selected_target[0, q_export].detach().cpu()
             )
+        if regret is not None:
             end_points["rgbgeom_debug_regret0"] = (
                 regret[0, q_export].detach().cpu()
             )
@@ -1003,7 +1180,7 @@ class RGBGeometryDiagnostics(nn.Module):
                 )
                 plt.close(fig)
 
-        # Geometry versus CDF score/target.
+        # Geometry versus predicted score/target.
         fig, axes = plt.subplots(2, 2, figsize=(9.0, 8.0), dpi=160)
         score = selected_utility[b]
         pairs = [
@@ -1024,7 +1201,7 @@ class RGBGeometryDiagnostics(nn.Module):
                     s=5,
                     alpha=0.25,
                 )
-            ax.set_xlabel("predicted CDF utility")
+            ax.set_xlabel("predicted grasp utility")
             ax.set_ylabel(ylabel)
             ax.grid(alpha=0.2)
         ax = axes.reshape(-1)[3]

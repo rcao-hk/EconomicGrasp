@@ -18,13 +18,13 @@ from torch.utils.tensorboard import SummaryWriter
 # Config
 from utils.arguments import cfgs
 
-# Local libraries: this training entry point is intentionally CDF-only.
+# Local libraries.
 from models.economicgrasp_bip3d import economicgrasp_dpt
 from models.loss_economicgrasp_depth_kview_transformer import (
     get_loss as get_loss_economicgrasp,
 )
 from dataset.graspnet_dataset import GraspNetMultiDataset, collate_fn
-from dataset.cdf_label_adapter import CDFLabelAdapter
+from dataset.cdf_label_adapter import CVAExtendedLabelAdapter
 
 # ----------- GLOBAL CONFIG ------------
 EPOCH_CNT = 0
@@ -112,50 +112,208 @@ def _sync(distributed: bool):
         dist.barrier()
 
 
-CPU_RESIDENT_LABEL_LIST_KEYS = {
+CVA_COMMON_CPU_LABEL_KEYS = {
     "object_poses_list",
     "grasp_points_list",
     "view_graspness_list",
     "top_view_index_list",
+}
+CVA_LEGACY_CPU_LABEL_KEYS = {
+    "grasp_rotations_list",
+    "grasp_depth_list",
+    "grasp_scores_list",
+    "grasp_widths_list",
+    "grasp_collision_list",
+}
+CVA_CDF_CPU_LABEL_KEYS = {
     "grasp_cdf_bins_list",
     "grasp_widths_depth_list",
     "grasp_width_valids_depth_list",
 }
+CVA_CPU_RESIDENT_LABEL_LIST_KEYS = (
+    CVA_COMMON_CPU_LABEL_KEYS
+    | CVA_LEGACY_CPU_LABEL_KEYS
+    | CVA_CDF_CPU_LABEL_KEYS
+)
 
 
-def move_batch_to_device(batch_data_label, device, non_blocking=False):
-    """Move fixed-shape model inputs to GPU; keep dense object labels on CPU."""
-    for key, value in batch_data_label.items():
-        if key in CPU_RESIDENT_LABEL_LIST_KEYS:
-            if not isinstance(value, (list, tuple)):
-                raise TypeError(
-                    f"{key} must remain a nested CPU list, got "
-                    f"{type(value).__name__}."
+def validate_batch_label_contract(batch_data_label, use_cdf: bool):
+    common = CVA_COMMON_CPU_LABEL_KEYS
+    mode_keys = (
+        CVA_CDF_CPU_LABEL_KEYS | {"cdf_thresholds"}
+        if bool(use_cdf)
+        else CVA_LEGACY_CPU_LABEL_KEYS
+    )
+    forbidden = (
+        CVA_LEGACY_CPU_LABEL_KEYS
+        if bool(use_cdf)
+        else CVA_CDF_CPU_LABEL_KEYS | {"cdf_thresholds"}
+    )
+    missing = sorted(
+        key for key in common | mode_keys
+        if key not in batch_data_label
+    )
+    if missing:
+        raise KeyError(
+            f"Extended CVA dataset mode="
+            f"{'CDF' if use_cdf else 'legacy'} is missing keys: "
+            f"{missing}"
+        )
+    incompatible = sorted(
+        key for key in forbidden
+        if key in batch_data_label
+    )
+    if incompatible:
+        raise RuntimeError(
+            f"Extended CVA dataset mode="
+            f"{'CDF' if use_cdf else 'legacy'} contains incompatible "
+            f"keys: {incompatible}"
+        )
+
+    # Every object-wise list must stay aligned with object_poses_list.
+    batch_size = len(batch_data_label["object_poses_list"])
+    list_keys = sorted(common | (mode_keys - {"cdf_thresholds"}))
+    for key in list_keys:
+        value = batch_data_label[key]
+        if not isinstance(value, (list, tuple)) or len(value) != batch_size:
+            raise TypeError(
+                f"{key} must be a batch list of length {batch_size}."
+            )
+    for batch_i in range(batch_size):
+        num_objects = len(
+            batch_data_label["object_poses_list"][batch_i]
+        )
+        if num_objects <= 0:
+            raise RuntimeError(
+                f"Batch item {batch_i} has no CVA object labels."
+            )
+        for key in list_keys:
+            if len(batch_data_label[key][batch_i]) != num_objects:
+                raise RuntimeError(
+                    f"{key}[{batch_i}] has "
+                    f"{len(batch_data_label[key][batch_i])} objects, "
+                    f"expected {num_objects}."
                 )
-            for sample in value:
-                for tensor in sample:
-                    if not torch.is_tensor(tensor) or tensor.device.type != "cpu":
-                        raise RuntimeError(
-                            f"{key} must contain CPU tensors before label matching."
-                        )
-            continue
 
+    num_angle = int(cfgs.num_angle)
+    num_depth = int(cfgs.num_depth)
+    if bool(use_cdf):
+        for batch_i, sample in enumerate(
+            batch_data_label["grasp_cdf_bins_list"]
+        ):
+            for obj_i, tensor in enumerate(sample):
+                if (
+                    tensor.dim() != 4
+                    or tensor.shape[-2:] != (
+                        num_angle,
+                        num_depth,
+                    )
+                ):
+                    raise RuntimeError(
+                        "grasp_cdf_bins_list must contain "
+                        f"[P,K,A,D] with A/D={num_angle}/{num_depth}; "
+                        f"got {tuple(tensor.shape)} at "
+                        f"[{batch_i}][{obj_i}]."
+                    )
+                if tensor.dtype != torch.uint8:
+                    raise TypeError(
+                        "CDF bins must remain uint8; got "
+                        f"{tensor.dtype}."
+                    )
+        for key, expected_dtype in (
+            ("grasp_widths_depth_list", torch.uint16),
+            ("grasp_width_valids_depth_list", torch.uint8),
+        ):
+            for sample in batch_data_label[key]:
+                for tensor in sample:
+                    if (
+                        tensor.dim() != 4
+                        or tensor.shape[-2:] != (
+                            num_angle,
+                            num_depth,
+                        )
+                    ):
+                        raise RuntimeError(
+                            f"{key} must contain [P,K,A,D] labels; "
+                            f"got {tuple(tensor.shape)}."
+                        )
+                    if tensor.dtype != expected_dtype:
+                        raise TypeError(
+                            f"{key} must remain {expected_dtype}; "
+                            f"got {tensor.dtype}."
+                        )
+    else:
+        for key in (
+            "grasp_rotations_list",
+            "grasp_depth_list",
+            "grasp_scores_list",
+            "grasp_widths_list",
+            "grasp_collision_list",
+        ):
+            for sample in batch_data_label[key]:
+                for tensor in sample:
+                    if (
+                        tensor.dim() != 3
+                        or tensor.shape[-1] != num_angle
+                    ):
+                        raise RuntimeError(
+                            f"{key} must contain extended [P,K,A] "
+                            f"labels with A={num_angle}; got "
+                            f"{tuple(tensor.shape)}."
+                        )
+
+
+def _recursive_to_device(value, device, non_blocking=False):
+    if torch.is_tensor(value):
+        return value.to(device, non_blocking=non_blocking)
+    if isinstance(value, list):
+        return [
+            _recursive_to_device(v, device, non_blocking)
+            for v in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            _recursive_to_device(v, device, non_blocking)
+            for v in value
+        )
+    if isinstance(value, dict):
+        return {
+            k: _recursive_to_device(v, device, non_blocking)
+            for k, v in value.items()
+        }
+    return value
+
+
+def move_batch_to_device(
+    batch_data_label,
+    device,
+    use_cdf: bool,
+    non_blocking=False,
+):
+    """Keep all extended object payloads on CPU until label matching."""
+    del use_cdf  # The CPU boundary is shared by both CVA modes.
+    for key, value in list(batch_data_label.items()):
+        if key in CVA_CPU_RESIDENT_LABEL_LIST_KEYS:
+            continue
         if isinstance(value, (list, tuple)):
             raise TypeError(
-                f"Unexpected list-valued batch key '{key}'. Add it explicitly "
-                "to CPU_RESIDENT_LABEL_LIST_KEYS or collate it to a tensor."
+                f"Unexpected list-valued batch key '{key}'. Add it to the "
+                "explicit CVA CPU-resident contract or collate it to a tensor."
             )
-        if torch.is_tensor(value):
-            batch_data_label[key] = value.to(
-                device,
-                non_blocking=non_blocking,
-            )
+        batch_data_label[key] = _recursive_to_device(
+            value,
+            device=device,
+            non_blocking=non_blocking,
+        )
     return batch_data_label
 
 
-def assert_cpu_resident_label_lists(batch_data_label):
-    """Validate the CPU/GPU boundary immediately before model forward."""
-    for key in CPU_RESIDENT_LABEL_LIST_KEYS:
+def assert_cpu_resident_label_lists(
+    batch_data_label,
+    use_cdf: bool,
+):
+    del use_cdf
+    for key in CVA_CPU_RESIDENT_LABEL_LIST_KEYS:
         if key not in batch_data_label:
             continue
         value = batch_data_label[key]
@@ -167,19 +325,17 @@ def assert_cpu_resident_label_lists(batch_data_label):
         for batch_i, sample in enumerate(value):
             if not isinstance(sample, (list, tuple)):
                 raise TypeError(
-                    f"{key}[{batch_i}] must be a list/tuple, got "
-                    f"{type(sample).__name__}."
+                    f"{key}[{batch_i}] must be a list/tuple."
                 )
             for obj_i, tensor in enumerate(sample):
                 if not torch.is_tensor(tensor):
                     raise TypeError(
-                        f"{key}[{batch_i}][{obj_i}] must be a tensor, got "
-                        f"{type(tensor).__name__}."
+                        f"{key}[{batch_i}][{obj_i}] must be a tensor."
                     )
                 if tensor.device.type != "cpu":
                     raise RuntimeError(
-                        f"{key}[{batch_i}][{obj_i}] must remain CPU-resident "
-                        f"before DDP forward; got device={tensor.device}."
+                        f"{key}[{batch_i}][{obj_i}] must remain on CPU "
+                        f"before label matching; got {tensor.device}."
                     )
 
 
@@ -296,24 +452,50 @@ class Trainer:
         self.distributed, self.rank, self.local_rank, self.world_size, self.device = setup_distributed()
         self.main = is_main_process(self.rank)
         seed_everything(getattr(cfgs, 'seed', 0), self.rank)
+        self.use_cdf = bool(
+            getattr(cfgs, "use_cdf", False)
+        )
+        self.visualization_enabled = bool(
+            getattr(cfgs, "vis_dir", None)
+        )
         if not bool(getattr(cfgs, 'multi_modal', False)):
-            raise RuntimeError("CDF CVA training requires --multi_modal.")
+            raise RuntimeError("CVA training requires --multi_modal.")
+        if bool(getattr(cfgs, "use_depth_comp", False)):
+            raise RuntimeError(
+                "This switchable CVA trainer uses explicit per-angle labels "
+                "for both legacy and CDF modes. No extended-angle depth-"
+                "compensation matcher is implemented; disable --use_depth_comp."
+            )
         if bool(getattr(cfgs, 'kview_use_collision', False)):
             raise RuntimeError(
-                "The cleaned CDF model has no collision head; remove "
-                "--kview_use_collision."
+                "This switchable CVA model has no collision prediction head; "
+                "remove --kview_use_collision."
             )
-        if bool(getattr(cfgs, 'pin_memory', False)):
+        if bool(getattr(cfgs, "pin_memory", False)):
             raise RuntimeError(
-                "Do not use --pin_memory with the CDF-depth cache: PyTorch "
-                "would recursively pin the complete variable-size object labels. "
-                "Keep them pageable and transfer only matched rows per object."
+                "Do not use --pin_memory in the CVA trainer: the "
+                "extended variable-size object labels must remain pageable "
+                "CPU tensors until label matching."
             )
-        self.cdf_diag_interval = max(
-            int(getattr(cfgs, 'cdf_diag_interval', 20)), 0
+        self.cdf_diag_interval = (
+            20
+            if self.use_cdf
+            else 0
         )
-        self.cdf_eval_diag_interval = max(
-            int(getattr(cfgs, 'cdf_eval_diag_interval', 50)), 0
+        self.cdf_eval_diag_interval = (
+            50
+            if self.use_cdf
+            else 0
+        )
+        self.geometry_diag_interval = (
+            20
+            if self.visualization_enabled and self.main
+            else 0
+        )
+        self.geometry_eval_diag_interval = (
+            50
+            if self.visualization_enabled and self.main
+            else 0
         )
 
         os.makedirs(cfgs.log_dir, exist_ok=True)
@@ -325,13 +507,13 @@ class Trainer:
 
         self.log_writer = SummaryWriter(os.path.join(cfgs.log_dir)) if self.main else None
 
-        # Keep the shared GraspNet dataset model-agnostic. It loads the
-        # standard scene/image/point labels; the CDF-specific object payload is
-        # attached by a separate adapter below.
+        # Every Center-View-Angle variant requires the extended-angle
+        # cache. The base dataset supplies frame inputs and object poses only;
+        # CVAExtendedLabelAdapter owns one read of the common superset cache.
         train_base_dataset = GraspNetMultiDataset(
             cfgs.dataset_root,
             camera=cfgs.camera,
-            split='train',
+            split="train",
             voxel_size=cfgs.voxel_size,
             num_points=cfgs.num_point,
             remove_outlier=True,
@@ -343,12 +525,13 @@ class Trainer:
             max_depth=cfgs.max_depth,
             bin_num=cfgs.bin_num,
             depth_strides=1,
-            extend_angle=cfgs.extend_angle,
+            extend_angle=True,
+            load_grasp_payload=False,
         )
         test_base_dataset = GraspNetMultiDataset(
             cfgs.dataset_root,
             camera=cfgs.camera,
-            split='test_seen',
+            split="test_seen",
             num_points=cfgs.num_point,
             remove_outlier=True,
             augment=False,
@@ -360,22 +543,42 @@ class Trainer:
             max_depth=cfgs.max_depth,
             bin_num=cfgs.bin_num,
             depth_strides=1,
-            extend_angle=cfgs.extend_angle,
+            extend_angle=True,
+            load_grasp_payload=False,
         )
-        cdf_label_folder = os.environ.get(
-            "CDF_LABEL_FOLDER",
-            "economic_grasp_label_300views_extend_angle_cdf_depth",
+        cva_label_folder = str(
+            getattr(cfgs, "cva_label_folder", "")
+            or os.environ.get(
+                "CVA_LABEL_FOLDER",
+                os.environ.get(
+                    "CDF_LABEL_FOLDER",
+                    "economic_grasp_label_300views_"
+                    "extend_angle_cdf_depth",
+                ),
+            )
         )
-        self.TRAIN_DATASET = CDFLabelAdapter(
+        self.TRAIN_DATASET = CVAExtendedLabelAdapter(
             train_base_dataset,
             dataset_root=cfgs.dataset_root,
-            label_folder=cdf_label_folder,
+            use_cdf=self.use_cdf,
+            label_folder=cva_label_folder,
+            num_angle=cfgs.num_angle,
+            num_depth=cfgs.num_depth,
         )
-        self.TEST_DATASET = CDFLabelAdapter(
+        self.TEST_DATASET = CVAExtendedLabelAdapter(
             test_base_dataset,
             dataset_root=cfgs.dataset_root,
-            label_folder=cdf_label_folder,
+            use_cdf=self.use_cdf,
+            label_folder=cva_label_folder,
+            num_angle=cfgs.num_angle,
+            num_depth=cfgs.num_depth,
         )
+        if self.main:
+            self.log_string(
+                "-> CVA label mode="
+                + ("CDF+depth-wise-width" if self.use_cdf else "legacy explicit-angle")
+                + f", common cache={cva_label_folder}"
+            )
 
         self.train_sampler = DistributedSampler(
             self.TRAIN_DATASET,
@@ -425,7 +628,8 @@ class Trainer:
             bin_num=cfgs.bin_num,
             is_training=True,
             use_obs_depth=bool(getattr(cfgs, 'use_obs_depth', False)),
-            use_depth_comp=bool(getattr(cfgs, 'use_depth_comp', False)),
+            use_depth_comp=False,
+            use_cdf=self.use_cdf,
             vis_dir=getattr(cfgs, 'vis_dir', None) if self.main else None,
             vis_every=int(getattr(cfgs, 'vis_every', 1000)),
         )
@@ -436,9 +640,9 @@ class Trainer:
             #
             # With device_ids=[local_rank], PyTorch DDP recursively applies
             # _to_kwargs() to every forward input. That silently moves the
-            # full variable-length object-level CDF/width label lists to CUDA,
+            # full variable-length extended CVA label lists to CUDA,
             # even though move_batch_to_device() deliberately keeps them on
-            # CPU. process_grasp_labels_cdf_width() then correctly fails its
+            # CPU. the label matcher would then violate its
             # CPU-residency check.
             #
             # The module has already been moved to this rank's CUDA device and
@@ -457,7 +661,7 @@ class Trainer:
             if self.main:
                 self.log_string(
                     '[DDP] device_ids=None: fixed-size inputs are moved '
-                    'explicitly; full object-level CDF labels remain on CPU.'
+                    'explicitly; full extended CVA object labels remain on CPU.'
                 )
 
         self.optimizer = self.build_optimizer()
@@ -637,14 +841,28 @@ class Trainer:
         for batch_idx, batch_data_label in enumerate(self.TRAIN_DATALOADER):
             t = time.time()
 
+            validate_batch_label_contract(
+                batch_data_label,
+                use_cdf=self.use_cdf,
+            )
             batch_data_label = move_batch_to_device(
                 batch_data_label,
                 self.device,
+                use_cdf=self.use_cdf,
                 non_blocking=False,
             )
             batch_data_label["cva_compute_diagnostics"] = (
-                self.cdf_diag_interval > 0
+                self.use_cdf
+                and self.cdf_diag_interval > 0
                 and batch_idx % self.cdf_diag_interval == 0
+            )
+            batch_data_label[
+                "geometry_compute_diagnostics"
+            ] = (
+                self.visualization_enabled
+                and self.main
+                and self.geometry_diag_interval > 0
+                and batch_idx % self.geometry_diag_interval == 0
             )
             batch_data_label["cva_export_angle_feature"] = False
 
@@ -652,7 +870,10 @@ class Trainer:
             interval_data_time += (data_end_time - data_start_time)
 
             model_start_time = time.perf_counter()
-            assert_cpu_resident_label_lists(batch_data_label)
+            assert_cpu_resident_label_lists(
+                batch_data_label,
+                use_cdf=self.use_cdf,
+            )
             end_points = self.net(batch_data_label)
             model_end_time = time.perf_counter()
             interval_model_time += (model_end_time - model_start_time)
@@ -660,7 +881,10 @@ class Trainer:
             end_points['epoch'] = epoch
 
             loss_start_time = time.perf_counter()
-            loss, end_points = get_loss_economicgrasp(end_points)
+            loss, end_points = get_loss_economicgrasp(
+                end_points,
+                use_cdf=self.use_cdf,
+            )
             loss_end_time = time.perf_counter()
             interval_loss_time += (loss_end_time - loss_start_time)
 
@@ -759,21 +983,41 @@ class Trainer:
                     flush=True,
                 )
 
+            validate_batch_label_contract(
+                batch_data_label,
+                use_cdf=self.use_cdf,
+            )
             batch_data_label = move_batch_to_device(
                 batch_data_label,
                 self.device,
+                use_cdf=self.use_cdf,
                 non_blocking=False,
             )
             batch_data_label["cva_compute_diagnostics"] = (
-                self.cdf_eval_diag_interval > 0
+                self.use_cdf
+                and self.cdf_eval_diag_interval > 0
                 and batch_idx % self.cdf_eval_diag_interval == 0
+            )
+            batch_data_label[
+                "geometry_compute_diagnostics"
+            ] = (
+                self.visualization_enabled
+                and self.main
+                and self.geometry_eval_diag_interval > 0
+                and batch_idx % self.geometry_eval_diag_interval == 0
             )
             batch_data_label["cva_export_angle_feature"] = False
 
             with torch.no_grad():
-                assert_cpu_resident_label_lists(batch_data_label)
+                assert_cpu_resident_label_lists(
+                    batch_data_label,
+                    use_cdf=self.use_cdf,
+                )
                 end_points = self.net(batch_data_label)
-                loss, end_points = get_loss_economicgrasp(end_points)
+                loss, end_points = get_loss_economicgrasp(
+                    end_points,
+                    use_cdf=self.use_cdf,
+                )
 
             metrics = self.extract_scalar_metrics(end_points)
             for key, val in metrics.items():

@@ -272,7 +272,8 @@ from torchvision import transforms
 class GraspNetMultiDataset(Dataset):
     def __init__(self, root, camera='kinect', split='train', num_points=20000, voxel_size=0.005, remove_outlier=False, remove_invisible=True,
                  augment=False, load_label=True, use_gt_depth=False,
-                 use_fuse_depth=False, graspness_mode='scene', min_depth=0.2, max_depth=1.0, bin_num=256, depth_strides=2, extend_angle=False):
+                 use_fuse_depth=False, graspness_mode='scene', min_depth=0.2, max_depth=1.0, bin_num=256, depth_strides=2,
+                 extend_angle=False, load_grasp_payload=True):
         self.root = root
         self.split = split
         self.voxel_size = voxel_size
@@ -285,7 +286,10 @@ class GraspNetMultiDataset(Dataset):
         self.use_gt_depth = use_gt_depth
         self.use_fuse_depth = use_fuse_depth
         self.graspness_mode = graspness_mode
-        self.extend_angle = extend_angle
+        # ``extend_angle`` selects the cache family only when this base
+        # dataset owns object-level grasp payload loading.
+        self.extend_angle = bool(extend_angle)
+        self.load_grasp_payload = bool(load_grasp_payload)
         self.collision_labels = {}
 
         if split == 'train':
@@ -345,11 +349,8 @@ class GraspNetMultiDataset(Dataset):
                 self.scenename.append(x.strip())
                 self.frameid.append(img_num)
 
-            if self.load_label:
+            if self.load_label and self.load_grasp_payload:
                 if self.extend_angle:
-                    # CDF training requires the depth-wise extended cache.  It is a
-                    # strict superset of the legacy extend-angle cache and contains:
-                    #   cdf_bins / widths_depth_mm / width_valids_depth.
                     self.grasp_labels[x.strip()] = os.path.join(
                         self.root,
                         'economic_grasp_label_300views_extend_angle_cdf_depth',
@@ -357,7 +358,9 @@ class GraspNetMultiDataset(Dataset):
                     )
                 else:
                     self.grasp_labels[x.strip()] = os.path.join(
-                        self.root, 'economic_grasp_label_300views', x + '_labels.npz'
+                        self.root,
+                        'economic_grasp_label_300views',
+                        x + '_labels.npz',
                     )
                     
     def scene_list(self):
@@ -914,70 +917,17 @@ class GraspNetMultiDataset(Dataset):
         )
 
         # -----------------------------
-        # 6) Load economic grasp labels (object-level lists)
+        # 6) Object poses and optional object-level grasp payload
         # -----------------------------
-        label_path = self.grasp_labels[scene]
-        if not os.path.isfile(label_path):
-            raise FileNotFoundError(
-                f'Economic grasp label cache not found: {label_path}. '
-                'Generate it with generate_economic_cdf_depth.py --extend_angle '
-                '--cache_cdf_depth_labels.'
-            )
+        # Reading the per-frame object poses belongs to the dataset because
+        # they are stored in meta['poses'].  Applying those poses to cached
+        # object-frame grasp points/views and matching them to predicted
+        # queries remains the responsibility of label_generation.py.
+        object_poses_list = [
+            poses[:, :, i].astype(np.float32, copy=True)
+            for i in range(len(obj_idxs))
+        ]
 
-        with np.load(label_path, allow_pickle=False) as grasp_labels:
-            points = grasp_labels['points']
-            rotations = grasp_labels['rotations'].astype(np.int32)
-            depth_l = grasp_labels['depth'].astype(np.int32)
-            scores = grasp_labels['scores'].astype(np.float32) / 10.0
-            widths = grasp_labels['widths'].astype(np.float32) / 1000.0
-            topview = grasp_labels['topview'].astype(np.int32)
-            view_graspness = grasp_labels['vgraspness'].astype(np.float32)
-            pointid = grasp_labels['pointid']
-            collisions = grasp_labels['collisions'].astype(np.float32)
-
-            if self.extend_angle:
-                required_cdf_keys = (
-                    'cdf_bins',
-                    'cdf_thresholds',
-                    'widths_depth_mm',
-                    'width_valids_depth',
-                )
-                missing = [k for k in required_cdf_keys if k not in grasp_labels]
-                if missing:
-                    raise RuntimeError(
-                        f'{label_path} is a legacy extend-angle cache and is missing '
-                        f'{missing}. Regenerate the CDF-depth cache before training.'
-                    )
-                cdf_bins = grasp_labels['cdf_bins'].astype(np.uint8)
-                cdf_thresholds = grasp_labels['cdf_thresholds'].astype(np.float32)
-                widths_depth = (
-                    grasp_labels['widths_depth_mm'].astype(np.float32) / 1000.0
-                )
-                width_valids_depth = grasp_labels['width_valids_depth'].astype(np.bool_)
-
-                expected_prefix = rotations.shape
-                if cdf_bins.shape[:3] != expected_prefix:
-                    raise RuntimeError(
-                        f'cdf_bins prefix {cdf_bins.shape[:3]} must match rotations '
-                        f'{expected_prefix} in {label_path}.'
-                    )
-                if widths_depth.shape != cdf_bins.shape:
-                    raise RuntimeError(
-                        f'widths_depth shape {widths_depth.shape} != cdf_bins '
-                        f'{cdf_bins.shape} in {label_path}.'
-                    )
-                if width_valids_depth.shape != cdf_bins.shape:
-                    raise RuntimeError(
-                        f'width_valids_depth shape {width_valids_depth.shape} != '
-                        f'cdf_bins {cdf_bins.shape} in {label_path}.'
-                    )
-            else:
-                cdf_bins = None
-                cdf_thresholds = None
-                widths_depth = None
-                width_valids_depth = None
-
-        object_poses_list = []
         grasp_points_list = []
         grasp_rotations_list = []
         grasp_depth_list = []
@@ -989,23 +939,162 @@ class GraspNetMultiDataset(Dataset):
         grasp_cdf_bins_list = []
         grasp_widths_depth_list = []
         grasp_width_valids_depth_list = []
+        cdf_thresholds = None
 
-        for i, obj_idx in enumerate(obj_idxs):
-            obj_mask = (pointid == i)
-            object_poses_list.append(poses[:, :, i])
-            grasp_points_list.append(points[obj_mask])
-            grasp_rotations_list.append(rotations[obj_mask])
-            grasp_depth_list.append(depth_l[obj_mask])
-            grasp_scores_list.append(scores[obj_mask])
-            grasp_widths_list.append(widths[obj_mask])
-            view_graspness_list.append(view_graspness[obj_mask])
-            top_view_index_list.append(topview[obj_mask])
-            grasp_collision_list.append(collisions[obj_mask])
-            if self.extend_angle:
-                grasp_cdf_bins_list.append(cdf_bins[obj_mask])
-                grasp_widths_depth_list.append(widths_depth[obj_mask])
-                grasp_width_valids_depth_list.append(width_valids_depth[obj_mask])
-            
+        if self.load_grasp_payload:
+            label_path = self.grasp_labels[scene]
+            if not os.path.isfile(label_path):
+                cache_family = (
+                    "extended-angle"
+                    if self.extend_angle
+                    else "standard"
+                )
+                raise FileNotFoundError(
+                    f"{cache_family} economic-grasp cache not found: "
+                    f"{label_path}"
+                )
+
+            with np.load(label_path, allow_pickle=False) as grasp_labels:
+                required = (
+                    "points",
+                    "rotations",
+                    "depth",
+                    "scores",
+                    "widths",
+                    "topview",
+                    "vgraspness",
+                    "pointid",
+                )
+                missing = [
+                    key for key in required
+                    if key not in grasp_labels
+                ]
+                if missing:
+                    raise KeyError(
+                        f"Economic grasp cache {label_path} is missing "
+                        f"required keys: {missing}"
+                    )
+
+                points = grasp_labels["points"].astype(
+                    np.float32, copy=False
+                )
+                rotations = grasp_labels["rotations"].astype(
+                    np.int32, copy=False
+                )
+                depth_l = grasp_labels["depth"].astype(
+                    np.int32, copy=False
+                )
+                scores = (
+                    grasp_labels["scores"].astype(np.float32)
+                    / 10.0
+                )
+                widths = (
+                    grasp_labels["widths"].astype(np.float32)
+                    / 1000.0
+                )
+                topview = grasp_labels["topview"].astype(
+                    np.int32, copy=False
+                )
+                view_graspness = grasp_labels[
+                    "vgraspness"
+                ].astype(np.float32, copy=False)
+                pointid = grasp_labels["pointid"].astype(
+                    np.int64, copy=False
+                )
+
+                # Collision was not present in some old standard caches.  Keep
+                # generic non-CVA loading backward-compatible, while the
+                # switchable CVA adapter strictly requires it from the common
+                # extended cache.
+                if "collisions" in grasp_labels:
+                    collisions = grasp_labels[
+                        "collisions"
+                    ].astype(np.float32, copy=False)
+                else:
+                    collisions = np.zeros_like(
+                        scores, dtype=np.float32
+                    )
+
+                if self.extend_angle:
+                    required_cdf = (
+                        "cdf_bins",
+                        "cdf_thresholds",
+                        "widths_depth_mm",
+                        "width_valids_depth",
+                    )
+                    missing = [
+                        key for key in required_cdf
+                        if key not in grasp_labels
+                    ]
+                    if missing:
+                        raise RuntimeError(
+                            f"Extended cache {label_path} is missing "
+                            f"CDF-depth keys: {missing}"
+                        )
+                    cdf_bins = grasp_labels["cdf_bins"].astype(
+                        np.uint8, copy=False
+                    )
+                    cdf_thresholds = grasp_labels[
+                        "cdf_thresholds"
+                    ].astype(np.float32, copy=False)
+                    widths_depth = (
+                        grasp_labels["widths_depth_mm"].astype(
+                            np.float32
+                        )
+                        / 1000.0
+                    )
+                    width_valids_depth = grasp_labels[
+                        "width_valids_depth"
+                    ].astype(np.bool_, copy=False)
+
+                    expected_prefix = rotations.shape
+                    if cdf_bins.shape[:3] != expected_prefix:
+                        raise RuntimeError(
+                            f"cdf_bins prefix {cdf_bins.shape[:3]} "
+                            f"must match rotations {expected_prefix} "
+                            f"in {label_path}."
+                        )
+                    if widths_depth.shape != cdf_bins.shape:
+                        raise RuntimeError(
+                            f"widths_depth shape {widths_depth.shape} "
+                            f"!= cdf_bins {cdf_bins.shape}."
+                        )
+                    if width_valids_depth.shape != cdf_bins.shape:
+                        raise RuntimeError(
+                            "width_valids_depth shape "
+                            f"{width_valids_depth.shape} != "
+                            f"cdf_bins {cdf_bins.shape}."
+                        )
+                else:
+                    cdf_bins = None
+                    widths_depth = None
+                    width_valids_depth = None
+
+            for i, _obj_idx in enumerate(obj_idxs):
+                obj_mask = pointid == i
+                grasp_points_list.append(points[obj_mask])
+                grasp_rotations_list.append(rotations[obj_mask])
+                grasp_depth_list.append(depth_l[obj_mask])
+                grasp_scores_list.append(scores[obj_mask])
+                grasp_widths_list.append(widths[obj_mask])
+                view_graspness_list.append(
+                    view_graspness[obj_mask]
+                )
+                top_view_index_list.append(topview[obj_mask])
+                grasp_collision_list.append(
+                    collisions[obj_mask]
+                )
+                if self.extend_angle:
+                    grasp_cdf_bins_list.append(
+                        cdf_bins[obj_mask]
+                    )
+                    grasp_widths_depth_list.append(
+                        widths_depth[obj_mask]
+                    )
+                    grasp_width_valids_depth_list.append(
+                        width_valids_depth[obj_mask]
+                    )
+
         if self.augment:
             cloud_sampled, object_poses_list = self.augment_data(cloud_sampled, object_poses_list)
 
@@ -1033,28 +1122,9 @@ class GraspNetMultiDataset(Dataset):
             'graspness_label_tok': graspness_label_tok,
             'token_valid_mask': token_valid_mask.astype(np.bool_),
 
-            # economic grasp labels
+            # Per-frame scene metadata. Object-frame grasp arrays are
+            # optionally attached below or by CVAExtendedLabelAdapter.
             'object_poses_list': object_poses_list,
-            'grasp_points_list': grasp_points_list,
-            'grasp_rotations_list': grasp_rotations_list,
-            'grasp_depth_list': grasp_depth_list,
-            'grasp_widths_list': grasp_widths_list,
-            'grasp_scores_list': grasp_scores_list,
-            'view_graspness_list': view_graspness_list,
-            'top_view_index_list': top_view_index_list,
-            'grasp_collision_list': grasp_collision_list,
-
-            # Depth-wise labels for the embedded CDF/width heads.  These remain
-            # object-wise lists because each object has a variable number of
-            # annotated grasp points.
-            'grasp_cdf_bins_list': grasp_cdf_bins_list,
-            'grasp_widths_depth_list': grasp_widths_depth_list,
-            'grasp_width_valids_depth_list': grasp_width_valids_depth_list,
-            'cdf_thresholds': (
-                cdf_thresholds.astype(np.float32)
-                if cdf_thresholds is not None
-                else np.asarray([], dtype=np.float32)
-            ),
 
             # debug / bookkeeping
             'sampled_masked_idxs': idxs.astype(np.int64),
@@ -1074,6 +1144,31 @@ class GraspNetMultiDataset(Dataset):
             'anno_idx': np.int64(anno_idx),
             'dataset_idx': np.int64(index),
         }
+        if self.load_grasp_payload:
+            ret_dict.update({
+                "grasp_points_list": grasp_points_list,
+                "grasp_rotations_list": grasp_rotations_list,
+                "grasp_depth_list": grasp_depth_list,
+                "grasp_widths_list": grasp_widths_list,
+                "grasp_scores_list": grasp_scores_list,
+                "view_graspness_list": view_graspness_list,
+                "top_view_index_list": top_view_index_list,
+                "grasp_collision_list": grasp_collision_list,
+            })
+            if self.extend_angle:
+                ret_dict.update({
+                    "grasp_cdf_bins_list": grasp_cdf_bins_list,
+                    "grasp_widths_depth_list": (
+                        grasp_widths_depth_list
+                    ),
+                    "grasp_width_valids_depth_list": (
+                        grasp_width_valids_depth_list
+                    ),
+                    "cdf_thresholds": (
+                        cdf_thresholds.astype(np.float32)
+                    ),
+                })
+
         return ret_dict
 
 
@@ -1107,6 +1202,10 @@ class GraspNetTransDataset(GraspNetMultiDataset):
         self.augment = augment
         self.load_label = load_label
         self.use_gt_depth = use_gt_depth
+        self.use_fuse_depth = False
+        self.graspness_mode = "scene"
+        self.extend_angle = False
+        self.load_grasp_payload = True
         self.collision_labels = {}
 
         # split -> scene integer ids (same as GraspNet)

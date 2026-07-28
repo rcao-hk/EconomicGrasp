@@ -116,17 +116,20 @@ parser.add_argument("--vis_dir", type=str)
 parser.add_argument("--vis_every", type=int, default=1000)
 parser.add_argument("--cdf_vis_num_queries", type=int, default=32)
 parser.add_argument(
-    "--cdf_diag_interval",
-    type=int,
-    default=20,
-    help="Compute expensive CDF diagnostics every N train iterations; 0 disables.",
+    "--use_cdf",
+    action="store_true",
+    default=False,
 )
+
 parser.add_argument(
-    "--cdf_eval_diag_interval",
-    type=int,
-    default=50,
-    help="Compute expensive CDF diagnostics every N validation iterations; 0 disables.",
+    "--cdf_label_folder",
+    type=str,
+    default=(
+        "economic_grasp_label_300views_"
+        "extend_angle_cdf_depth"
+    ),
 )
+
 parser.add_argument("--use_top4_view_infer", action='store_true')
 parser.add_argument("--enable_eval", action='store_true')
 parser.add_argument("--seed", type=int, default=0)

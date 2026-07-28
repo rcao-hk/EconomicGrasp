@@ -33,10 +33,14 @@ from .economicgrasp_depth import DINOv2DepthDistributionNet, DINOv2DepthRegressi
 from models.bip3d.models.modules.resnet import ResNet
 from models.bip3d.models.modules.channel_mapper import ChannelMapper
 from .economicgrasp_depth_c1 import TokGraspableHead2D
-from models.modules_economicgrasp import ViewNet, Cylinder_Grouping_Global_Interaction, Grasp_Head_Local_Interaction
+from models.modules_economicgrasp import ViewNet, Cylinder_Grouping_Global_Interaction, Grasp_Head_Local_Interaction, AttentionModule
 from libs.pointnet2.pointnet2_utils import furthest_point_sample, gather_operation
-from utils.label_generation import process_grasp_labels, process_grasp_labels_depth_cls_compensated, batch_viewpoint_params_to_matrix, process_grasp_labels_cdf_width
-from models.modules_economicgrasp import AttentionModule
+from utils.label_generation import (
+    process_grasp_labels,
+    batch_viewpoint_params_to_matrix,
+    process_grasp_labels_cdf_width,
+    process_grasp_labels_extend_angle,
+)
 
 def gather_depth_by_img_idxs(depth_map_1hw: torch.Tensor, img_idxs: torch.Tensor):
     # depth_map_1hw: (B,1,H,W) or (B,H,W)
@@ -6344,6 +6348,7 @@ class Grasp_Head_Local_Interaction_Dropout(nn.Module):
         return end_points
     
      
+
 from models.dinov2_dpt import DPTHead
 from models.grasp_spatial_enhancer import GraspSpatialEnhancer
 from models.rgb_geometry_diagnostics import RGBGeometryDiagnostics
@@ -6378,10 +6383,10 @@ class economicgrasp_dpt(nn.Module):
         is_training: bool = True,
         use_obs_depth: bool = False,
         use_depth_comp: bool = False,
+        use_cdf: bool = False,
         vis_dir: Optional[str] = 'vis_dpt',
         vis_every: int = 500,
         debug_print_every: int = 50,
-        oracle_diag: bool = False,
     ):
         super().__init__()
         self.is_training = bool(is_training)
@@ -6396,7 +6401,11 @@ class economicgrasp_dpt(nn.Module):
         self.bin_num = int(bin_num)
         self.use_obs_depth = bool(use_obs_depth)
         self.use_depth_comp = bool(use_depth_comp)
-        
+        # CDF is an explicit model choice. Geometry diagnostics follow
+        # visualization automatically: a non-empty vis_dir enables them.
+        self.use_cdf = bool(use_cdf)
+        self.use_geometry_diagnostics = bool(vis_dir)
+
         self.stride = 1
         self.vis_dir = vis_dir
         self.vis_every = int(vis_every)
@@ -6541,104 +6550,329 @@ class economicgrasp_dpt(nn.Module):
         #     num_depth=self.num_depth,
         # )
 
-        self.kview_grasp_module = CenterViewAngleQueryTransformerLocalGraspModule(
+        # Shared K-view selector/grouping configuration.
+        self.kview_config = KViewQueryTransformerConfig(
+            mode=(
+                "A2"
+                if bool(
+                    getattr(
+                        cfgs,
+                        "use_top4_view_infer",
+                        False,
+                    )
+                )
+                else getattr(cfgs, "kview_mode", "A1")
+            ),
+            num_query_views=(
+                4
+                if bool(
+                    getattr(
+                        cfgs,
+                        "use_top4_view_infer",
+                        False,
+                    )
+                )
+                else getattr(cfgs, "kview_k", 1)
+            ),
+            sample_temperature=getattr(
+                cfgs,
+                "kview_tau",
+                1.0,
+            ),
+            sample_from=getattr(
+                cfgs,
+                "kview_sample_from",
+                "minmax_norm",
+            ),
+            patch_size=getattr(
+                cfgs,
+                "kview_patch_size",
+                6,
+            ),
+            metric_radius=getattr(
+                cfgs,
+                "kview_metric_radius",
+                0.08,
+            ),
+            radius_px_min=getattr(
+                cfgs,
+                "kview_radius_px_min",
+                8.0,
+            ),
+            radius_px_max=getattr(
+                cfgs,
+                "kview_radius_px_max",
+                64.0,
+            ),
+            grouping_model_dim=getattr(
+                cfgs,
+                "kview_group_dim",
+                256,
+            ),
+            grouping_num_heads=getattr(
+                cfgs,
+                "kview_group_heads",
+                4,
+            ),
+            grouping_dropout=getattr(
+                cfgs,
+                "kview_group_dropout",
+                0.05,
+            ),
+            grouping_max_queries_per_chunk=getattr(
+                cfgs,
+                "kview_group_chunk",
+                2048,
+            ),
+            use_gripper_projected_axes=True,
+            head_model_dim=getattr(
+                cfgs,
+                "kview_head_dim",
+                128,
+            ),
+            head_hidden_dim=getattr(
+                cfgs,
+                "kview_head_hidden_dim",
+                64,
+            ),
+            head_num_layers=getattr(
+                cfgs,
+                "kview_head_layers",
+                2,
+            ),
+            head_num_heads=getattr(
+                cfgs,
+                "kview_head_heads",
+                4,
+            ),
+            head_attn_dropout=getattr(
+                cfgs,
+                "kview_attn_dropout",
+                0.05,
+            ),
+            head_dropout_p=getattr(
+                cfgs,
+                "kview_head_dropout",
+                0.15,
+            ),
+            use_collision_head=False,
+            # Used only by the CDF candidate decoder.
+            num_cdf_thresholds=int(
+                getattr(
+                    cfgs,
+                    "num_cdf_thresholds",
+                    6,
+                )
+            ),
+            cdf_increment_bias=float(
+                getattr(
+                    cfgs,
+                    "cdf_increment_bias",
+                    -4.0,
+                )
+            ),
+            vis_dir=(
+                None
+                if self.vis_dir is None
+                else os.path.join(
+                    self.vis_dir,
+                    (
+                        "kview_query_grasp_cdf"
+                        if self.use_cdf
+                        else "kview_query_grasp_legacy"
+                    ),
+                )
+            ),
+            vis_every=self.vis_every,
+            vis_num_queries=int(
+                getattr(
+                    cfgs,
+                    "cdf_vis_num_queries",
+                    32,
+                )
+            ),
+            save_npz=False,
+        )
+
+        common_kview_kwargs = dict(
             view_net=self.view,
             num_view=self.num_view,
             num_angle=self.num_angle,
             num_depth=self.num_depth,
             seed_feature_dim=self.seed_feature_dim,
-            feat_dim=self.seed_feature_dim,  # feat_grid channel dim; change if proposal_path1_enh has different C
+            feat_dim=self.seed_feature_dim,
             view_dirs=self.view_dirs,
-            batch_viewpoint_params_to_matrix_fn=batch_viewpoint_params_to_matrix,  # direct repo function, no fallback
-            config=KViewQueryTransformerConfig(
-                # A2 keeps the original single-view sampling during training,
-                # while expanding deterministic Top-4 ViewNet hypotheses at
-                # standalone inference.  The decoder flag alone cannot create
-                # missing view queries, so configure the selector here as well.
-                mode=(
-                    'A2'
-                    if bool(getattr(cfgs, 'use_top4_view_infer', False))
-                    else getattr(cfgs, 'kview_mode', 'A1')
-                ),
-                num_query_views=(
-                    4
-                    if bool(getattr(cfgs, 'use_top4_view_infer', False))
-                    else getattr(cfgs, 'kview_k', 1)
-                ),
-                sample_temperature=getattr(cfgs, 'kview_tau', 1.0),
-                sample_from=getattr(cfgs, 'kview_sample_from', 'minmax_norm'),
-
-                patch_size=getattr(cfgs, 'kview_patch_size', 6),
-                metric_radius=getattr(cfgs, 'kview_metric_radius', 0.08),
-                radius_px_min=getattr(cfgs, 'kview_radius_px_min', 8.0),
-                radius_px_max=getattr(cfgs, 'kview_radius_px_max', 64.0),
-                grouping_model_dim=getattr(cfgs, 'kview_group_dim', 256),
-                grouping_num_heads=getattr(cfgs, 'kview_group_heads', 4),
-                grouping_dropout=getattr(cfgs, 'kview_group_dropout', 0.05),
-                grouping_max_queries_per_chunk=getattr(cfgs, 'kview_group_chunk', 2048),
-                use_gripper_projected_axes=True,
-
-                head_model_dim=getattr(cfgs, 'kview_head_dim', 128),
-                head_hidden_dim=getattr(cfgs, 'kview_head_hidden_dim', 64),
-                head_num_layers=getattr(cfgs, 'kview_head_layers', 2),
-                head_num_heads=getattr(cfgs, 'kview_head_heads', 4),
-                head_attn_dropout=getattr(cfgs, 'kview_attn_dropout', 0.05),
-                head_dropout_p=getattr(cfgs, 'kview_head_dropout', 0.15),
-                # Invalid/collision candidates are represented by an all-zero
-                # evaluator-aligned CDF target.  Do not instantiate a separate
-                # collision branch in the embedded-CDF model.
-                use_collision_head=False,
-                num_cdf_thresholds=6,
-                cdf_increment_bias=-4.0,
-
-                vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'kview_query_grasp'),
-                vis_every=self.vis_every,
-                vis_num_queries=int(getattr(cfgs, 'cdf_vis_num_queries', 32)),
-                save_npz=False,
-            ),
-        )
-
-        # Periodic task-local geometry diagnostics. This module has no trainable
-        # parameters and never changes the forward predictions or gradients.
-        self.rgb_geometry_diagnostics = RGBGeometryDiagnostics(
-            num_angle=self.num_angle,
-            num_depth=self.num_depth,
             batch_viewpoint_params_to_matrix_fn=(
                 batch_viewpoint_params_to_matrix
             ),
-            min_depth=self.min_depth,
-            max_depth=self.max_depth,
-            patch_size=int(getattr(cfgs, "geometry_diag_patch_size", 5)),
-            metric_radius=float(
-                getattr(cfgs, "geometry_diag_metric_radius", 0.04)
-            ),
-            radius_px_min=float(
-                getattr(cfgs, "geometry_diag_radius_px_min", 4.0)
-            ),
-            radius_px_max=float(
-                getattr(cfgs, "geometry_diag_radius_px_max", 32.0)
-            ),
-            topk=int(getattr(cfgs, "geometry_diag_topk", 50)),
-            high_center_error_m=float(
-                getattr(cfgs, "geometry_diag_high_center_error", 0.02)
-            ),
-            high_patch_error_m=float(
-                getattr(cfgs, "geometry_diag_high_patch_error", 0.02)
-            ),
-            vis_dir=(
-                None
-                if self.vis_dir is None
-                else os.path.join(self.vis_dir, "rgb_geometry")
-            ),
-            vis_every=self.vis_every,
-            vis_num_queries=int(
-                getattr(cfgs, "geometry_diag_vis_queries", 256)
-            ),
-            vis_num_cases=int(
-                getattr(cfgs, "geometry_diag_vis_cases", 4)
-            ),
-            save_npz=True,
+            config=self.kview_config,
         )
+
+        # Both variants are the same Center-View-Angle Transformer. Only
+        # the final candidate decoder/supervision changes with use_cdf.
+        self.kview_grasp_module = (
+            CenterViewAngleQueryTransformerLocalGraspModule(
+                **common_kview_kwargs,
+                use_cdf=self.use_cdf,
+            )
+        )
+
+        # Geometry diagnostics are independent of the prediction-head choice
+        # and are enabled automatically whenever visualization is enabled.
+        # RGBGeometryDiagnostics supports both CDF and legacy outputs.
+        if self.use_geometry_diagnostics:
+            self.rgb_geometry_diagnostics = RGBGeometryDiagnostics(
+                num_angle=self.num_angle,
+                num_depth=self.num_depth,
+                batch_viewpoint_params_to_matrix_fn=(
+                    batch_viewpoint_params_to_matrix
+                ),
+                min_depth=self.min_depth,
+                max_depth=self.max_depth,
+                patch_size=int(
+                    getattr(
+                        cfgs,
+                        "geometry_diag_patch_size",
+                        5,
+                    )
+                ),
+                metric_radius=float(
+                    getattr(
+                        cfgs,
+                        "geometry_diag_metric_radius",
+                        0.04,
+                    )
+                ),
+                radius_px_min=float(
+                    getattr(
+                        cfgs,
+                        "geometry_diag_radius_px_min",
+                        4.0,
+                    )
+                ),
+                radius_px_max=float(
+                    getattr(
+                        cfgs,
+                        "geometry_diag_radius_px_max",
+                        32.0,
+                    )
+                ),
+                topk=int(
+                    getattr(
+                        cfgs,
+                        "geometry_diag_topk",
+                        50,
+                    )
+                ),
+                high_center_error_m=float(
+                    getattr(
+                        cfgs,
+                        "geometry_diag_high_center_error",
+                        0.02,
+                    )
+                ),
+                high_patch_error_m=float(
+                    getattr(
+                        cfgs,
+                        "geometry_diag_high_patch_error",
+                        0.02,
+                    )
+                ),
+                vis_dir=(
+                    None
+                    if self.vis_dir is None
+                    else os.path.join(
+                        self.vis_dir,
+                        "rgb_geometry",
+                    )
+                ),
+                vis_every=self.vis_every,
+                vis_num_queries=int(
+                    getattr(
+                        cfgs,
+                        "geometry_diag_vis_queries",
+                        256,
+                    )
+                ),
+                vis_num_cases=int(
+                    getattr(
+                        cfgs,
+                        "geometry_diag_vis_cases",
+                        4,
+                    )
+                ),
+                save_npz=True,
+            )
+        else:
+            self.rgb_geometry_diagnostics = None
+
+        if (
+            not torch.distributed.is_available()
+            or not torch.distributed.is_initialized()
+            or torch.distributed.get_rank() == 0
+        ):
+            print(
+                "[economicgrasp_dpt] CVA head="
+                + ("CDF" if self.use_cdf else "legacy explicit-angle")
+                + ", geometry_diagnostics="
+                + str(int(self.use_geometry_diagnostics)),
+                flush=True,
+            )
+
+    def _assert_cva_output_contract(
+        self,
+        end_points: dict,
+    ) -> None:
+        """Fail immediately when CDF and legacy endpoints are mixed."""
+        if self.use_cdf:
+            required = (
+                "grasp_cdf_pred_angle_depth",
+                "grasp_width_pred_angle_depth",
+            )
+            forbidden = (
+                "grasp_depth_pred_angle",
+                "grasp_score_pred_angle",
+                "grasp_width_pred_angle",
+                "grasp_angle_pred",
+                "grasp_depth_pred",
+                "grasp_score_pred",
+                "grasp_width_pred",
+            )
+        else:
+            required = (
+                "grasp_depth_pred_angle",
+                "grasp_score_pred_angle",
+                "grasp_width_pred_angle",
+                "grasp_angle_pred",
+                "grasp_depth_pred",
+                "grasp_score_pred",
+                "grasp_width_pred",
+            )
+            forbidden = (
+                "grasp_cdf_pred_angle_depth",
+                "grasp_width_pred_angle_depth",
+            )
+
+        missing = [
+            key for key in required
+            if key not in end_points
+        ]
+        if missing:
+            raise KeyError(
+                f"CVA head={'CDF' if self.use_cdf else 'legacy'} "
+                f"is missing endpoint(s): {missing}"
+            )
+
+        incompatible = [
+            key for key in forbidden
+            if key in end_points
+        ]
+        if incompatible:
+            raise RuntimeError(
+                f"CVA head={'CDF' if self.use_cdf else 'legacy'} "
+                f"received incompatible endpoint(s): {incompatible}. "
+                "Check model construction, labels, loss and decoder."
+            )
 
     @staticmethod
     def _backproject_uvz(uv_b_n2, z_b_n1, K_b_33):
@@ -7419,8 +7653,19 @@ class economicgrasp_dpt(nn.Module):
                 pass
 
         if self.is_training:
-            process_fn = process_grasp_labels_cdf_width
-            process_kwargs  = None
+            if self.use_depth_comp:
+                raise RuntimeError(
+                    "The switchable CVA trainer requires extended-angle "
+                    "labels. use_depth_comp currently has no extended-angle "
+                    "label matcher; disable it or implement a dedicated "
+                    "process_grasp_labels_extend_angle_depth_comp function."
+                )
+            process_fn = (
+                process_grasp_labels_cdf_width
+                if self.use_cdf
+                else process_grasp_labels_extend_angle
+            )
+            process_kwargs = None
         else:
             process_fn = None
             process_kwargs = None
@@ -7445,18 +7690,36 @@ class economicgrasp_dpt(nn.Module):
             img=img,
         )
 
-        # RGB geometry diagnostics are active only on configured diagnostic
-        # iterations or visualization iterations. They use GT depth strictly
-        # for analysis and never alter the geometry consumed by the model.
-        end_points = self.rgb_geometry_diagnostics(
-            end_points=end_points,
-            depth_pred=depth_448,
-            gt_depth=end_points.get("gt_depth_m", None),
-            K=K,
-            img=img,
-            step=self._vis_iter,
-            modality=("rgbd" if self.use_obs_depth else "rgb"),
+        self._assert_cva_output_contract(end_points)
+        end_points["D: CDF enabled"] = depth_448.new_tensor(
+            float(self.use_cdf)
+        ).reshape(())
+        end_points["D: Geometry diagnostics enabled"] = (
+            depth_448.new_tensor(
+                float(self.use_geometry_diagnostics)
+            ).reshape(())
         )
+
+        if self.use_geometry_diagnostics:
+            if self.rgb_geometry_diagnostics is None:
+                raise RuntimeError(
+                    "use_geometry_diagnostics=True but the "
+                    "diagnostic module was not initialized."
+                )
+            end_points = self.rgb_geometry_diagnostics(
+                end_points=end_points,
+                depth_pred=depth_448,
+                gt_depth=end_points.get("gt_depth_m", None),
+                K=K,
+                img=img,
+                step=self._vis_iter,
+                modality=(
+                    "rgbd"
+                    if self.use_obs_depth
+                    else "rgb"
+                ),
+                use_cdf=self.use_cdf,
+            )
 
         with torch.no_grad():
             end_points["D: Depth final mean"] = depth_448.detach().mean()
@@ -7521,6 +7784,8 @@ class economicgrasp_dpt(nn.Module):
             with torch.no_grad():
                 msg = (
                     f"[economicgrasp_dpt] it={self._vis_iter} "
+                    f"cdf={int(self.use_cdf)} "
+                    f"geomdiag={int(self.use_geometry_diagnostics)} "
                     f"obs={int(self.use_obs_depth)} "
                     f"graspable={end_points['D: Graspable Points'].item():.1f} "
                     f"cand={end_points['D: PredCand#(thr)'].item():.1f} "
