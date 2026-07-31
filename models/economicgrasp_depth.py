@@ -12,6 +12,11 @@ from utils.arguments import cfgs
 # (keep your existing file/class; here we just import it)
 from utils.label_generation import process_grasp_labels, batch_viewpoint_params_to_matrix
 from models.economicgrasp import economicgrasp as EconomicGrasp3D
+from models.pose_aware_depth import (
+    PoseAwareDPTFiLM,
+    RayGravityDenseDPTFiLM,
+    resolve_pose_depth_mode,
+)
 import open3d as o3d
 import os
 
@@ -384,40 +389,118 @@ class DINOv2DepthDistributionNet(nn.Module):
 
 
 class DINOv2DepthRegressionNet(nn.Module):
+    """DINOv2 encoder + trainable DPT metric-depth decoder.
+
+    ``pose_depth_mode`` controls whether and how camera metadata modulates the
+    intermediate DINO features consumed by the metric-depth DPT head:
+
+      - ``none``: no camera-pose conditioning;
+      - ``global_film``: channel-wise FiLM from ``camera_pose_vec``;
+      - ``ray_gravity_film``: dense FiLM from crop-aware ``K`` and
+        ``camera_gravity_vec`` (table normal/world-up in camera frame).
+
+    The raw frozen-DINO features returned through ``return_feats`` are never
+    conditioned, so proposal/objectness/graspness branches remain unchanged.
     """
-    RGB -> depth_reg_448 (B,1,448,448)
-    可选：输出 depth_reg_tok (B,1,224,224) 便于 debug
-    """
-    def __init__(self,
-                 encoder="vitb",
-                 stride=2,              # 你希望 token=224x224 用来监控的话保留
-                 min_depth=0.2,
-                 max_depth=1.0,
-                 freeze_backbone=True):
+
+    def __init__(
+        self,
+        encoder="vitb",
+        stride=2,
+        min_depth=0.2,
+        max_depth=1.0,
+        freeze_backbone=True,
+        pose_depth_mode="none",
+        # Legacy compatibility. True maps to global_film.
+        use_pose_aware_depth=None,
+        pose_hidden_dim=64,
+        ray_gravity_hidden_dim=64,
+        ray_gravity_mid_dim=32,
+    ):
         super().__init__()
         assert stride in [1, 2, 4]
         self.stride = int(stride)
         self.min_depth = float(min_depth)
         self.max_depth = float(max_depth)
         self.freeze_backbone_flag = bool(freeze_backbone)
+        self.pose_depth_mode = resolve_pose_depth_mode(
+            pose_depth_mode,
+            use_pose_aware_depth=use_pose_aware_depth,
+        )
+        self.use_pose_aware_depth = self.pose_depth_mode != "none"
 
         model_configs = {
-            'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
-            'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
-            'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
-            'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
+            "vits": {
+                "encoder": "vits",
+                "features": 64,
+                "out_channels": [48, 96, 192, 384],
+                "embed_dim": 384,
+            },
+            "vitb": {
+                "encoder": "vitb",
+                "features": 128,
+                "out_channels": [96, 192, 384, 768],
+                "embed_dim": 768,
+            },
+            "vitl": {
+                "encoder": "vitl",
+                "features": 256,
+                "out_channels": [256, 512, 1024, 1024],
+                "embed_dim": 1024,
+            },
+            "vitg": {
+                "encoder": "vitg",
+                "features": 384,
+                "out_channels": [1536, 1536, 1536, 1536],
+                "embed_dim": 1536,
+            },
         }
+        if encoder not in model_configs:
+            raise ValueError(f"Unsupported DINOv2 encoder: {encoder!r}.")
+        encoder_cfg = model_configs[encoder]
 
-        self.depthnet = DA2(**{**model_configs[encoder], 'max_depth': self.max_depth}, out_dim=1)
+        self.depthnet = DA2(
+            encoder=encoder_cfg["encoder"],
+            features=encoder_cfg["features"],
+            out_channels=encoder_cfg["out_channels"],
+            max_depth=self.max_depth,
+            out_dim=1,
+        )
 
-        self.depthnet.load_state_dict({k: v for k, v in torch.load('checkpoints/depth_anything_v2_{}.pth'.format(encoder), map_location='cpu').items() if 'pretrained' in k}, strict=False)
+        # Keep the attribute name used by the previous global-FiLM release so
+        # its checkpoints retain exactly the same state-dict key prefix.
+        if self.pose_depth_mode == "global_film":
+            self.pose_aware_adapter = PoseAwareDPTFiLM(
+                feat_dim=encoder_cfg["embed_dim"],
+                num_levels=4,
+                pose_dim=3,
+                hidden_dim=int(pose_hidden_dim),
+            )
+        elif self.pose_depth_mode == "ray_gravity_film":
+            self.pose_aware_adapter = RayGravityDenseDPTFiLM(
+                feat_dim=encoder_cfg["embed_dim"],
+                num_levels=4,
+                geometry_hidden_dim=int(ray_gravity_hidden_dim),
+                geometry_mid_dim=int(ray_gravity_mid_dim),
+            )
+        else:
+            self.pose_aware_adapter = None
+
+        checkpoint = torch.load(
+            "checkpoints/depth_anything_v2_{}.pth".format(encoder),
+            map_location="cpu",
+        )
+        self.depthnet.load_state_dict(
+            {k: v for k, v in checkpoint.items() if "pretrained" in k},
+            strict=False,
+        )
 
         if self.freeze_backbone_flag:
             self._freeze_backbone()
 
     def _freeze_backbone(self):
-        for p in self.depthnet.pretrained.parameters():
-            p.requires_grad_(False)
+        for parameter in self.depthnet.pretrained.parameters():
+            parameter.requires_grad_(False)
 
     def train(self, mode=True):
         super().train(mode)
@@ -425,54 +508,88 @@ class DINOv2DepthRegressionNet(nn.Module):
             self._freeze_backbone()
         return self
 
-    def forward(self, img, return_feats: bool = False, return_raw: bool = False):
-        """
-        return:
-        depth_448: bounded direct depth, used when use_obs_depth=False
-        depth_tok: bounded direct depth token map
-        img_feat:  dense feature from DA2 depth head
-        raw_448:   raw 1-channel output, used as residual when use_obs_depth=True
-        feats:     raw DINO intermediate features for proposal_head
-        """
-        B, _, H, W = img.shape
-        assert (H, W) == (448, 448)
+    def forward(
+        self,
+        img,
+        camera_pose_vec: torch.Tensor = None,
+        camera_gravity_vec: torch.Tensor = None,
+        camera_K: torch.Tensor = None,
+        return_feats: bool = False,
+        return_raw: bool = False,
+        return_pose_aux: bool = False,
+    ):
+        """Run metric-depth prediction.
 
-        patch_h, patch_w = H // 14, W // 14
+        Returns, in order:
+          depth_448, depth_tok, img_feat,
+          [raw_448], [raw_unconditioned_dino_feats], [pose_depth_aux].
+        """
+        batch_size, _, height, width = img.shape
+        if (height, width) != (448, 448):
+            raise ValueError(
+                f"DINOv2DepthRegressionNet expects 448x448 input, got "
+                f"{height}x{width}."
+            )
+
+        patch_h, patch_w = height // 14, width // 14
         feats = self.depthnet.pretrained.get_intermediate_layers(
             img,
             self.depthnet.intermediate_layer_idx[self.depthnet.encoder],
-            return_class_token=True
+            return_class_token=True,
         )
 
-        img_feat, raw_448 = self.depthnet.depth_head(feats, patch_h, patch_w)  # (B,1,448,448)
+        depth_feats = feats
+        pose_aux = {}
+        if self.pose_depth_mode == "global_film":
+            depth_feats, pose_aux = self.pose_aware_adapter(
+                feats,
+                camera_pose_vec,
+            )
+        elif self.pose_depth_mode == "ray_gravity_film":
+            depth_feats, pose_aux = self.pose_aware_adapter(
+                feats,
+                camera_k=camera_K,
+                camera_gravity_vec=camera_gravity_vec,
+                image_hw=(height, width),
+                patch_hw=(patch_h, patch_w),
+            )
 
-        # RGB mode uses this as direct metric depth.
+        img_feat, raw_448 = self.depthnet.depth_head(
+            depth_feats,
+            patch_h,
+            patch_w,
+        )
+
+        # RGB-only metric depth. This preserves the existing regression head.
         depth_448 = F.sigmoid(raw_448) * self.max_depth
-        # depth_448 = self.min_depth + F.sigmoid(raw_448) * (self.max_depth - self.min_depth)
-        # depth_448 = depth_448.clamp(self.min_depth, self.max_depth)
 
         if self.stride > 1:
-            depth_tok = F.interpolate(depth_448, size=(H // self.stride, W // self.stride), mode='nearest')
+            depth_tok = F.interpolate(
+                depth_448,
+                size=(height // self.stride, width // self.stride),
+                mode="nearest",
+            )
         else:
             depth_tok = depth_448
 
-        if img_feat.shape[-2:] != (H, W):
+        if img_feat.shape[-2:] != (height, width):
             img_feat = F.interpolate(
                 img_feat,
-                size=(H, W),
+                size=(height, width),
                 mode="bilinear",
                 align_corners=False,
             )
 
-        if return_feats and return_raw:
-            return depth_448, depth_tok, img_feat, raw_448, feats
-        if return_feats:
-            return depth_448, depth_tok, img_feat, feats
+        outputs = [depth_448, depth_tok, img_feat]
         if return_raw:
-            return depth_448, depth_tok, img_feat, raw_448
+            outputs.append(raw_448)
+        if return_feats:
+            outputs.append(feats)
+        if return_pose_aux:
+            outputs.append(pose_aux)
+        return tuple(outputs)
 
-        return depth_448, depth_tok, img_feat
-    
+
 from models.grasp_spatial_enhancer import MultiBasicEncoder, MultiBasicEncoderLayer1
 class ObsDepthAdapter(nn.Module):
     """

@@ -369,6 +369,169 @@ class GraspNetMultiDataset(Dataset):
     def __len__(self):
         return len(self.depthpath)
 
+    def _load_camera_geometry(self, scene):
+        """
+        Lazily load per-scene GraspNet camera transforms.
+
+        GraspNet convention:
+            camera_poses[anno] : T_cam0_from_cam
+            cam0_wrt_table     : T_table_from_cam0
+
+        Therefore:
+            T_table_from_cam =
+                cam0_wrt_table @ camera_poses[anno]
+
+        This is the same composition already used by the workspace-mask
+        code and by the official GraspNet evaluator.
+        """
+        if not hasattr(self, "_camera_geometry_cache"):
+            self._camera_geometry_cache = {}
+
+        cached = self._camera_geometry_cache.get(scene)
+        if cached is not None:
+            return cached
+
+        scene_root = os.path.join(
+            self.root, "scenes", scene, self.camera
+        )
+        poses_path = os.path.join(
+            scene_root, "camera_poses.npy"
+        )
+        align_path = os.path.join(
+            scene_root, "cam0_wrt_table.npy"
+        )
+
+        if not os.path.isfile(poses_path):
+            raise FileNotFoundError(
+                f"camera_poses.npy not found: {poses_path}"
+            )
+        if not os.path.isfile(align_path):
+            raise FileNotFoundError(
+                f"cam0_wrt_table.npy not found: {align_path}"
+            )
+
+        camera_poses = np.asarray(
+            np.load(poses_path),
+            dtype=np.float32,
+        )
+        cam0_wrt_table = np.asarray(
+            np.load(align_path),
+            dtype=np.float32,
+        )
+
+        if (
+            camera_poses.ndim != 3
+            or camera_poses.shape[1:] != (4, 4)
+        ):
+            raise ValueError(
+                f"Unexpected camera_poses shape "
+                f"{camera_poses.shape} at {poses_path}; "
+                "expected (num_frames, 4, 4)."
+            )
+        if cam0_wrt_table.shape != (4, 4):
+            raise ValueError(
+                f"Unexpected cam0_wrt_table shape "
+                f"{cam0_wrt_table.shape} at {align_path}; "
+                "expected (4, 4)."
+            )
+        if not (
+            np.isfinite(camera_poses).all()
+            and np.isfinite(cam0_wrt_table).all()
+        ):
+            raise ValueError(
+                f"Non-finite camera transform in scene {scene}."
+            )
+
+        cached = (camera_poses, cam0_wrt_table)
+        self._camera_geometry_cache[scene] = cached
+        return cached
+
+    def build_camera_orientation_metadata(self, scene, anno_idx):
+        """Build the two orientation vectors used by pose-conditioned depth.
+
+        Returns
+        -------
+        camera_pose_vec : np.ndarray, shape (3,), float32
+            GraspNet-style scene/table-to-camera view vector expressed in the
+            table frame.  This is the input used by ``global_film``.
+
+        camera_gravity_vec : np.ndarray, shape (3,), float32
+            Table normal/world-up direction expressed in the camera frame.
+            This is the input used by ``ray_gravity_film``.  Despite the key
+            name, the stored direction is world-up (opposite physical gravity),
+            which makes a near-top-down camera approximately point along
+            negative camera Z.
+
+        camera_tilt_deg : np.float32
+            Angle between ``camera_pose_vec`` and +Z of the table frame.
+
+        GraspNet transform convention:
+
+            T_table_from_cam = cam0_wrt_table @ camera_poses[anno]
+        """
+        camera_poses, cam0_wrt_table = self._load_camera_geometry(scene)
+
+        anno_idx = int(anno_idx)
+        if not 0 <= anno_idx < camera_poses.shape[0]:
+            raise IndexError(
+                f"anno_idx={anno_idx} is outside [0, "
+                f"{camera_poses.shape[0]}) for {scene}."
+            )
+
+        T_table_from_cam = (
+            cam0_wrt_table @ camera_poses[anno_idx]
+        ).astype(np.float32, copy=False)
+        R_table_from_cam = T_table_from_cam[:3, :3]
+
+        # +Z_cam is the optical/forward direction.  Store its opposite in the
+        # table frame to match GraspNet's view-vector convention.
+        camera_pose_vec = -R_table_from_cam[:, 2]
+        pose_norm = float(np.linalg.norm(camera_pose_vec))
+        if not np.isfinite(pose_norm) or pose_norm < 1e-8:
+            raise ValueError(
+                f"Invalid camera_pose_vec for {scene}, anno={anno_idx}: "
+                f"{camera_pose_vec}"
+            )
+        camera_pose_vec = (
+            camera_pose_vec / pose_norm
+        ).astype(np.float32, copy=False)
+
+        # +Z_table (table normal/world-up) expressed in the camera frame.
+        table_up_table = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        camera_gravity_vec = R_table_from_cam.T @ table_up_table
+        gravity_norm = float(np.linalg.norm(camera_gravity_vec))
+        if not np.isfinite(gravity_norm) or gravity_norm < 1e-8:
+            raise ValueError(
+                f"Invalid camera_gravity_vec for {scene}, anno={anno_idx}: "
+                f"{camera_gravity_vec}"
+            )
+        camera_gravity_vec = (
+            camera_gravity_vec / gravity_norm
+        ).astype(np.float32, copy=False)
+
+        camera_tilt_deg = np.float32(
+            np.degrees(
+                np.arccos(
+                    np.clip(float(camera_pose_vec[2]), -1.0, 1.0)
+                )
+            )
+        )
+        return camera_pose_vec, camera_gravity_vec, camera_tilt_deg
+
+    def build_camera_pose_vec(self, scene, anno_idx):
+        """Backward-compatible wrapper returning view vector and tilt."""
+        camera_pose_vec, _, camera_tilt_deg = (
+            self.build_camera_orientation_metadata(scene, anno_idx)
+        )
+        return camera_pose_vec, camera_tilt_deg
+
+    def build_camera_gravity_vec(self, scene, anno_idx):
+        """Return table normal/world-up expressed in the camera frame."""
+        _, camera_gravity_vec, _ = (
+            self.build_camera_orientation_metadata(scene, anno_idx)
+        )
+        return camera_gravity_vec
+
     def augment_data(self, point_clouds, object_poses_list):
         if np.random.random() > 0.5:
             flip_mat = np.array([[-1, 0, 0],
@@ -692,6 +855,11 @@ class GraspNetMultiDataset(Dataset):
 
         scene_idx = int(scene.split('_')[-1])
         anno_idx = int(self.frameid[index])
+        (
+            camera_pose_vec,
+            camera_gravity_vec,
+            camera_tilt_deg,
+        ) = self.build_camera_orientation_metadata(scene, anno_idx)
 
         ret_dict = {
             'point_clouds': cloud_sampled.astype(np.float32),
@@ -706,6 +874,9 @@ class GraspNetMultiDataset(Dataset):
             'depth_prob_weight': depth_prob_w,         # (1, Nfeat)
             # 'depth': sensor_depth_m_resized[None].astype(np.float32),   # (1,448,448)
             'sensor_depth_m': sensor_depth_m_resized.astype(np.float32),# (448,448), debug
+            'camera_pose_vec': camera_pose_vec,
+            'camera_gravity_vec': camera_gravity_vec,
+            'camera_tilt_deg': camera_tilt_deg,
             'scene_idx': np.int64(scene_idx),
             'anno_idx': np.int64(anno_idx),
             'dataset_idx': np.int64(index),
@@ -1101,6 +1272,11 @@ class GraspNetMultiDataset(Dataset):
 
         scene_idx = int(scene.split('_')[-1])
         anno_idx = int(self.frameid[index])
+        (
+            camera_pose_vec,
+            camera_gravity_vec,
+            camera_tilt_deg,
+        ) = self.build_camera_orientation_metadata(scene, anno_idx)
         # -----------------------------
         # 7) return dict
         # -----------------------------
@@ -1140,6 +1316,9 @@ class GraspNetMultiDataset(Dataset):
             # 'depth': sensor_depth_m_resized[None].astype(np.float32),
             'sensor_depth_m': sensor_depth_m_resized.astype(np.float32),
             
+            'camera_pose_vec': camera_pose_vec,
+            'camera_gravity_vec': camera_gravity_vec,
+            'camera_tilt_deg': camera_tilt_deg,
             'scene_idx': np.int64(scene_idx),
             'anno_idx': np.int64(anno_idx),
             'dataset_idx': np.int64(index),

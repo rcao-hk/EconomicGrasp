@@ -1,4 +1,4 @@
-"""Strict inference for the CDF-only first-generation CVA Transformer."""
+"""Strict inference for switchable legacy/CDF CVA Transformer heads."""
 
 import os
 import time
@@ -14,7 +14,7 @@ from utils.collision_detector import ModelFreeCollisionDetectorTorch
 from dataset.graspnet_dataset import GraspNetMultiDataset, collate_fn
 from models.economicgrasp_bip3d import (
     economicgrasp_dpt,
-    pred_decode_center_view_angle_cdf,
+    pred_decode_center_view_angle,
 )
 
 
@@ -59,7 +59,7 @@ def _move_fixed_inputs(batch, device):
 def _load_checkpoint_strict(model, checkpoint_path: str) -> None:
     if not checkpoint_path or not os.path.isfile(checkpoint_path):
         raise FileNotFoundError(
-            f"CDF model checkpoint not found: {checkpoint_path}"
+            f"CVA model checkpoint not found: {checkpoint_path}"
         )
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     state = (
@@ -70,17 +70,17 @@ def _load_checkpoint_strict(model, checkpoint_path: str) -> None:
     result = model.load_state_dict(state, strict=True)
     if result.missing_keys or result.unexpected_keys:
         raise RuntimeError(
-            "Strict CDF checkpoint loading produced missing/unexpected keys: "
+            "Strict CVA checkpoint loading produced missing/unexpected keys: "
             f"missing={result.missing_keys}, unexpected={result.unexpected_keys}"
         )
 
 
 def inference() -> None:
     if not cfgs.multi_modal:
-        raise RuntimeError("CDF CVA inference requires --multi_modal.")
+        raise RuntimeError("CVA inference requires --multi_modal.")
     if bool(getattr(cfgs, "kview_use_collision", False)):
         raise RuntimeError(
-            "The cleaned CDF model has no learned collision head. Remove "
+            "This CVA configuration has no learned collision head. Remove "
             "--kview_use_collision."
         )
     if not cfgs.save_dir:
@@ -115,23 +115,29 @@ def inference() -> None:
     scene_list = full_dataset.scene_list()
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    use_cdf = bool(getattr(cfgs, "use_cdf", False))
+
+    print(f"[INFER] total={len(full_dataset)} selected={len(eval_dataset)}")
+    print(
+        f"[INFER] cdf={int(use_cdf)} "
+        f"top4={bool(getattr(cfgs, 'use_top4_view_infer', False))} "
+        f"batch={cfgs.batch_size} observed_depth={bool(cfgs.use_obs_depth)} "
+        f"pose_aware_depth={bool(cfgs.use_pose_aware_depth)}"
+    )
+    
     model = economicgrasp_dpt(
         min_depth=cfgs.min_depth,
         max_depth=cfgs.max_depth,
         bin_num=cfgs.bin_num,
         is_training=False,
         use_obs_depth=bool(getattr(cfgs, "use_obs_depth", False)),
+        use_pose_aware_depth=bool(getattr(cfgs, "use_pose_aware_depth", False)),
+        use_cdf=use_cdf,
         vis_dir=getattr(cfgs, "vis_dir", None),
         vis_every=int(getattr(cfgs, "vis_every", 1000)),
     ).to(device)
     _load_checkpoint_strict(model, cfgs.checkpoint_path)
     model.eval()
-
-    print(f"[INFER] total={len(full_dataset)} selected={len(eval_dataset)}")
-    print(
-        f"[INFER] top4={bool(getattr(cfgs, 'use_top4_view_infer', False))} "
-        f"batch={cfgs.batch_size} observed_depth={bool(cfgs.use_obs_depth)}"
-    )
 
     start = time.perf_counter()
     processed = 0
@@ -140,7 +146,10 @@ def inference() -> None:
         batch["cva_export_angle_feature"] = False
         with torch.inference_mode():
             end_points = model(batch)
-            grasp_preds = pred_decode_center_view_angle_cdf(end_points)
+            grasp_preds = pred_decode_center_view_angle(
+                end_points,
+                use_cdf=use_cdf,
+            )
 
         for sample_i, pred in enumerate(grasp_preds):
             subset_idx = batch_idx * cfgs.batch_size + sample_i
