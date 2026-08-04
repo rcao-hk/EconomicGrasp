@@ -116,13 +116,20 @@ def inference() -> None:
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     use_cdf = bool(getattr(cfgs, "use_cdf", False))
+    pose_depth_mode = getattr(cfgs, "pose_depth_mode", None)
+    pose_depth_mode = str(pose_depth_mode)
+    if bool(getattr(cfgs, "use_obs_depth", False)) and pose_depth_mode != "none":
+        raise ValueError(
+            f"pose_depth_mode={pose_depth_mode!r} cannot be combined with "
+            "--use_obs_depth."
+        )
 
     print(f"[INFER] total={len(full_dataset)} selected={len(eval_dataset)}")
     print(
         f"[INFER] cdf={int(use_cdf)} "
         f"top4={bool(getattr(cfgs, 'use_top4_view_infer', False))} "
         f"batch={cfgs.batch_size} observed_depth={bool(cfgs.use_obs_depth)} "
-        f"pose_aware_depth={bool(cfgs.use_pose_aware_depth)}"
+        f"pose_depth_mode={pose_depth_mode}"
     )
     
     model = economicgrasp_dpt(
@@ -131,7 +138,20 @@ def inference() -> None:
         bin_num=cfgs.bin_num,
         is_training=False,
         use_obs_depth=bool(getattr(cfgs, "use_obs_depth", False)),
-        use_pose_aware_depth=bool(getattr(cfgs, "use_pose_aware_depth", False)),
+        pose_depth_mode=pose_depth_mode,
+        camera_pose_key=str(
+            getattr(cfgs, "camera_pose_key", "camera_pose_vec")
+        ),
+        camera_gravity_key=str(
+            getattr(cfgs, "camera_gravity_key", "camera_gravity_vec")
+        ),
+        pose_hidden_dim=int(getattr(cfgs, "pose_hidden_dim", 64)),
+        ray_gravity_hidden_dim=int(
+            getattr(cfgs, "ray_gravity_hidden_dim", 64)
+        ),
+        ray_gravity_mid_dim=int(
+            getattr(cfgs, "ray_gravity_mid_dim", 32)
+        ),
         use_cdf=use_cdf,
         vis_dir=getattr(cfgs, "vis_dir", None),
         vis_every=int(getattr(cfgs, "vis_every", 1000)),

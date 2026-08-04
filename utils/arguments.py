@@ -82,7 +82,6 @@ parser.add_argument("--save_root", type=str)
                     # help="If set, compute depth metrics only on object foreground area from objectness_label_tok.")
 parser.add_argument("--oracle_mode", type=str,)
 parser.add_argument("--use_obs_depth", action='store_true')
-parser.add_argument("--use_pose_aware_depth", action='store_true')
 parser.add_argument("--use_depth_comp", action='store_true')
 parser.add_argument("--graspness_mode", type=str,)
 parser.add_argument("--kview_mode", type=str, default='A1')
@@ -128,6 +127,17 @@ parser.add_argument(
     default=(
         "economic_grasp_label_300views_"
         "extend_angle_cdf_depth"
+    ),
+)
+
+parser.add_argument(
+    "--pose_depth_mode",
+    type=str,
+    default="none",
+    choices=("none", "global_film", "ray_gravity_film"),
+    help=(
+        "Camera-pose conditioning used only by the RGB metric-depth DPT: "
+        "none, global channel-wise FiLM, or dense ray-gravity FiLM."
     ),
 )
 

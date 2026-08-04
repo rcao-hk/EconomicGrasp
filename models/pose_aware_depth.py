@@ -35,48 +35,6 @@ POSE_DEPTH_MODES = (
 )
 
 
-def resolve_pose_depth_mode(
-    pose_depth_mode: Optional[str] = "none",
-    use_pose_aware_depth: Optional[bool] = None,
-) -> str:
-    """Resolve the new mode flag while keeping legacy boolean compatibility.
-
-    ``use_pose_aware_depth=True`` maps to ``global_film``.  The legacy flag is
-    only consulted when ``pose_depth_mode`` is absent/``none``.  Supplying a
-    conflicting explicit mode and legacy flag raises an error.
-    """
-
-    mode = "none" if pose_depth_mode is None else str(pose_depth_mode).strip().lower()
-    aliases = {
-        "off": "none",
-        "false": "none",
-        "global": "global_film",
-        "pose_film": "global_film",
-        "ray_gravity": "ray_gravity_film",
-        "dense_film": "ray_gravity_film",
-    }
-    mode = aliases.get(mode, mode)
-
-    if mode not in POSE_DEPTH_MODES:
-        raise ValueError(
-            f"Unsupported pose_depth_mode={pose_depth_mode!r}. "
-            f"Expected one of {POSE_DEPTH_MODES}."
-        )
-
-    if use_pose_aware_depth is not None:
-        legacy_mode = "global_film" if bool(use_pose_aware_depth) else "none"
-        if mode == "none":
-            mode = legacy_mode
-        elif mode != legacy_mode and bool(use_pose_aware_depth):
-            raise ValueError(
-                "Conflicting pose-depth configuration: "
-                f"pose_depth_mode={mode!r}, "
-                f"use_pose_aware_depth={use_pose_aware_depth}."
-            )
-
-    return mode
-
-
 def _as_feature_tensor(feature: Any) -> torch.Tensor:
     if isinstance(feature, (tuple, list)):
         if len(feature) < 1:

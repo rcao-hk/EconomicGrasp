@@ -628,7 +628,7 @@ class Trainer:
             bin_num=cfgs.bin_num,
             is_training=True,
             use_obs_depth=bool(getattr(cfgs, 'use_obs_depth', False)),
-            use_pose_aware_depth=bool(getattr(cfgs, 'use_pose_aware_depth', False)),
+            pose_depth_mode=getattr(cfgs, "pose_depth_mode", None),
             use_depth_comp=False,
             use_cdf=self.use_cdf,
             vis_dir=getattr(cfgs, 'vis_dir', None) if self.main else None,

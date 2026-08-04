@@ -15,7 +15,6 @@ from models.economicgrasp import economicgrasp as EconomicGrasp3D
 from models.pose_aware_depth import (
     PoseAwareDPTFiLM,
     RayGravityDenseDPTFiLM,
-    resolve_pose_depth_mode,
 )
 import open3d as o3d
 import os
@@ -411,8 +410,6 @@ class DINOv2DepthRegressionNet(nn.Module):
         max_depth=1.0,
         freeze_backbone=True,
         pose_depth_mode="none",
-        # Legacy compatibility. True maps to global_film.
-        use_pose_aware_depth=None,
         pose_hidden_dim=64,
         ray_gravity_hidden_dim=64,
         ray_gravity_mid_dim=32,
@@ -423,11 +420,7 @@ class DINOv2DepthRegressionNet(nn.Module):
         self.min_depth = float(min_depth)
         self.max_depth = float(max_depth)
         self.freeze_backbone_flag = bool(freeze_backbone)
-        self.pose_depth_mode = resolve_pose_depth_mode(
-            pose_depth_mode,
-            use_pose_aware_depth=use_pose_aware_depth,
-        )
-        self.use_pose_aware_depth = self.pose_depth_mode != "none"
+        self.pose_depth_mode = pose_depth_mode
 
         model_configs = {
             "vits": {

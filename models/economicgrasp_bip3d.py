@@ -29,7 +29,11 @@ import matplotlib.pyplot as plt
 #   - Grasp_Head_Local_Interaction
 #   - process_grasp_labels
 # -----------------------------------------------------------------------------
-from .economicgrasp_depth import DINOv2DepthDistributionNet, DINOv2DepthRegressionNet, DepthRefine
+from .economicgrasp_depth import (
+    DINOv2DepthDistributionNet,
+    DINOv2DepthRegressionNet,
+    DepthRefine,
+)
 from models.bip3d.models.modules.resnet import ResNet
 from models.bip3d.models.modules.channel_mapper import ChannelMapper
 from .economicgrasp_depth_c1 import TokGraspableHead2D
@@ -5208,14 +5212,6 @@ class DepthDisLocalAttnGrouping(nn.Module):
         self._vis_iter += 1
         return group_features
 
- 
-def get_model(cfgs):
-    return economicgrasp_dpt(
-        is_training=False,
-        vis_dir=getattr(cfgs, "save_dir", None),
-        vis_every=500,
-    )
-
 
 class MetricRegionCropGrouping(nn.Module):
     """
@@ -6382,9 +6378,12 @@ class economicgrasp_dpt(nn.Module):
         use_gt_xyz_for_train: bool = False,
         is_training: bool = True,
         use_obs_depth: bool = False,
-        use_pose_aware_depth: bool = False,
+        pose_depth_mode: str = "none",
         camera_pose_key: str = "camera_pose_vec",
+        camera_gravity_key: str = "camera_gravity_vec",
         pose_hidden_dim: int = 64,
+        ray_gravity_hidden_dim: int = 64,
+        ray_gravity_mid_dim: int = 32,
         use_depth_comp: bool = False,
         use_cdf: bool = False,
         vis_dir: Optional[str] = 'vis_dpt',
@@ -6403,13 +6402,17 @@ class economicgrasp_dpt(nn.Module):
         self.max_depth = float(max_depth)
         self.bin_num = int(bin_num)
         self.use_obs_depth = bool(use_obs_depth)
-        self.use_pose_aware_depth = bool(use_pose_aware_depth)
+        self.pose_depth_mode = pose_depth_mode
         self.camera_pose_key = str(camera_pose_key)
+        self.camera_gravity_key = str(camera_gravity_key)
         self.pose_hidden_dim = int(pose_hidden_dim)
-        if self.use_pose_aware_depth and self.use_obs_depth:
+        self.ray_gravity_hidden_dim = int(ray_gravity_hidden_dim)
+        self.ray_gravity_mid_dim = int(ray_gravity_mid_dim)
+        if self.pose_depth_mode != "none" and self.use_obs_depth:
             raise ValueError(
-                "use_pose_aware_depth=True is an RGB-only depth setting and "
-                "cannot be combined with use_obs_depth=True."
+                f"pose_depth_mode={self.pose_depth_mode!r} is an RGB-only "
+                "depth setting and cannot be combined with "
+                "use_obs_depth=True."
             )
         self.use_depth_comp = bool(use_depth_comp)
         # CDF is an explicit model choice. Geometry diagnostics follow
@@ -6439,8 +6442,10 @@ class economicgrasp_dpt(nn.Module):
             min_depth=self.min_depth,
             max_depth=self.max_depth,
             freeze_backbone=freeze_backbone,
-            use_pose_aware_depth=self.use_pose_aware_depth,
+            pose_depth_mode=self.pose_depth_mode,
             pose_hidden_dim=self.pose_hidden_dim,
+            ray_gravity_hidden_dim=self.ray_gravity_hidden_dim,
+            ray_gravity_mid_dim=self.ray_gravity_mid_dim,
         )
 
         model_configs = {
@@ -6831,8 +6836,8 @@ class economicgrasp_dpt(nn.Module):
                 + str(int(self.use_geometry_diagnostics))
                 + ", obs_depth="
                 + str(int(self.use_obs_depth))
-                + ", pose_aware_depth="
-                + str(int(self.use_pose_aware_depth)),
+                + ", pose_depth_mode="
+                + self.pose_depth_mode,
                 flush=True,
             )
 
@@ -7291,13 +7296,21 @@ class economicgrasp_dpt(nn.Module):
         # )
 
         camera_pose_vec = None
-        if self.use_pose_aware_depth:
+        camera_gravity_vec = None
+        if self.pose_depth_mode == "global_film":
             if self.camera_pose_key not in end_points:
                 raise KeyError(
-                    "use_pose_aware_depth=True requires "
+                    "pose_depth_mode='global_film' requires "
                     f"end_points['{self.camera_pose_key}'] with shape (B,3)."
                 )
             camera_pose_vec = end_points[self.camera_pose_key]
+        elif self.pose_depth_mode == "ray_gravity_film":
+            if self.camera_gravity_key not in end_points:
+                raise KeyError(
+                    "pose_depth_mode='ray_gravity_film' requires "
+                    f"end_points['{self.camera_gravity_key}'] with shape (B,3)."
+                )
+            camera_gravity_vec = end_points[self.camera_gravity_key]
 
         (
             depth_net_pred_448,
@@ -7309,6 +7322,8 @@ class economicgrasp_dpt(nn.Module):
         ) = self.depth_net(
             img,
             camera_pose_vec=camera_pose_vec,
+            camera_gravity_vec=camera_gravity_vec,
+            camera_K=K,
             return_feats=True,
             return_raw=True,
             return_pose_aux=True,
@@ -7416,10 +7431,24 @@ class economicgrasp_dpt(nn.Module):
         # raw 1-channel head output, debug only
         end_points["depth_head_raw_pred"] = depth_head_raw_448
 
-        if self.use_pose_aware_depth:
-            end_points["camera_pose_unit"] = pose_depth_aux[
-                "camera_pose_unit"
-            ]
+        if self.pose_depth_mode != "none":
+            # Common mode-independent diagnostics.
+            for key in (
+                "pose_depth_gamma_abs_mean",
+                "pose_depth_beta_abs_mean",
+                "pose_depth_gamma_abs_mean_levels",
+                "pose_depth_beta_abs_mean_levels",
+                "pose_depth_gamma_abs_max_levels",
+                "pose_depth_beta_abs_max_levels",
+                "pose_depth_gamma_spatial_std",
+                "pose_depth_beta_spatial_std",
+                "pose_depth_gamma_spatial_std_levels",
+                "pose_depth_beta_spatial_std_levels",
+            ):
+                if key in pose_depth_aux:
+                    end_points[key] = pose_depth_aux[key]
+
+            # Preserve the old logger keys for global-FiLM checkpoints/scripts.
             end_points["pose_film_gamma_abs_mean"] = pose_depth_aux[
                 "pose_film_gamma_abs_mean"
             ]
@@ -7432,12 +7461,53 @@ class economicgrasp_dpt(nn.Module):
             end_points["pose_film_beta_abs_mean_levels"] = pose_depth_aux[
                 "pose_film_beta_abs_mean_levels"
             ]
+
+            if "camera_pose_unit" in pose_depth_aux:
+                end_points["camera_pose_unit"] = pose_depth_aux[
+                    "camera_pose_unit"
+                ]
+            if "camera_gravity_unit" in pose_depth_aux:
+                end_points["camera_gravity_unit"] = pose_depth_aux[
+                    "camera_gravity_unit"
+                ]
+            for key in (
+                "ray_gravity_alignment_mean",
+                "ray_gravity_alignment_min",
+                "ray_gravity_alignment_max",
+                "ray_gravity_alignment_map",
+            ):
+                if key in pose_depth_aux:
+                    end_points[key] = pose_depth_aux[key]
+
+            end_points["D: PoseDepth gamma abs mean"] = pose_depth_aux[
+                "pose_depth_gamma_abs_mean"
+            ].reshape(())
+            end_points["D: PoseDepth beta abs mean"] = pose_depth_aux[
+                "pose_depth_beta_abs_mean"
+            ].reshape(())
+            end_points["D: PoseDepth gamma spatial std"] = pose_depth_aux[
+                "pose_depth_gamma_spatial_std"
+            ].reshape(())
+            end_points["D: PoseDepth beta spatial std"] = pose_depth_aux[
+                "pose_depth_beta_spatial_std"
+            ].reshape(())
+            # Legacy names retained for existing training-log tooling.
             end_points["D: PoseFiLM gamma abs mean"] = pose_depth_aux[
                 "pose_film_gamma_abs_mean"
             ].reshape(())
             end_points["D: PoseFiLM beta abs mean"] = pose_depth_aux[
                 "pose_film_beta_abs_mean"
             ].reshape(())
+            if "ray_gravity_alignment_mean" in pose_depth_aux:
+                end_points["D: RayGravity alignment mean"] = pose_depth_aux[
+                    "ray_gravity_alignment_mean"
+                ].reshape(())
+                end_points["D: RayGravity alignment min"] = pose_depth_aux[
+                    "ray_gravity_alignment_min"
+                ].reshape(())
+                end_points["D: RayGravity alignment max"] = pose_depth_aux[
+                    "ray_gravity_alignment_max"
+                ].reshape(())
 
         if self.use_obs_depth:
             end_points["obs_depth_m_used"] = obs_depth_448
@@ -7845,7 +7915,7 @@ class economicgrasp_dpt(nn.Module):
                     f"cdf={int(self.use_cdf)} "
                     f"geomdiag={int(self.use_geometry_diagnostics)} "
                     f"obs={int(self.use_obs_depth)} "
-                    f"poseD={int(self.use_pose_aware_depth)} "
+                    f"poseD={self.pose_depth_mode} "
                     f"graspable={end_points['D: Graspable Points'].item():.1f} "
                     f"cand={end_points['D: PredCand#(thr)'].item():.1f} "
                     f"obj={end_points['D: PredObj#'].item():.1f} "
@@ -7857,10 +7927,11 @@ class economicgrasp_dpt(nn.Module):
                     msg += f" z_mae={end_points['D: Depth final MAE'].item():.4f}"
                 if "D: Depth refine gain" in end_points:
                     msg += f" refine_gain={end_points['D: Depth refine gain'].item():.4f}"
-                if "D: PoseFiLM gamma abs mean" in end_points:
+                if "D: PoseDepth gamma abs mean" in end_points:
                     msg += (
-                        f" pose_gamma={end_points['D: PoseFiLM gamma abs mean'].item():.6f}"
-                        f" pose_beta={end_points['D: PoseFiLM beta abs mean'].item():.6f}"
+                        f" pose_gamma={end_points['D: PoseDepth gamma abs mean'].item():.6f}"
+                        f" pose_beta={end_points['D: PoseDepth beta abs mean'].item():.6f}"
+                        f" pose_gstd={end_points['D: PoseDepth gamma spatial std'].item():.6f}"
                     )
                 print(msg)
 
@@ -7991,6 +8062,8 @@ def pred_decode_collision_filter(end_points):
         grasp_preds.append(pred)
 
     return grasp_preds
+
+
 
 
 def _cva_decode_query_indices(
