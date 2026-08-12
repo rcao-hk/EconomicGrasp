@@ -501,6 +501,33 @@ class DINOv2DepthRegressionNet(nn.Module):
             self._freeze_backbone()
         return self
 
+    def extract_backbone_features(self, img: torch.Tensor):
+        """Return the raw multi-level DINO features without running depth DPT.
+
+        The privileged clean-depth teacher still needs the same RGB/DINO features
+        used by the proposal head, but must not execute the metric-depth decoder.
+        When the DINO backbone is frozen, feature extraction is performed under
+        ``no_grad`` to avoid retaining an unnecessary autograd graph.
+        """
+        batch_size, _, height, width = img.shape
+        if (height, width) != (448, 448):
+            raise ValueError(
+                f"DINOv2DepthRegressionNet expects 448x448 input, got "
+                f"{height}x{width}."
+            )
+
+        def _extract():
+            return self.depthnet.pretrained.get_intermediate_layers(
+                img,
+                self.depthnet.intermediate_layer_idx[self.depthnet.encoder],
+                return_class_token=True,
+            )
+
+        if self.freeze_backbone_flag:
+            with torch.no_grad():
+                return _extract()
+        return _extract()
+
     def forward(
         self,
         img,
@@ -525,11 +552,7 @@ class DINOv2DepthRegressionNet(nn.Module):
             )
 
         patch_h, patch_w = height // 14, width // 14
-        feats = self.depthnet.pretrained.get_intermediate_layers(
-            img,
-            self.depthnet.intermediate_layer_idx[self.depthnet.encoder],
-            return_class_token=True,
-        )
+        feats = self.extract_backbone_features(img)
 
         depth_feats = feats
         pose_aux = {}
