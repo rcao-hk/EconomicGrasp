@@ -825,14 +825,12 @@ def inference() -> None:
         raise ValueError("--test_mode is required for inference.")
 
     use_obs_depth = bool(getattr(cfgs, "use_obs_depth", False))
-    use_pose_aware_depth = bool(
-        getattr(cfgs, "use_pose_aware_depth", False)
-    )
-    if use_obs_depth and use_pose_aware_depth:
+    pose_depth_mode = getattr(cfgs, "pose_depth_mode", None)
+    pose_depth_mode = str(pose_depth_mode)
+    if use_obs_depth and pose_depth_mode != "none":
         raise RuntimeError(
-            "Pose-aware RGB-only depth and observed-depth refinement are "
-            "mutually exclusive. Disable one of --use_pose_aware_depth and "
-            "--use_obs_depth."
+            f"pose_depth_mode={pose_depth_mode!r} and observed-depth "
+            "refinement are mutually exclusive."
         )
 
     os.makedirs(cfgs.save_dir, exist_ok=True)
@@ -873,7 +871,7 @@ def inference() -> None:
     print(
         f"[INFER] cdf={int(use_cdf)} top4={int(use_top4)} "
         f"batch={cfgs.batch_size} observed_depth={int(use_obs_depth)} "
-        f"pose_aware_depth={int(use_pose_aware_depth)}"
+        f"pose_depth_mode={pose_depth_mode}"
     )
     print(
         f"[DEPTH-DIAG] output={diag_dir} "
@@ -888,7 +886,20 @@ def inference() -> None:
         bin_num=cfgs.bin_num,
         is_training=False,
         use_obs_depth=use_obs_depth,
-        use_pose_aware_depth=use_pose_aware_depth,
+        pose_depth_mode=pose_depth_mode,
+        camera_pose_key=str(
+            getattr(cfgs, "camera_pose_key", "camera_pose_vec")
+        ),
+        camera_gravity_key=str(
+            getattr(cfgs, "camera_gravity_key", "camera_gravity_vec")
+        ),
+        pose_hidden_dim=int(getattr(cfgs, "pose_hidden_dim", 64)),
+        ray_gravity_hidden_dim=int(
+            getattr(cfgs, "ray_gravity_hidden_dim", 64)
+        ),
+        ray_gravity_mid_dim=int(
+            getattr(cfgs, "ray_gravity_mid_dim", 32)
+        ),
         use_cdf=use_cdf,
         vis_dir=getattr(cfgs, "vis_dir", None),
         vis_every=int(getattr(cfgs, "vis_every", 1000)),
@@ -904,7 +915,7 @@ def inference() -> None:
         "camera": cfgs.camera,
         "num_selected_samples": len(eval_dataset),
         "sample_interval": float(getattr(cfgs, "sample_interval", 1.0)),
-        "use_pose_aware_depth": use_pose_aware_depth,
+        "pose_depth_mode": pose_depth_mode,
         "use_obs_depth": use_obs_depth,
         "use_cdf": use_cdf,
         "use_top4_view_infer": use_top4,

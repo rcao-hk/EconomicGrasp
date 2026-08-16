@@ -38,14 +38,15 @@ def _parse_distillation_args():
         help=(
             "0: privileged clean-depth image-FPS teacher; "
             "1: RGB/predicted-depth image-FPS student with GT losses; "
-            "2: the same RGB student with frozen Stage-0 output KD and exact "
-            "shared image-FPS seeds."
+            "2: the same RGB student with frozen Stage-0 E1 output KD; the "
+            "student selects image-FPS seeds autonomously and the teacher "
+            "reuses those exact student seeds."
         ),
     )
     parser.add_argument("--teacher_checkpoint", type=str, default="")
     parser.add_argument("--distill_weight", type=float, default=1.0)
-    parser.add_argument("--kd_objectness_weight", type=float, default=1.0)
-    parser.add_argument("--kd_graspness_weight", type=float, default=1.0)
+    parser.add_argument("--kd_objectness_weight", type=float, default=0.0)
+    parser.add_argument("--kd_graspness_weight", type=float, default=0.0)
     parser.add_argument("--kd_depth_weight", type=float, default=0.0)
     parser.add_argument("--kd_view_weight", type=float, default=1.0)
     parser.add_argument("--kd_cdf_weight", type=float, default=1.0)
@@ -624,6 +625,10 @@ class Trainer:
         self.teacher_geometry_depth_source = (
             "gt" if self.distill_stage == 2 else None
         )
+        # E2 protocol: the deployed RGB student owns proposal selection. During
+        # Stage 2 training it therefore runs image-FPS autonomously first; the
+        # frozen clean-depth teacher is evaluated at those exact student seeds.
+        self.stage2_seed_source = "student" if self.distill_stage == 2 else None
         self.train_pose_depth_mode = (
             "none"
             if self.distill_stage == 0
@@ -1020,6 +1025,10 @@ class Trainer:
                     f"-> frozen clean-depth teacher: "
                     f"{DISTILL_ARGS.teacher_checkpoint}"
                 )
+                self.log_string(
+                    "-> Stage-2 protocol: E1 privileged-output KD "
+                    "(view/CDF/width by default) + E2 student-driven image-FPS"
+                )
 
         if self.distributed:
             # IMPORTANT: keep device_ids=None.
@@ -1107,6 +1116,17 @@ class Trainer:
                         f"{checkpoint.get('pose_depth_mode')!r}, current="
                         f"{self.train_pose_depth_mode!r}."
                     )
+                if self.distill_stage == 2:
+                    saved_seed_source = str(
+                        checkpoint.get('stage2_seed_source', '')
+                    )
+                    if saved_seed_source != 'student':
+                        raise RuntimeError(
+                            '--resume Stage-2 seed-source mismatch: E2 requires '
+                            "stage2_seed_source='student'. Start a new E1+E2 "
+                            'Stage-2 run from the Stage-1 checkpoint instead of '
+                            'resuming an older teacher-driven Stage-2 checkpoint.'
+                        )
                 self.unwrap_model().load_state_dict(state_dict, strict=True)
                 if not (
                     isinstance(checkpoint, dict)
@@ -1308,15 +1328,39 @@ class Trainer:
                 use_cdf=self.use_cdf,
             )
 
-            teacher_targets = None
+            # E2: preserve a pristine teacher input before the trainable
+            # student mutates the top-level endpoint dictionary. The student
+            # must run first and select its own deployment-time image-FPS seeds.
+            teacher_input = None
             if self.teacher is not None:
-                # Both models mutate the top-level endpoint dictionary. A
-                # shallow copy is sufficient: fixed-size tensors and CPU label
-                # lists are read-only in the frozen inference teacher.
+                batch_data_label.pop("image_fps_seed_idx_override", None)
                 teacher_input = dict(batch_data_label)
                 teacher_input["cva_compute_diagnostics"] = False
                 teacher_input["geometry_compute_diagnostics"] = False
                 teacher_input["cva_export_angle_feature"] = False
+
+            model_start_time = time.perf_counter()
+            end_points = self.net(batch_data_label)
+            if batch_idx == 0:
+                assert_geometry_depth_contract(
+                    end_points,
+                    expected_source=self.train_geometry_depth_source,
+                    context=f"stage{self.distill_stage} train epoch={epoch}",
+                )
+            model_end_time = time.perf_counter()
+            interval_model_time += (model_end_time - model_start_time)
+
+            teacher_targets = None
+            if self.teacher is not None:
+                # Student-driven shared image-FPS: the RGB student determines
+                # the exact ordered [B,M] seed indices used at deployment. The
+                # privileged teacher then evaluates clean geometry at those same
+                # image locations, avoiding the former teacher-seed train/test
+                # mismatch while retaining exact query-center correspondence in
+                # image space.
+                student_idx = end_points["kview_base_token_sel_idx"].detach().long()
+                teacher_input["image_fps_seed_idx_override"] = student_idx
+
                 teacher_start_time = time.perf_counter()
                 # Use no_grad rather than inference_mode: teacher targets are
                 # consumed by student losses whose backward kernels may save
@@ -1333,47 +1377,28 @@ class Trainer:
                     teacher_targets = extract_distillation_targets(
                         teacher_end_points
                     )
-                del teacher_end_points, teacher_input
                 teacher_end_time = time.perf_counter()
                 interval_teacher_time += (
                     teacher_end_time - teacher_start_time
                 )
 
-            if teacher_targets is not None:
-                # Teacher computes deterministic image-FPS once. The student
-                # consumes the exact ordered [B,M] indices, eliminating all
-                # base-seed matching and the former 3D-FPS/image-query gap.
-                batch_data_label["image_fps_seed_idx_override"] = (
-                    teacher_targets["kview_base_token_sel_idx"]
-                )
-
-            model_start_time = time.perf_counter()
-            end_points = self.net(batch_data_label)
-            if batch_idx == 0:
-                assert_geometry_depth_contract(
-                    end_points,
-                    expected_source=self.train_geometry_depth_source,
-                    context=f"stage{self.distill_stage} train epoch={epoch}",
-                )
-            if teacher_targets is not None:
                 shared_idx = teacher_targets["kview_base_token_sel_idx"].to(
-                    device=end_points["kview_base_token_sel_idx"].device,
+                    device=student_idx.device,
                     dtype=torch.long,
                 )
-                student_idx = end_points["kview_base_token_sel_idx"].long()
                 if not torch.equal(student_idx, shared_idx):
                     raise RuntimeError(
-                        "Teacher/student base seeds are not the exact same "
-                        "ordered image-FPS indices."
+                        "E2 requires the teacher to reuse the student's exact "
+                        "ordered image-FPS indices, but the indices differ."
                     )
                 end_points["D: Shared image-FPS exact ratio"] = (
                     (student_idx == shared_idx).float().mean().reshape(())
                 )
-                # Do not retain the transport-only key in endpoint logging or
-                # checkpoint diagnostics.
-                end_points.pop("image_fps_seed_idx_override", None)
-            model_end_time = time.perf_counter()
-            interval_model_time += (model_end_time - model_start_time)
+                end_points["D: Stage2 student autonomous image-FPS"] = (
+                    end_points["D: Shared image-FPS exact ratio"].new_tensor(1.0)
+                )
+                del teacher_end_points, teacher_input
+
 
             end_points['epoch'] = epoch
 
@@ -1602,7 +1627,9 @@ class Trainer:
                 'ray_gravity_mid_dim': int(getattr(cfgs, 'ray_gravity_mid_dim', 32)),
                 'use_fuse_depth': bool(cfgs.use_fuse_depth),
                 'legacy_dataset_use_gt_depth': False,
-                'stage2_shared_teacher_image_fps': bool(self.distill_stage == 2),
+                'stage2_shared_teacher_image_fps': False,
+                'stage2_seed_source': self.stage2_seed_source,
+                'stage2_teacher_reuses_student_image_fps': bool(self.distill_stage == 2),
             },
             os.path.join(cfgs.log_dir, ckpt_name + '.tar'),
         )
@@ -1630,7 +1657,9 @@ class Trainer:
             'ray_gravity_mid_dim': int(getattr(cfgs, 'ray_gravity_mid_dim', 32)),
             'use_fuse_depth': bool(cfgs.use_fuse_depth),
             'legacy_dataset_use_gt_depth': False,
-            'stage2_shared_teacher_image_fps': bool(self.distill_stage == 2),
+            'stage2_shared_teacher_image_fps': False,
+            'stage2_seed_source': self.stage2_seed_source,
+            'stage2_teacher_reuses_student_image_fps': bool(self.distill_stage == 2),
         }
         if save_interval:
             torch.save(save_dict, os.path.join(cfgs.log_dir, f'checkpoint_{epoch}.tar'))

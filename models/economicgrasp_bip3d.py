@@ -6358,13 +6358,18 @@ from models.kview_query_transformer import (
 )
 
 class economicgrasp_dpt(nn.Module):
-    """
-    economicgrasp_dpt:
-      - no enhancer
-      - DINOv2DepthDistributionNet produces depth distribution + returns raw feats
-      - a new DPTHead(out_dim=3) predicts objectness(2) + graspness(1) from the same feats
-      - path_1 from the proposal DPTHead is used as dense seed feature map
-      - seed selection / ViewNet / grouping / grasp head reuse EconomicGrasp pipeline
+    """EconomicGrasp-DPT CVA model with an explicit geometry-depth source.
+
+    The RGB proposal path is shared by both roles. ``geometry_depth_source``
+    controls only the metric depth consumed by spatial enhancement, sparse
+    backprojection, ViewNet, and CVA local analysis:
+
+    * ``pred``: execute the DPT metric-depth decoder (RGB-only student);
+    * ``gt``: use ``end_points["gt_depth_m"]`` and bypass/freeze the DPT
+      decoder (privileged clean-depth teacher).
+
+    Seed selection can be switched independently; the Stage-0--2 distillation
+    experiment forces deterministic image-space FPS for both roles.
     """
     def __init__(
         self,
@@ -6389,6 +6394,8 @@ class economicgrasp_dpt(nn.Module):
         vis_dir: Optional[str] = 'vis_dpt',
         vis_every: int = 500,
         debug_print_every: int = 50,
+        seed_selection_mode: str = "point_fps",
+        geometry_depth_source: str = "pred",
     ):
         super().__init__()
         self.is_training = bool(is_training)
@@ -6402,7 +6409,13 @@ class economicgrasp_dpt(nn.Module):
         self.max_depth = float(max_depth)
         self.bin_num = int(bin_num)
         self.use_obs_depth = bool(use_obs_depth)
-        self.pose_depth_mode = pose_depth_mode
+        self.geometry_depth_source = str(geometry_depth_source).strip().lower()
+        if self.geometry_depth_source not in {"pred", "gt"}:
+            raise ValueError(
+                "geometry_depth_source must be 'pred' or 'gt', got "
+                f"{geometry_depth_source!r}."
+            )
+        self.pose_depth_mode = str(pose_depth_mode or "none")
         self.camera_pose_key = str(camera_pose_key)
         self.camera_gravity_key = str(camera_gravity_key)
         self.pose_hidden_dim = int(pose_hidden_dim)
@@ -6414,6 +6427,17 @@ class economicgrasp_dpt(nn.Module):
                 "depth setting and cannot be combined with "
                 "use_obs_depth=True."
             )
+        if self.geometry_depth_source == "gt":
+            if self.use_obs_depth:
+                raise ValueError(
+                    "geometry_depth_source='gt' is the privileged clean-depth "
+                    "teacher path and cannot be combined with use_obs_depth=True."
+                )
+            if self.pose_depth_mode != "none":
+                raise ValueError(
+                    "geometry_depth_source='gt' bypasses the metric-depth head; "
+                    "pose_depth_mode must therefore be 'none'."
+                )
         self.use_depth_comp = bool(use_depth_comp)
         # CDF is an explicit model choice. Geometry diagnostics follow
         # visualization automatically: a non-empty vis_dir enables them.
@@ -6424,6 +6448,12 @@ class economicgrasp_dpt(nn.Module):
         self.vis_dir = vis_dir
         self.vis_every = int(vis_every)
         self.debug_print_every = int(debug_print_every)
+        self.seed_selection_mode = str(seed_selection_mode).strip().lower()
+        if self.seed_selection_mode not in {"point_fps", "image_fps"}:
+            raise ValueError(
+                "seed_selection_mode must be 'point_fps' or 'image_fps', "
+                f"got {seed_selection_mode!r}."
+            )
         self._vis_iter = 0
         if self.vis_dir is not None:
             os.makedirs(self.vis_dir, exist_ok=True)
@@ -6447,6 +6477,10 @@ class economicgrasp_dpt(nn.Module):
             ray_gravity_hidden_dim=self.ray_gravity_hidden_dim,
             ray_gravity_mid_dim=self.ray_gravity_mid_dim,
         )
+        if self.geometry_depth_source == "gt":
+            # Keep the module/state-dict structure checkpoint-compatible, but the
+            # privileged teacher never executes or optimizes the depth decoder.
+            self.depth_net.requires_grad_(False)
 
         model_configs = {
             'vits': {'embed_dim': 384, 'out_channels': [48, 96, 192, 384]},
@@ -6837,9 +6871,486 @@ class economicgrasp_dpt(nn.Module):
                 + ", obs_depth="
                 + str(int(self.use_obs_depth))
                 + ", pose_depth_mode="
-                + self.pose_depth_mode,
+                + self.pose_depth_mode
+                + ", geometry_depth_source="
+                + self.geometry_depth_source,
                 flush=True,
             )
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.geometry_depth_source == "gt":
+            # The entire depth module is frozen in the privileged teacher. Keep
+            # its DINO feature extractor in eval mode as well, so Stage-0 RGB
+            # proposal features are deterministic and match teacher inference.
+            self.depth_net.eval()
+        return self
+
+    def _prepare_gt_geometry_depth(
+        self,
+        end_points: dict,
+        *,
+        image_hw: Tuple[int, int],
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Normalize the privileged clean depth to ``[B,1,H,W]`` meters.
+
+        ``GraspNetMultiDataset`` always provides ``gt_depth_m`` independently of
+        its legacy ``use_gt_depth`` switch.  This lets the teacher use clean
+        geometry while teacher and student retain identical RGB crops, token
+        labels, and image-FPS coordinates.  Invalid/unknown pixels remain zero
+        and are removed later by the common depth-valid mask.
+        """
+        depth = end_points.get("gt_depth_m", None)
+        if depth is None:
+            raise KeyError(
+                "geometry_depth_source='gt' requires end_points['gt_depth_m']."
+            )
+        if not torch.is_tensor(depth):
+            raise TypeError(
+                "end_points['gt_depth_m'] must be a tensor, got "
+                f"{type(depth)}."
+            )
+        if depth.dim() == 3:
+            depth = depth.unsqueeze(1)
+        elif depth.dim() == 4:
+            depth = depth[:, :1]
+        else:
+            raise ValueError(
+                "gt_depth_m must be [B,H,W] or [B,1,H,W], got "
+                f"{tuple(depth.shape)}."
+            )
+        depth = depth.to(device=device, dtype=dtype)
+        if tuple(depth.shape[-2:]) != tuple(image_hw):
+            depth = F.interpolate(depth, size=image_hw, mode="nearest")
+        return torch.nan_to_num(
+            depth, nan=0.0, posinf=0.0, neginf=0.0
+        ).contiguous()
+
+
+    @staticmethod
+    def _deterministic_fill_indices(
+        selected: torch.Tensor,
+        fallback: torch.Tensor,
+        target_count: int,
+    ) -> torch.Tensor:
+        """Return exactly ``target_count`` indices without stochastic sampling."""
+        target_count = int(target_count)
+        if target_count <= 0:
+            raise ValueError(f"target_count must be positive, got {target_count}.")
+        if selected.numel() >= target_count:
+            return selected[:target_count].contiguous()
+        if selected.numel() == 0:
+            selected = fallback
+        if selected.numel() == 0:
+            raise RuntimeError("No valid image token is available for seed selection.")
+        repeat = (target_count + selected.numel() - 1) // selected.numel()
+        return selected.repeat(repeat)[:target_count].contiguous()
+
+    @staticmethod
+    def _image_uv_coordinates(
+        token_idx: torch.Tensor,
+        height: int,
+        width: int,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Return normalized image coordinates [K,2] for flat token indices."""
+        if token_idx.dim() != 1:
+            raise ValueError(
+                f"token_idx must be one-dimensional, got {tuple(token_idx.shape)}"
+            )
+        u = (token_idx % int(width)).to(dtype=dtype)
+        v = (token_idx // int(width)).to(dtype=dtype)
+        u = u / max(float(width - 1), 1.0)
+        v = v / max(float(height - 1), 1.0)
+        return torch.stack([u, v], dim=-1)
+
+    @staticmethod
+    def _deterministic_fps_2d(
+        coordinates: torch.Tensor,
+        scores: torch.Tensor,
+        num_samples: int,
+    ) -> torch.Tensor:
+        """Deterministic 2D farthest-point sampling.
+
+        The candidate list is reordered so its highest-graspness token is the
+        first FPS seed. On CUDA, the repository's PointNet2 FPS kernel is reused
+        on ``[u, v, 0]`` image coordinates for efficiency; no depth or 3D scene
+        coordinate enters the distance. A pure PyTorch fallback is retained for
+        CPU unit tests.
+        """
+        if coordinates.dim() != 2 or coordinates.shape[-1] != 2:
+            raise ValueError(
+                "coordinates must be [K,2], got "
+                f"{tuple(coordinates.shape)}"
+            )
+        if scores.dim() != 1 or scores.shape[0] != coordinates.shape[0]:
+            raise ValueError(
+                "scores must be [K] and aligned with coordinates; got "
+                f"scores={tuple(scores.shape)}, coords={tuple(coordinates.shape)}"
+            )
+        K = int(coordinates.shape[0])
+        count = min(max(int(num_samples), 0), K)
+        if count == 0:
+            return torch.empty(0, device=coordinates.device, dtype=torch.long)
+
+        coords = coordinates.float()
+        score_clean = torch.nan_to_num(
+            scores.detach().float(), nan=0.0, posinf=0.0, neginf=0.0
+        )
+        first = torch.argmax(score_clean)
+        all_local = torch.arange(K, device=coords.device, dtype=torch.long)
+        order = torch.cat(
+            [first.view(1), all_local[all_local != first]], dim=0
+        )
+        coords_ordered = coords[order]
+
+        if coords_ordered.is_cuda:
+            coords_3d = torch.cat(
+                [
+                    coords_ordered,
+                    torch.zeros(
+                        K,
+                        1,
+                        device=coords.device,
+                        dtype=coords_ordered.dtype,
+                    ),
+                ],
+                dim=-1,
+            ).unsqueeze(0).contiguous()
+            selected_ordered = furthest_point_sample(
+                coords_3d, count
+            ).squeeze(0).long()
+            return order[selected_ordered].contiguous()
+
+        selected = torch.empty(count, device=coords.device, dtype=torch.long)
+        selected_mask = torch.zeros(K, device=coords.device, dtype=torch.bool)
+        min_dist = torch.full(
+            (K,), float("inf"), device=coords.device, dtype=coords.dtype
+        )
+        farthest = first
+        for sample_i in range(count):
+            selected[sample_i] = farthest
+            selected_mask[farthest] = True
+            center = coords[farthest].view(1, 2)
+            dist = ((coords - center) ** 2).sum(dim=-1)
+            min_dist = torch.minimum(min_dist, dist)
+            min_dist = min_dist.masked_fill(selected_mask, -1.0)
+            farthest = torch.argmax(min_dist)
+        return selected.contiguous()
+
+    def _select_image_fps_indices(
+        self,
+        graspable_mask: torch.Tensor,
+        valid_tok: torch.Tensor,
+        grasp_score: torch.Tensor,
+        height: int,
+        width: int,
+    ) -> torch.Tensor:
+        """Select image queries with deterministic 2D FPS.
+
+        FPS runs over the predicted graspable foreground. If fewer than M
+        graspable tokens exist, all of them are kept and the remaining slots are
+        filled by image-FPS over other valid tokens. Only when fewer than M valid
+        pixels exist are indices repeated deterministically.
+        """
+        B, N = grasp_score.shape
+        if N != int(height) * int(width):
+            raise ValueError(
+                f"grasp_score has N={N}, expected H*W={height * width}."
+            )
+        if graspable_mask.shape != (B, N) or valid_tok.shape != (B, N):
+            raise ValueError(
+                "graspable_mask, valid_tok and grasp_score must share [B,H*W]."
+            )
+
+        score = torch.nan_to_num(
+            grasp_score.detach(), nan=0.0, posinf=0.0, neginf=0.0
+        )
+        outputs = []
+        all_idx = torch.arange(N, device=score.device, dtype=torch.long)
+
+        for batch_i in range(B):
+            primary = graspable_mask[batch_i] & valid_tok[batch_i]
+            fallback = valid_tok[batch_i]
+            if not bool(fallback.any()):
+                fallback = torch.ones_like(fallback)
+            primary_idx = torch.nonzero(primary, as_tuple=False).squeeze(1)
+            fallback_idx = torch.nonzero(fallback, as_tuple=False).squeeze(1)
+
+            selected_parts = []
+            if primary_idx.numel() > 0:
+                primary_uv = self._image_uv_coordinates(
+                    primary_idx, height, width, score.dtype
+                )
+                primary_local = self._deterministic_fps_2d(
+                    primary_uv,
+                    score[batch_i, primary_idx],
+                    min(self.M_points, int(primary_idx.numel())),
+                )
+                selected_parts.append(primary_idx[primary_local])
+
+            selected = (
+                torch.cat(selected_parts, dim=0)
+                if selected_parts
+                else torch.empty(0, device=score.device, dtype=torch.long)
+            )
+
+            if selected.numel() < self.M_points:
+                used = torch.zeros(N, device=score.device, dtype=torch.bool)
+                if selected.numel() > 0:
+                    used[selected] = True
+                remaining_idx = fallback_idx[~used[fallback_idx]]
+                if remaining_idx.numel() > 0:
+                    remaining_uv = self._image_uv_coordinates(
+                        remaining_idx, height, width, score.dtype
+                    )
+                    remaining_local = self._deterministic_fps_2d(
+                        remaining_uv,
+                        score[batch_i, remaining_idx],
+                        min(
+                            self.M_points - int(selected.numel()),
+                            int(remaining_idx.numel()),
+                        ),
+                    )
+                    selected = torch.cat(
+                        [selected, remaining_idx[remaining_local]], dim=0
+                    )
+
+            selected = self._deterministic_fill_indices(
+                selected,
+                fallback_idx if fallback_idx.numel() > 0 else all_idx,
+                self.M_points,
+            )
+            outputs.append(selected)
+
+        return torch.stack(outputs, dim=0).contiguous()
+
+    def _validate_image_fps_override(
+        self,
+        override: torch.Tensor,
+        batch_size: int,
+        num_tokens: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Validate externally supplied image-FPS indices for exact seed sharing."""
+        if not torch.is_tensor(override):
+            raise TypeError(
+                "image_fps_seed_idx_override must be a tensor [B,M]."
+            )
+        override = override.to(device=device, dtype=torch.long)
+        expected = (int(batch_size), int(self.M_points))
+        if tuple(override.shape) != expected:
+            raise ValueError(
+                "image_fps_seed_idx_override must have shape "
+                f"{expected}, got {tuple(override.shape)}."
+            )
+        if bool(((override < 0) | (override >= int(num_tokens))).any()):
+            raise ValueError(
+                "image_fps_seed_idx_override contains an out-of-range token index."
+            )
+        return override.contiguous()
+
+    def _select_graspable_seed_queries(
+        self,
+        feat_grid: torch.Tensor,
+        depth_map: torch.Tensor,
+        camera_K: torch.Tensor,
+        graspable_mask: torch.Tensor,
+        valid_tok: torch.Tensor,
+        grasp_score: torch.Tensor,
+        end_points: dict,
+    ):
+        """Build the sparse grasp-query set for either teacher or student.
+
+        ``image_fps`` is the shared teacher/student path. It performs FPS only
+        in normalized image coordinates and then backprojects the selected M
+        depths. Stage 2 may provide ``image_fps_seed_idx_override`` to the
+        frozen teacher so it reuses the student's exact image-FPS indices.
+        ``point_fps`` is
+        retained only for the original non-distillation baseline.
+        """
+        B, C, H, W = feat_grid.shape
+        N = H * W
+        M = self.M_points
+        feat_flat = feat_grid.view(B, C, N).contiguous()
+        graspable_num_batch = float(graspable_mask.float().sum().item())
+
+        use_gt_xyz = (
+            self.is_training
+            and self.use_gt_xyz_for_train
+            and ("gt_depth_m" in end_points)
+        )
+        depth_for_xyz = depth_map
+        if use_gt_xyz:
+            depth_for_xyz = end_points["gt_depth_m"]
+            if depth_for_xyz.dim() == 3:
+                depth_for_xyz = depth_for_xyz.unsqueeze(1)
+            elif depth_for_xyz.dim() == 4:
+                depth_for_xyz = depth_for_xyz[:, :1]
+            if depth_for_xyz.shape[-2:] != (H, W):
+                depth_for_xyz = F.interpolate(
+                    depth_for_xyz,
+                    size=(H, W),
+                    mode="nearest",
+                )
+            depth_for_xyz = depth_for_xyz.to(
+                device=feat_grid.device,
+                dtype=depth_map.dtype,
+            )
+
+        if self.seed_selection_mode == "image_fps":
+            override = end_points.get("image_fps_seed_idx_override", None)
+            if override is not None:
+                if self.seed_selection_mode != "image_fps":
+                    raise RuntimeError(
+                        "image_fps_seed_idx_override is valid only when "
+                        "seed_selection_mode='image_fps'."
+                    )
+                token_sel_idx = self._validate_image_fps_override(
+                    override, B, N, feat_grid.device
+                )
+                shared_override = True
+            else:
+                token_sel_idx = self._select_image_fps_indices(
+                    graspable_mask=graspable_mask,
+                    valid_tok=valid_tok,
+                    grasp_score=grasp_score,
+                    height=H,
+                    width=W,
+                )
+                shared_override = False
+
+            gather_idx = token_sel_idx.unsqueeze(1).expand(-1, C, -1)
+            seed_features = torch.gather(feat_flat, 2, gather_idx).contiguous()
+
+            z_flat = depth_for_xyz[:, 0].reshape(B, N)
+            z_seed = torch.gather(z_flat, 1, token_sel_idx).unsqueeze(-1)
+            z_seed = torch.nan_to_num(
+                z_seed,
+                nan=self.min_depth,
+                posinf=self.max_depth,
+                neginf=self.min_depth,
+            ).clamp(self.min_depth, self.max_depth)
+            u = (token_sel_idx % W).to(dtype=z_seed.dtype)
+            v = (token_sel_idx // W).to(dtype=z_seed.dtype)
+            uv = torch.stack([u, v], dim=-1)
+            seed_xyz = self._backproject_uvz(
+                uv,
+                z_seed if use_gt_xyz else z_seed.detach(),
+                camera_K,
+            )
+
+            end_points["D: Image-FPS enabled"] = depth_map.new_tensor(
+                float(self.seed_selection_mode == "image_fps")
+            ).reshape(())
+            end_points["D: Shared image-FPS seeds"] = depth_map.new_tensor(
+                float(shared_override)
+            ).reshape(())
+            if shared_override:
+                shared_valid = torch.gather(valid_tok, 1, token_sel_idx)
+                end_points["D: Shared image-FPS valid ratio"] = (
+                    shared_valid.float().mean().reshape(())
+                )
+
+            return (
+                seed_features,
+                seed_xyz.contiguous(),
+                token_sel_idx.contiguous(),
+                None,
+                None,
+                graspable_num_batch,
+            )
+
+        flat_all = torch.arange(
+            N,
+            device=feat_grid.device,
+            dtype=torch.long,
+        ).unsqueeze(0).expand(B, -1).contiguous()
+        u_all = (flat_all % W).float()
+        v_all = (flat_all // W).float()
+        uv_all = torch.stack([u_all, v_all], dim=-1)
+
+        z_all_pred = depth_map.view(B, -1, 1).contiguous()
+        z_all_pred = torch.nan_to_num(
+            z_all_pred,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp_min(1e-6)
+        xyz_all_pred = self._backproject_uvz(
+            uv_all,
+            z_all_pred.detach(),
+            camera_K,
+        )
+        if use_gt_xyz:
+            z_all_match = depth_for_xyz.view(B, -1, 1).contiguous()
+            z_all_match = torch.nan_to_num(
+                z_all_match,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            ).clamp_min(1e-6)
+            xyz_all_match = self._backproject_uvz(
+                uv_all,
+                z_all_match,
+                camera_K,
+            )
+        else:
+            xyz_all_match = xyz_all_pred
+
+        seed_features = []
+        seed_xyz = []
+        token_sel_idx = []
+        for batch_i in range(B):
+            cur_idx = torch.nonzero(
+                graspable_mask[batch_i], as_tuple=False
+            ).squeeze(1)
+            if cur_idx.numel() == 0:
+                cur_idx = torch.nonzero(
+                    valid_tok[batch_i], as_tuple=False
+                ).squeeze(1)
+            if cur_idx.numel() == 0:
+                cur_idx = torch.arange(N, device=feat_grid.device)
+
+            cur_feat = feat_flat[batch_i][:, cur_idx]
+            cur_xyz = xyz_all_match[batch_i][cur_idx]
+            if cur_xyz.shape[0] >= M:
+                fps_idx = furthest_point_sample(
+                    cur_xyz.unsqueeze(0).contiguous(), M
+                )
+                cur_xyz = gather_operation(
+                    cur_xyz.unsqueeze(0).transpose(1, 2).contiguous(),
+                    fps_idx,
+                ).transpose(1, 2).squeeze(0).contiguous()
+                cur_feat = gather_operation(
+                    cur_feat.unsqueeze(0).contiguous(), fps_idx
+                ).squeeze(0).contiguous()
+                cur_sel = cur_idx[fps_idx.squeeze(0).long()]
+            else:
+                rep = torch.randint(
+                    0,
+                    cur_xyz.shape[0],
+                    (M,),
+                    device=feat_grid.device,
+                )
+                cur_xyz = cur_xyz[rep]
+                cur_feat = cur_feat[:, rep]
+                cur_sel = cur_idx[rep]
+
+            seed_features.append(cur_feat)
+            seed_xyz.append(cur_xyz)
+            token_sel_idx.append(cur_sel)
+
+        return (
+            torch.stack(seed_features, dim=0),
+            torch.stack(seed_xyz, dim=0),
+            torch.stack(token_sel_idx, dim=0),
+            xyz_all_pred,
+            uv_all,
+            graspable_num_batch,
+        )
 
     def _assert_cva_output_contract(
         self,
@@ -7297,51 +7808,67 @@ class economicgrasp_dpt(nn.Module):
 
         camera_pose_vec = None
         camera_gravity_vec = None
-        if self.pose_depth_mode == "global_film":
-            if self.camera_pose_key not in end_points:
-                raise KeyError(
-                    "pose_depth_mode='global_film' requires "
-                    f"end_points['{self.camera_pose_key}'] with shape (B,3)."
-                )
-            camera_pose_vec = end_points[self.camera_pose_key]
-        elif self.pose_depth_mode == "ray_gravity_film":
-            if self.camera_gravity_key not in end_points:
-                raise KeyError(
-                    "pose_depth_mode='ray_gravity_film' requires "
-                    f"end_points['{self.camera_gravity_key}'] with shape (B,3)."
-                )
-            camera_gravity_vec = end_points[self.camera_gravity_key]
+        depth_net_pred_448 = None
+        depth_img_feat = None
+        depth_head_raw_448 = None
+        pose_depth_aux = {}
 
-        (
-            depth_net_pred_448,
-            _,
-            depth_img_feat,
-            depth_head_raw_448,
-            feats,
-            pose_depth_aux,
-        ) = self.depth_net(
-            img,
-            camera_pose_vec=camera_pose_vec,
-            camera_gravity_vec=camera_gravity_vec,
-            camera_K=K,
-            return_feats=True,
-            return_raw=True,
-            return_pose_aux=True,
-        )
+        if self.geometry_depth_source == "gt":
+            # Privileged Stage-0/teacher path: retain the same frozen DINO RGB
+            # features for proposal prediction, but do not execute the DPT metric
+            # depth decoder. All downstream geometry consumes clean synthetic
+            # ``gt_depth_m`` from the data loader.
+            feats = self.depth_net.extract_backbone_features(img)
+            depth_448 = self._prepare_gt_geometry_depth(
+                end_points,
+                image_hw=(H, W),
+                device=img.device,
+                dtype=img.dtype,
+            )
+        else:
+            if self.pose_depth_mode == "global_film":
+                if self.camera_pose_key not in end_points:
+                    raise KeyError(
+                        "pose_depth_mode='global_film' requires "
+                        f"end_points['{self.camera_pose_key}'] with shape (B,3)."
+                    )
+                camera_pose_vec = end_points[self.camera_pose_key]
+            elif self.pose_depth_mode == "ray_gravity_film":
+                if self.camera_gravity_key not in end_points:
+                    raise KeyError(
+                        "pose_depth_mode='ray_gravity_film' requires "
+                        f"end_points['{self.camera_gravity_key}'] with shape (B,3)."
+                    )
+                camera_gravity_vec = end_points[self.camera_gravity_key]
+
+            (
+                depth_net_pred_448,
+                _,
+                depth_img_feat,
+                depth_head_raw_448,
+                feats,
+                pose_depth_aux,
+            ) = self.depth_net(
+                img,
+                camera_pose_vec=camera_pose_vec,
+                camera_gravity_vec=camera_gravity_vec,
+                camera_K=K,
+                return_feats=True,
+                return_raw=True,
+                return_pose_aux=True,
+            )
 
         obs_depth_448 = None
         depth_confidence_448 = None
-        depth_refined_correction_448 = torch.zeros_like(depth_net_pred_448)
 
-        if not self.use_obs_depth:
-            # RGB mode:
-            # RGB -> absolute depth
+        if self.geometry_depth_source == "gt":
+            # ``depth_448`` is already the privileged geometry input.
+            pass
+        elif not self.use_obs_depth:
+            # RGB-only student: RGB -> predicted absolute metric depth.
             depth_448 = depth_net_pred_448
         else:
-            # RGB-D mode:
-            # RGB -> network predicted absolute depth
-            # obs depth -> obs encoder
-            # confidence -> fuse network predicted depth and observed depth
+            # RGB-D compatibility path, not used in the Stage-0--2 experiment.
             obs_depth_448 = end_points.get("sensor_depth_m", None)
             if obs_depth_448 is None:
                 raise ValueError("use_obs_depth=True requires end_points['sensor_depth_m'].")
@@ -7377,6 +7904,12 @@ class economicgrasp_dpt(nn.Module):
             #     posinf=self.max_depth,
             #     neginf=self.min_depth,
             # )
+
+        # This diagnostic tensor must be created only after the active geometry
+        # depth has been selected.  In the RGB-only branch ``depth_448`` does not
+        # exist until the DPT prediction is assigned above.
+        if not self.use_obs_depth:
+            depth_refined_correction_448 = torch.zeros_like(depth_448)
 
         if self.stride > 1:
             depth_tok = F.interpolate(
@@ -7422,14 +7955,23 @@ class economicgrasp_dpt(nn.Module):
         graspness_logits_448 = proposal_logits_448[:, 2:3, :, :]
 
         end_points['img_feat_dpt'] = feat_grid
+        # ``depth_map_pred`` is retained as the historical geometry/loss key.
+        # For the privileged teacher it is the clean GT input, not a prediction.
         end_points["depth_map_pred"] = depth_448
+        end_points["depth_map_used_for_geometry"] = depth_448
         end_points["depth_tok_pred"] = depth_tok
-        
-        # network-predicted absolute depth
-        end_points["depth_net_pred"] = depth_net_pred_448
+        end_points["D: Geometry depth source GT"] = depth_448.new_tensor(
+            float(self.geometry_depth_source == "gt")
+        ).reshape(())
+        end_points["D: Depth head executed"] = depth_448.new_tensor(
+            float(depth_net_pred_448 is not None)
+        ).reshape(())
 
-        # raw 1-channel head output, debug only
-        end_points["depth_head_raw_pred"] = depth_head_raw_448
+        if depth_net_pred_448 is not None:
+            # Network-predicted absolute depth and raw DPT output exist only for
+            # the RGB-only student / legacy RGB-D compatibility path.
+            end_points["depth_net_pred"] = depth_net_pred_448
+            end_points["depth_head_raw_pred"] = depth_head_raw_448
 
         if self.pose_depth_mode != "none":
             # Common mode-independent diagnostics.
@@ -7518,7 +8060,10 @@ class economicgrasp_dpt(nn.Module):
             end_points["depth_refined_correction"] = depth_refined_correction_448
             end_points["depth_residual_pred"] = depth_refined_correction_448
         else:
-            end_points["D: Depth net pred mean"] = depth_net_pred_448.detach().mean()
+            if depth_net_pred_448 is not None:
+                end_points["D: Depth net pred mean"] = (
+                    depth_net_pred_448.detach().mean()
+                )
             end_points["depth_residual_pred"] = torch.zeros_like(depth_448)
 
         objectness_score = objectness_logits_448.view(B, 2, -1).contiguous()
@@ -7563,75 +8108,33 @@ class economicgrasp_dpt(nn.Module):
         end_points['D: GraspRaw max'] = grasp_raw.max().reshape(())
         end_points['D: GraspSel mean'] = grasp_sel.mean().reshape(())
 
-        flat_all = torch.arange(H * W, device=img.device, dtype=torch.long).unsqueeze(0).expand(B, -1).contiguous()
-        u_all = (flat_all % W).float()
-        v_all = (flat_all // W).float()
-        uv_all = torch.stack([u_all, v_all], dim=-1)
-
-        z_all_pred = depth_448.view(B, -1, 1).contiguous()
-        z_all_pred = torch.nan_to_num(z_all_pred, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(1e-6)
-        xyz_all_pred = self._backproject_uvz(uv_all, z_all_pred.detach(), K)
-
-        use_gt_xyz = self.is_training and self.use_gt_xyz_for_train and ('gt_depth_m' in end_points)
-        if use_gt_xyz:
-            gt_depth = end_points['gt_depth_m']
-            if gt_depth.dim() == 3:
-                gt_depth = gt_depth.unsqueeze(1)
-            elif gt_depth.dim() == 4:
-                gt_depth = gt_depth[:, :1]
-            z_all_gt = gt_depth.view(B, -1, 1).contiguous()
-            z_all_gt = torch.nan_to_num(z_all_gt, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(1e-6)
-            xyz_all_match = self._backproject_uvz(uv_all, z_all_gt, K)
-        else:
-            xyz_all_match = xyz_all_pred
-
-        seed_features_flipped = feat_grid.view(B, feat_grid.shape[1], -1).contiguous()  # (B,C,N)
-        seed_xyz = xyz_all_match
         graspable_mask = mask_thr_pred
-
-        seed_features_graspable = []
-        seed_xyz_graspable = []
-        token_sel_idx = []
-        graspable_num_batch = 0.0
-        for i in range(B):
-            cur_mask = graspable_mask[i]
-            cur_idx = torch.nonzero(cur_mask, as_tuple=False).squeeze(1)
-            graspable_num_batch += float(cur_mask.sum().item())
-
-            if cur_idx.numel() == 0:
-                # fallback should still respect token/depth validity
-                cur_idx = torch.nonzero(valid_tok[i], as_tuple=False).squeeze(1)
-    
-            if cur_idx.numel() == 0:
-                cur_idx = torch.arange(Ntok, device=img.device)
-
-            cur_feat = seed_features_flipped[i][:, cur_idx]   # (C,Ng)
-            cur_seed_xyz = seed_xyz[i][cur_idx]               # (Ng,3)
-
-            if cur_seed_xyz.shape[0] >= M:
-                cur_seed_xyz_ = cur_seed_xyz.unsqueeze(0).contiguous()
-                fps_idxs = furthest_point_sample(cur_seed_xyz_, M)
-                cur_seed_xyz = gather_operation(cur_seed_xyz_.transpose(1, 2).contiguous(), fps_idxs).transpose(1, 2).squeeze(0).contiguous()
-                cur_feat = gather_operation(cur_feat.unsqueeze(0).contiguous(), fps_idxs).squeeze(0).contiguous()
-                cur_idx_sel = cur_idx[fps_idxs.squeeze(0).long()]
-            else:
-                rep = torch.randint(0, cur_seed_xyz.shape[0], (M,), device=img.device)
-                cur_seed_xyz = cur_seed_xyz[rep]
-                cur_feat = cur_feat[:, rep]
-                cur_idx_sel = cur_idx[rep]
-
-            seed_features_graspable.append(cur_feat)
-            seed_xyz_graspable.append(cur_seed_xyz)
-            token_sel_idx.append(cur_idx_sel)
-
-        seed_xyz_graspable = torch.stack(seed_xyz_graspable, 0)
-        seed_features_graspable = torch.stack(seed_features_graspable, 0)  # (B,C,M)
-        token_sel_idx = torch.stack(token_sel_idx, 0)
+        (
+            seed_features_graspable,
+            seed_xyz_graspable,
+            token_sel_idx,
+            xyz_all_pred,
+            uv_all,
+            graspable_num_batch,
+        ) = self._select_graspable_seed_queries(
+            feat_grid=feat_grid,
+            depth_map=depth_448,
+            camera_K=K,
+            graspable_mask=graspable_mask,
+            valid_tok=valid_tok,
+            grasp_score=grasp_sel,
+            end_points=end_points,
+        )
 
         end_points['xyz_graspable'] = seed_xyz_graspable
         end_points['token_sel_idx'] = token_sel_idx
         end_points['token_sel_xyz'] = seed_xyz_graspable
-        end_points['D: Graspable Points'] = torch.tensor(graspable_num_batch / float(B), device=img.device)
+        end_points['D: Graspable Points'] = torch.tensor(
+            graspable_num_batch / float(B), device=img.device
+        )
+        end_points['D: PointCloudFree Seeds'] = depth_448.new_tensor(
+            float(self.seed_selection_mode == 'image_fps')
+        ).reshape(())
 
         if (self.vis_dir is not None) and (self._vis_iter % self.vis_every == 0):
             try:
@@ -7654,21 +8157,22 @@ class economicgrasp_dpt(nn.Module):
                     title='final depth',
                 )
 
-                self._save_map_png(
-                    depth_net_pred_448[0, 0],
-                    os.path.join(self.vis_dir, f'dpt_depth_head_abs_debug_it{self._vis_iter:06d}.png'),
-                    cmap='magma',
-                    vmin=self.min_depth,
-                    vmax=self.max_depth,
-                    title='depth head sigmoid(abs) debug',
-                )
+                if depth_net_pred_448 is not None:
+                    self._save_map_png(
+                        depth_net_pred_448[0, 0],
+                        os.path.join(self.vis_dir, f'dpt_depth_head_abs_debug_it{self._vis_iter:06d}.png'),
+                        cmap='magma',
+                        vmin=self.min_depth,
+                        vmax=self.max_depth,
+                        title='depth head sigmoid(abs) debug',
+                    )
 
-                self._save_map_png(
-                    depth_head_raw_448[0, 0],
-                    os.path.join(self.vis_dir, f'dpt_depth_head_raw_it{self._vis_iter:06d}.png'),
-                    cmap='coolwarm',
-                    title='depth head raw output',
-                )
+                    self._save_map_png(
+                        depth_head_raw_448[0, 0],
+                        os.path.join(self.vis_dir, f'dpt_depth_head_raw_it{self._vis_iter:06d}.png'),
+                        cmap='coolwarm',
+                        title='depth head raw output',
+                    )
 
                 if self.use_obs_depth:
                     self._save_map_png(
@@ -7730,23 +8234,24 @@ class economicgrasp_dpt(nn.Module):
                     ).float()
 
                     final_abs_err = (depth_448 - gt_depth).abs() * gt_valid
-                    net_abs_err = (depth_net_pred_448 - gt_depth).abs() * gt_valid
-                    
+
                     self._save_map_png(
                         final_abs_err[0, 0],
                         os.path.join(self.vis_dir, f'dpt_final_depth_abs_err_it{self._vis_iter:06d}.png'),
                         cmap='magma',
                         vmin=0.0,
-                        title='|final depth - GT|',
+                        title='|geometry depth - GT|',
                     )
 
-                    self._save_map_png(
-                        net_abs_err[0, 0],
-                        os.path.join(self.vis_dir, f'dpt_depth_net_pred_abs_err_it{self._vis_iter:06d}.png'),
-                        cmap='magma',
-                        vmin=0.0,
-                        title='|network predicted depth - GT|',
-                    )
+                    if depth_net_pred_448 is not None:
+                        net_abs_err = (depth_net_pred_448 - gt_depth).abs() * gt_valid
+                        self._save_map_png(
+                            net_abs_err[0, 0],
+                            os.path.join(self.vis_dir, f'dpt_depth_net_pred_abs_err_it{self._vis_iter:06d}.png'),
+                            cmap='magma',
+                            vmin=0.0,
+                            title='|network predicted depth - GT|',
+                        )
 
                     if self.use_obs_depth:
                         correction_target = gt_depth - obs_depth_448
@@ -7773,9 +8278,12 @@ class economicgrasp_dpt(nn.Module):
                     gt_depth = end_points['gt_depth_m']
                     if gt_depth.dim() == 3:
                         gt_depth = gt_depth.unsqueeze(1)
-                    z_all_gt = gt_depth.view(B, -1, 1).contiguous().clamp_min(1e-6)
-                    xyz_all_gt = self._backproject_uvz(uv_all, z_all_gt, K)
-                    self._save_pred_gt_cloud_ply(xyz_all_pred, xyz_all_gt, end_points)
+                    if xyz_all_pred is not None and uv_all is not None:
+                        z_all_gt = gt_depth.view(B, -1, 1).contiguous().clamp_min(1e-6)
+                        xyz_all_gt = self._backproject_uvz(uv_all, z_all_gt, K)
+                        self._save_pred_gt_cloud_ply(
+                            xyz_all_pred, xyz_all_gt, end_points
+                        )
                     
             except Exception:
                 pass
@@ -7842,9 +8350,9 @@ class economicgrasp_dpt(nn.Module):
                 img=img,
                 step=self._vis_iter,
                 modality=(
-                    "rgbd"
-                    if self.use_obs_depth
-                    else "rgb"
+                    "rgb_gt_depth"
+                    if self.geometry_depth_source == "gt"
+                    else ("rgbd" if self.use_obs_depth else "rgb")
                 ),
                 use_cdf=self.use_cdf,
             )
@@ -7886,10 +8394,11 @@ class economicgrasp_dpt(nn.Module):
                         depth_448 - gt_depth_dbg
                     ).abs()[valid_dbg].mean()
 
-                    end_points["D: Depth net pred MAE"] = (
-                        depth_net_pred_448 - gt_depth_dbg
-                    ).abs()[valid_dbg].mean()
-                    
+                    if depth_net_pred_448 is not None:
+                        end_points["D: Depth net pred MAE"] = (
+                            depth_net_pred_448 - gt_depth_dbg
+                        ).abs()[valid_dbg].mean()
+
                     if self.use_obs_depth:
                         end_points["D: ObsDepth MAE"] = (
                             obs_depth_448 - gt_depth_dbg
@@ -7916,6 +8425,8 @@ class economicgrasp_dpt(nn.Module):
                     f"geomdiag={int(self.use_geometry_diagnostics)} "
                     f"obs={int(self.use_obs_depth)} "
                     f"poseD={self.pose_depth_mode} "
+                    f"zsrc={self.geometry_depth_source} "
+                    f"seed={self.seed_selection_mode} "
                     f"graspable={end_points['D: Graspable Points'].item():.1f} "
                     f"cand={end_points['D: PredCand#(thr)'].item():.1f} "
                     f"obj={end_points['D: PredObj#'].item():.1f} "
