@@ -54,6 +54,45 @@ def _parse_distillation_args():
     parser.add_argument("--kd_temperature", type=float, default=1.0)
     parser.add_argument("--kd_max_query_view_angle_deg", type=float, default=35.0)
     parser.add_argument("--kd_width_positive_threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--kd_diag_interval_steps",
+        type=int,
+        default=5000,
+        help=(
+            "Run paired privileged-KD diagnostics every N optimizer steps in "
+            "Stage 2; 0 disables the expensive diagnostics."
+        ),
+    )
+    parser.add_argument(
+        "--kd_diag_eval_batches",
+        type=int,
+        default=64,
+        help=(
+            "Number of validation batches per epoch used for paired teacher/"
+            "student diagnostics in Stage 2; 0 means all batches."
+        ),
+    )
+    parser.add_argument(
+        "--kd_diag_grad_conflict",
+        type=int,
+        choices=(0, 1),
+        default=1,
+        help="Measure supervised-vs-KD output-gradient conflict at diag steps.",
+    )
+    parser.add_argument(
+        "--diagnose_only",
+        action="store_true",
+        help=(
+            "Load the requested Stage-2 student and Stage-0 teacher, run one "
+            "validation pass with paired privileged-KD diagnostics, and exit."
+        ),
+    )
+    parser.add_argument(
+        "--diagnose_epoch",
+        type=int,
+        default=0,
+        help="Epoch tag used only for diagnose-only logging.",
+    )
 
     args, remaining = parser.parse_known_args()
     sys.argv = [sys.argv[0], *remaining]
@@ -74,6 +113,10 @@ from models.economicgrasp_dpt_distill import (
     economicgrasp_dpt_teacher,
     extract_distillation_targets,
     load_checkpoint_state,
+)
+from models.privileged_kd_diagnostics import (
+    compute_output_gradient_conflict,
+    compute_privileged_kd_diagnostics,
 )
 from models.loss_economicgrasp_depth_kview_transformer import (
     get_loss as get_loss_economicgrasp,
@@ -698,6 +741,15 @@ class Trainer:
             raise ValueError(
                 "--kd_width_positive_threshold must lie in [0, 1]."
             )
+        self.kd_diag_interval_steps = max(
+            0, int(DISTILL_ARGS.kd_diag_interval_steps)
+        )
+        self.kd_diag_eval_batches = max(
+            0, int(DISTILL_ARGS.kd_diag_eval_batches)
+        )
+        self.kd_diag_grad_conflict = bool(
+            int(DISTILL_ARGS.kd_diag_grad_conflict)
+        )
         self.visualization_enabled = bool(
             getattr(cfgs, "vis_dir", None)
         )
@@ -1029,6 +1081,12 @@ class Trainer:
                     "-> Stage-2 protocol: E1 privileged-output KD "
                     "(view/CDF/width by default) + E2 student-driven image-FPS"
                 )
+                self.log_string(
+                    "-> KD diagnostics: interval_steps="
+                    f"{self.kd_diag_interval_steps}, eval_batches="
+                    f"{self.kd_diag_eval_batches}, grad_conflict="
+                    f"{int(self.kd_diag_grad_conflict)}"
+                )
 
         if self.distributed:
             # IMPORTANT: keep device_ids=None.
@@ -1293,6 +1351,15 @@ class Trainer:
 
         for batch_idx, batch_data_label in enumerate(self.TRAIN_DATALOADER):
             t = time.time()
+            optimizer_step = epoch * num_batches_local + batch_idx + 1
+            run_kd_diag = (
+                self.teacher is not None
+                and self.kd_diag_interval_steps > 0
+                and (
+                    optimizer_step == 1
+                    or optimizer_step % self.kd_diag_interval_steps == 0
+                )
+            )
 
             validate_batch_label_contract(
                 batch_data_label,
@@ -1307,8 +1374,13 @@ class Trainer:
             )
             batch_data_label["cva_compute_diagnostics"] = (
                 self.use_cdf
-                and self.cdf_diag_interval > 0
-                and batch_idx % self.cdf_diag_interval == 0
+                and (
+                    (
+                        self.cdf_diag_interval > 0
+                        and batch_idx % self.cdf_diag_interval == 0
+                    )
+                    or run_kd_diag
+                )
             )
             batch_data_label[
                 "geometry_compute_diagnostics"
@@ -1332,12 +1404,21 @@ class Trainer:
             # student mutates the top-level endpoint dictionary. The student
             # must run first and select its own deployment-time image-FPS seeds.
             teacher_input = None
+            diagnostic_teacher_input = None
             if self.teacher is not None:
                 batch_data_label.pop("image_fps_seed_idx_override", None)
+                batch_data_label.pop("oracle_view_inds_override", None)
                 teacher_input = dict(batch_data_label)
                 teacher_input["cva_compute_diagnostics"] = False
                 teacher_input["geometry_compute_diagnostics"] = False
                 teacher_input["cva_export_angle_feature"] = False
+                teacher_input["cva_force_process_grasp_labels"] = False
+                if run_kd_diag:
+                    diagnostic_teacher_input = dict(teacher_input)
+                    diagnostic_teacher_input["cva_compute_diagnostics"] = True
+                    diagnostic_teacher_input[
+                        "cva_force_process_grasp_labels"
+                    ] = True
 
             model_start_time = time.perf_counter()
             end_points = self.net(batch_data_label)
@@ -1420,6 +1501,57 @@ class Trainer:
                 end_points['A: Distill Loss'] = distill_loss
                 loss = supervised_loss
             end_points['A: Overall Loss'] = loss
+
+            if run_kd_diag and diagnostic_teacher_input is not None:
+                # Paired counterfactual teacher: same student-selected image
+                # seeds and exact same selected view anchors.  This isolates
+                # whether clean geometry produces outputs that are actually
+                # closer to grasp GT, and whether depth-induced center drift
+                # changes the matched CDF/width labels.
+                diagnostic_teacher_input[
+                    "image_fps_seed_idx_override"
+                ] = end_points["kview_base_token_sel_idx"].detach().long()
+                diagnostic_teacher_input[
+                    "oracle_view_inds_override"
+                ] = end_points["grasp_top_view_inds"].detach().long()
+                diagnostic_teacher_input[
+                    "geometry_compute_diagnostics"
+                ] = False
+                diagnostic_teacher_input[
+                    "cva_export_angle_feature"
+                ] = False
+                with torch.no_grad():
+                    diagnostic_teacher_end_points = self.teacher(
+                        diagnostic_teacher_input
+                    )
+                    diagnostic_teacher_end_points["epoch"] = epoch
+                    _, diagnostic_teacher_end_points = get_loss_economicgrasp(
+                        diagnostic_teacher_end_points,
+                        use_cdf=self.use_cdf,
+                    )
+                    end_points.update(
+                        compute_privileged_kd_diagnostics(
+                            end_points,
+                            diagnostic_teacher_end_points,
+                        )
+                    )
+                del diagnostic_teacher_end_points, diagnostic_teacher_input
+
+                if self.kd_diag_grad_conflict:
+                    end_points.update(
+                        compute_output_gradient_conflict(end_points)
+                    )
+                end_points["D: KDDiag optimizer step"] = (
+                    end_points["A: Overall Loss"].detach().new_tensor(
+                        float(optimizer_step)
+                    )
+                )
+                if self.main:
+                    self.log_string(
+                        f"[KDDIAG] optimizer_step={optimizer_step}, "
+                        f"epoch={epoch}, batch={batch_idx + 1}"
+                    )
+
             del teacher_targets
             loss_end_time = time.perf_counter()
             interval_loss_time += (loss_end_time - loss_start_time)
@@ -1517,6 +1649,13 @@ class Trainer:
             self.test_sampler.set_epoch(epoch)
 
         for batch_idx, batch_data_label in enumerate(self.TEST_DATALOADER):
+            run_eval_kd_diag = (
+                self.teacher is not None
+                and (
+                    self.kd_diag_eval_batches == 0
+                    or batch_idx < self.kd_diag_eval_batches
+                )
+            )
             if batch_idx % 50 == 0:
                 print(
                     f"[rank{self.rank}] Eval batch "
@@ -1537,8 +1676,13 @@ class Trainer:
             )
             batch_data_label["cva_compute_diagnostics"] = (
                 self.use_cdf
-                and self.cdf_eval_diag_interval > 0
-                and batch_idx % self.cdf_eval_diag_interval == 0
+                and (
+                    (
+                        self.cdf_eval_diag_interval > 0
+                        and batch_idx % self.cdf_eval_diag_interval == 0
+                    )
+                    or run_eval_kd_diag
+                )
             )
             batch_data_label[
                 "geometry_compute_diagnostics"
@@ -1549,6 +1693,18 @@ class Trainer:
                 and batch_idx % self.geometry_eval_diag_interval == 0
             )
             batch_data_label["cva_export_angle_feature"] = False
+
+            diagnostic_teacher_input = None
+            if run_eval_kd_diag:
+                batch_data_label.pop("image_fps_seed_idx_override", None)
+                batch_data_label.pop("oracle_view_inds_override", None)
+                diagnostic_teacher_input = dict(batch_data_label)
+                diagnostic_teacher_input["cva_compute_diagnostics"] = True
+                diagnostic_teacher_input["geometry_compute_diagnostics"] = False
+                diagnostic_teacher_input["cva_export_angle_feature"] = False
+                diagnostic_teacher_input[
+                    "cva_force_process_grasp_labels"
+                ] = True
 
             with torch.no_grad():
                 assert_cpu_resident_label_lists(
@@ -1569,6 +1725,36 @@ class Trainer:
                 end_points['A: Supervised Loss'] = loss
                 end_points['A: Distill Loss'] = loss.detach() * 0.0
                 end_points['A: Overall Loss'] = loss
+
+                if diagnostic_teacher_input is not None:
+                    diagnostic_teacher_input[
+                        "image_fps_seed_idx_override"
+                    ] = end_points[
+                        "kview_base_token_sel_idx"
+                    ].detach().long()
+                    diagnostic_teacher_input[
+                        "oracle_view_inds_override"
+                    ] = end_points[
+                        "grasp_top_view_inds"
+                    ].detach().long()
+                    diagnostic_teacher_end_points = self.teacher(
+                        diagnostic_teacher_input
+                    )
+                    diagnostic_teacher_end_points["epoch"] = epoch
+                    _, diagnostic_teacher_end_points = get_loss_economicgrasp(
+                        diagnostic_teacher_end_points,
+                        use_cdf=self.use_cdf,
+                    )
+                    end_points.update(
+                        compute_privileged_kd_diagnostics(
+                            end_points,
+                            diagnostic_teacher_end_points,
+                        )
+                    )
+                    end_points["D: KDDiag eval paired batch"] = (
+                        loss.detach().new_tensor(1.0)
+                    )
+                    del diagnostic_teacher_end_points, diagnostic_teacher_input
 
             metrics = self.extract_scalar_metrics(end_points)
             for key, val in metrics.items():
@@ -1699,7 +1885,20 @@ class Trainer:
 def main():
     trainer = Trainer()
     try:
-        trainer.train(trainer.start_epoch)
+        if bool(DISTILL_ARGS.diagnose_only):
+            if trainer.distill_stage != 2 or trainer.teacher is None:
+                raise RuntimeError(
+                    "--diagnose_only requires --distill_stage 2 and a valid "
+                    "Stage-0 --teacher_checkpoint."
+                )
+            trainer.log_string(
+                "[KDDIAG] diagnose-only validation pass: "
+                f"epoch_tag={int(DISTILL_ARGS.diagnose_epoch)}, "
+                f"paired_batches={trainer.kd_diag_eval_batches}"
+            )
+            trainer.evaluate_one_epoch(int(DISTILL_ARGS.diagnose_epoch))
+        else:
+            trainer.train(trainer.start_epoch)
     finally:
         trainer.close()
 

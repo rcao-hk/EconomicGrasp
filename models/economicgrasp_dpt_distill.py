@@ -494,6 +494,19 @@ def compute_output_distillation_loss(
     cdf_valid = query_valid[:, None, :, None, None]
     cdf_loss = _masked_mean(cdf_map, cdf_valid, zero)
 
+    # BCE with a soft teacher target has an irreducible entropy floor.  Log the
+    # Bernoulli-KL/excess term separately; unlike raw BCE it approaches zero
+    # when the student exactly matches the teacher.
+    teacher_entropy_map = F.binary_cross_entropy_with_logits(
+        t_cdf_matched / temperature,
+        cdf_soft_target,
+        reduction="none",
+    ) * (temperature ** 2)
+    cdf_teacher_entropy = _masked_mean(
+        teacher_entropy_map, cdf_valid, zero
+    )
+    cdf_excess = (cdf_loss - cdf_teacher_entropy).clamp_min(0.0)
+
     s_width = student_end_points["grasp_width_pred_angle_depth"]
     t_width = teacher_targets["grasp_width_pred_angle_depth"].to(s_width)
     if s_width.dim() != 4 or t_width.dim() != 4:
@@ -532,6 +545,8 @@ def compute_output_distillation_loss(
     student_end_points["B: KD Depth Loss"] = depth_loss
     student_end_points["B: KD View Loss"] = view_loss
     student_end_points["B: KD CDF Loss"] = cdf_loss
+    student_end_points["B: KD CDF Excess"] = cdf_excess
+    student_end_points["B: KD CDF Teacher Entropy"] = cdf_teacher_entropy
     student_end_points["B: KD Width Loss"] = width_loss
     student_end_points["A: Distill Loss"] = total
 
@@ -544,6 +559,31 @@ def compute_output_distillation_loss(
         )
         student_end_points["D: KD query view angle"] = (
             query_angle.mean().reshape(())
+        )
+        if bool(query_valid.any()):
+            valid_angle = query_angle[query_valid]
+            student_end_points["D: KD valid query view angle"] = (
+                valid_angle.mean().reshape(())
+            )
+            student_end_points["D: KD valid query view angle p90"] = (
+                torch.quantile(valid_angle.float(), 0.90).reshape(())
+            )
+        else:
+            student_end_points["D: KD valid query view angle"] = zero.reshape(())
+            student_end_points["D: KD valid query view angle p90"] = zero.reshape(())
+        for angle_threshold in (5.0, 10.0, 20.0, 35.0):
+            tag = int(angle_threshold)
+            student_end_points[f"D: KD query angle <{tag}deg"] = (
+                (query_angle <= angle_threshold).float().mean().reshape(())
+            )
+        student_end_points["D: KD CDF teacher entropy"] = (
+            cdf_teacher_entropy.detach().reshape(())
+        )
+        student_end_points["D: KD CDF excess"] = (
+            cdf_excess.detach().reshape(())
+        )
+        student_end_points["D: KD CDF teacher prob mean"] = (
+            _masked_mean(cdf_soft_target, cdf_valid, zero).detach().reshape(())
         )
         student_end_points["D: KD width positive ratio"] = (
             width_valid.float().mean().reshape(())

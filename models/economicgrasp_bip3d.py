@@ -8288,7 +8288,22 @@ class economicgrasp_dpt(nn.Module):
             except Exception:
                 pass
 
-        if self.is_training:
+        # The frozen privileged teacher normally runs without label matching.
+        # Paired KD diagnosis is the exception: it keeps deterministic eval
+        # proposal selection while explicitly requesting GT labels at the
+        # student-selected seeds/views.  Decouple this diagnostic label pass
+        # from the constructor-time ``self.is_training`` flag.
+        force_label_processing = end_points.get(
+            "cva_force_process_grasp_labels", False
+        )
+        if torch.is_tensor(force_label_processing):
+            force_label_processing = bool(
+                force_label_processing.detach().reshape(-1)[0].item()
+            )
+        else:
+            force_label_processing = bool(force_label_processing)
+
+        if self.is_training or force_label_processing:
             if self.use_depth_comp:
                 raise RuntimeError(
                     "The switchable CVA trainer requires extended-angle "
@@ -8305,6 +8320,10 @@ class economicgrasp_dpt(nn.Module):
         else:
             process_fn = None
             process_kwargs = None
+
+        end_points["D: CVA forced label processing"] = depth_448.new_tensor(
+            float(force_label_processing)
+        ).reshape(())
 
         end_points = self.kview_grasp_module(
             seed_features=seed_features_graspable,

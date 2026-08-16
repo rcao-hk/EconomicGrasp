@@ -4207,7 +4207,15 @@ class CenterViewAngleQueryTransformerLocalGraspModule(nn.Module):
         end_points["token_sel_xyz"] = seed_xyz_base
 
         # 2) Base label pass for view loss.
-        if is_training and process_grasp_labels_fn is not None:
+        #
+        # Label construction is independent of proposal sampling mode.  During
+        # privileged-KD diagnosis the frozen teacher remains in deterministic
+        # eval/proposal mode (``is_training=False``), but it still needs GT
+        # labels at the student-selected seeds so teacher/student predictions
+        # can be compared against the same supervised objective.  Therefore,
+        # the presence of an explicit label processor—not ``is_training``—
+        # controls whether labels are built.
+        if process_grasp_labels_fn is not None:
             _, end_points = _call_label_process(process_grasp_labels_fn, end_points, process_grasp_labels_kwargs)
             end_points = _backup_base_view_labels(end_points)
             if topview_debug_fn is not None:
@@ -4236,7 +4244,7 @@ class CenterViewAngleQueryTransformerLocalGraspModule(nn.Module):
         # 4) Query-level extended labels.  This must be a new label function that
         # writes batch_grasp_*_angle tensors.  It also writes base-compatible
         # batch_grasp_view_graspness for view debug/loss.
-        if is_training and process_grasp_labels_fn is not None:
+        if process_grasp_labels_fn is not None:
             _, end_points = _call_label_process(process_grasp_labels_fn, end_points, process_grasp_labels_kwargs)
             end_points["batch_grasp_view_graspness_query"] = end_points.get("batch_grasp_view_graspness", None)
             end_points = _add_kview_selected_view_label_debug(end_points, prefix=self.config.debug_prefix)
