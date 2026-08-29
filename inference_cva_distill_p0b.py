@@ -44,6 +44,16 @@ def _parse_p0b_args() -> argparse.Namespace:
         help="Comma-separated subset of student,teacher_full,teacher_common,oracle_hybrid.",
     )
     parser.add_argument("--p0b_teacher_better_margin", type=float, default=0.0)
+    parser.add_argument(
+        "--p0b_gate_mode",
+        choices=("balanced", "ordinary"),
+        default="balanced",
+        help=(
+            "Teacher-better criterion: 'balanced' reproduces the original "
+            "Priority-1/P0-B gate; 'ordinary' matches Oracle-Selective "
+            "training (unbalanced per-query BCE)."
+        ),
+    )
     parser.add_argument("--p0b_worker_rank", type=int, default=0)
     parser.add_argument("--p0b_world_size", type=int, default=1)
     parser.add_argument("--p0b_max_batches", type=int, default=0)
@@ -72,6 +82,9 @@ from models.economicgrasp_dpt_distill import (
 )
 from models.loss_economicgrasp_depth_kview_transformer import (
     get_loss as get_loss_economicgrasp,
+)
+from models.p0b_topk_exact_override import (
+    install_p0b_exact_query_selector_override,
 )
 from models.p0b_oracle_hybrid import (
     P0B_VARIANTS,
@@ -510,6 +523,7 @@ def _build_models(
 def inference() -> None:
     variants = _parse_variants(P0B_ARGS.p0b_variants)
     margin = float(P0B_ARGS.p0b_teacher_better_margin)
+    gate_mode = str(P0B_ARGS.p0b_gate_mode).strip().lower()
     if margin < 0.0:
         raise ValueError("--p0b_teacher_better_margin must be non-negative.")
     rank = int(P0B_ARGS.p0b_worker_rank)
@@ -522,11 +536,6 @@ def inference() -> None:
         raise RuntimeError("P0-B requires --multi_modal.")
     if not bool(getattr(cfgs, "use_cdf", False)):
         raise RuntimeError("P0-B requires --use_cdf.")
-    if bool(getattr(cfgs, "use_top4_view_infer", False)):
-        raise RuntimeError(
-            "P0-B exact-view oracle evaluation currently requires Top-1 view "
-            "queries. Remove --use_top4_view_infer."
-        )
     if bool(getattr(cfgs, "use_obs_depth", False)):
         raise RuntimeError("P0-B student must remain RGB/predicted-depth; remove --use_obs_depth.")
     if bool(getattr(cfgs, "use_gt_depth", False)):
@@ -651,6 +660,10 @@ def inference() -> None:
         student_checkpoint,
         student_state,
     )
+    # The patch is inert unless a Top-K exact-query override is supplied.
+    # Top-1 therefore retains the original P0-B behavior, while Top-4 can
+    # force the teacher selector to the student's exact four views.
+    install_p0b_exact_query_selector_override(teacher)
     del teacher_state, student_state
 
     print(
@@ -664,6 +677,9 @@ def inference() -> None:
         f"[P0-B] student_stage={student_checkpoint['distill_stage']} "
         f"teacher_stage={teacher_checkpoint['distill_stage']} "
         f"use_fuse_depth={int(teacher_fuse)} margin={margin:g} "
+        f"gate_mode={gate_mode} "
+        f"top4={int(bool(getattr(cfgs, 'use_top4_view_infer', False)))} "
+        f"effective_k={4 if bool(getattr(cfgs, 'use_top4_view_infer', False)) else 1} "
         f"collision_thresh={float(cfgs.collision_thresh):g}",
         flush=True,
     )
@@ -780,6 +796,7 @@ def inference() -> None:
                 student_end_points,
                 teacher_end_points,
                 teacher_better_margin=margin,
+                gate_mode=gate_mode,
             )
             decoded: Dict[str, List[torch.Tensor]] = {}
             for variant in variants:
@@ -870,11 +887,14 @@ def inference() -> None:
         "camera": str(cfgs.camera),
         "variants": list(variants),
         "teacher_better_margin": margin,
+        "gate_mode": gate_mode,
         "sample_interval_fraction": float(cfgs.sample_interval),
         "assigned_scenes": assigned_scenes,
         "sharding": "distributed_sampler_strided_without_padding",
         "batch_size": int(cfgs.batch_size),
         "num_workers": int(cfgs.num_workers),
+        "use_top4_view_infer": bool(getattr(cfgs, "use_top4_view_infer", False)),
+        "effective_k": 4 if bool(getattr(cfgs, "use_top4_view_infer", False)) else 1,
         "processed_samples": processed,
         "saved_samples": saved,
         "skipped_complete_samples": skipped_complete,
