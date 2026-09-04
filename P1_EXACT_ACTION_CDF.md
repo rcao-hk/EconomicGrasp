@@ -8,7 +8,7 @@ P0-E showed that clean-geometry scoring of the Student's physical grasp actions 
 
 P1 is intentionally a **head-only linear probe**. It does not introduce a new Transformer or a new grasp-field network. The experiment updates only the weight and bias of the existing `decoder.cdf_head`; all image, metric-depth, proposal, view, CVA, and width modules remain frozen.
 
-A positive result establishes that the current representation already contains decodable action-utility information but the original CDF supervision did not extract it sufficiently. A negative result does not rule out privileged grasp-field learning; it indicates that a richer gripper-conditioned representation is needed.
+A positive result establishes that the current representation contains decodable action-utility information that the original CDF supervision did not fully extract. A negative result does not rule out privileged grasp-field learning; it indicates that a richer gripper-conditioned representation is needed.
 
 ## 2. Controlled method
 
@@ -69,6 +69,8 @@ collision_thresh = 0.01
 collision_voxel_size = 0.01
 ```
 
+The exact-action cache itself is **not** pre-filtered by the captured-cloud model-free collision detector. The clean analytic evaluator labels all selected Student actions, including collision/empty negatives. The fixed `0.01` model-free filter is applied only during paired Base/Exact test inference. This deliberate separation prevents the training cache from censoring the failure cases that the CDF head must learn, while official AP tests whether the learned signal transfers through the deployment-time filter.
+
 The official GraspNet evaluator compares Base and Exact-CDF on Seen, Similar, and Novel splits.
 
 ## 3. Reused repository components
@@ -85,7 +87,7 @@ train_cva_exact_action_cdf_head.py
 inference_cva_exact_action_cdf.py
 ```
 
-The added files only complete the end-to-end protocol:
+The added files complete the end-to-end protocol:
 
 ```text
 run_p1_exact_action_cdf.sh
@@ -124,6 +126,7 @@ export MINE_RANDOM_CENTERS=4
 export REQUIRE_ALL_SCENES=1
 export MINE_MIN_FRAMES_PER_SCENE=26
 
+export TRAIN_GPU=0
 export TRAIN_DEVICE=cuda:0
 export TRAIN_EPOCHS=20
 export TRAIN_BATCH_SIZE=16
@@ -247,7 +250,7 @@ The report distinguishes three outcomes without imposing an arbitrary AP thresho
    Validation CDF loss improves and Mean official AP is higher than Base.
 
 2. `locally_learnable_without_positive_official_ap_transfer`
-   Cached validation metrics improve, but official Mean AP does not. This indicates cache/admission mismatch or insufficient ranking transfer.
+   Cached validation metrics improve, but official Mean AP does not. This indicates cache/admission mismatch or insufficient downstream transfer.
 
 3. `learnability_not_demonstrated`
    The current frozen feature plus existing linear CDF head cannot extract the privileged signal under this protocol.
@@ -259,7 +262,7 @@ The load-bearing result is the paired official AP, not training BCE alone.
 P1 deliberately fixes several factors:
 
 - Top-1 view only;
-- selected centers are the Base model's top-utility and random centers;
+- selected centers are the Base model's highest predicted-utility centers plus random centers;
 - only the existing linear CDF head is trainable;
 - exact labels are cached for fixed Base features and actions;
 - no proposal transfer or local action refinement is attempted.
