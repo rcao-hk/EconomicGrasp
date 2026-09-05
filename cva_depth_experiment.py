@@ -246,6 +246,24 @@ def move_batch(batch, device):
             for key, value in batch.items()}
 
 
+def assert_cpu_label_residency(batch):
+    """Check the collated cache at the model boundary, after any DDP wrapping."""
+    for key in sorted(CPU_LABEL_KEYS.intersection(batch)):
+        samples = batch[key]
+        if not isinstance(samples, (list, tuple)):
+            raise TypeError(f"{key} must be a per-sample list of CPU object tensors.")
+        for sample_i, objects in enumerate(samples):
+            if not isinstance(objects, (list, tuple)):
+                raise TypeError(f"{key}[{sample_i}] must be a list of CPU object tensors.")
+            for object_i, tensor in enumerate(objects):
+                if not torch.is_tensor(tensor) or tensor.device.type != "cpu":
+                    location = tensor.device if torch.is_tensor(tensor) else type(tensor).__name__
+                    raise RuntimeError(
+                        f"{key}[{sample_i}][{object_i}] must remain CPU-resident; got {location}. "
+                        "Use DDP device_ids=None and move_batch() for explicit dense-input transfer."
+                    )
+
+
 def grasp_objective(end_points, cfgs):
     """Use main's five supervised grasp terms; exclude metric depth entirely."""
     from models import loss_economicgrasp_depth_kview_transformer as losses

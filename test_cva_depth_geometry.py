@@ -6,12 +6,15 @@ the full DINO/dataset/CUDA smoke run documented in DEPTH_GEOMETRY_EXPERIMENTS.md
 """
 
 import importlib.util
+from datetime import timedelta
+import json
 import os
 from pathlib import Path
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -20,8 +23,9 @@ import torch
 
 from cva_depth_geometry import (PairConfig, contrast_depth, depth_metrics, matched_depth_pairs,
                                 metric_depth_loss, pair_metrics, relative_depth_loss, visible_anchor_pool)
-from cva_depth_experiment import (FixedSupportReplay, checkpoint_metadata, fixed_anchor_seeds,
-                                  configure_repository, grasp_objective, select_frame_indices)
+from cva_depth_experiment import (CPU_LABEL_KEYS, FixedSupportReplay, assert_cpu_label_residency,
+                                  checkpoint_metadata, fixed_anchor_seeds, configure_repository,
+                                  grasp_objective, move_batch, select_frame_indices)
 import train_cva_depth_geometry as training
 from diagnose_cva_depth_contrast import summarize
 
@@ -64,6 +68,99 @@ def training_args(**kwargs):
     for key, value in kwargs.items():
         setattr(args, key, value)
     return args
+
+
+def cpu_ddp_label_worker(rank, rendezvous, result_dir):
+    """Real two-rank DDP regression for nested labels; no CUDA model imports."""
+    dist = torch.distributed
+    dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=2,
+                            timeout=timedelta(seconds=30))
+    try:
+        inputs = torch.arange(8, dtype=torch.float32).reshape(4, 2) / 10
+        # Four samples per rank, with two variable-length object tensors each.
+        labels = {key: [[torch.full((sample_i + 2, 3), float(rank)),
+                         torch.full((sample_i + 3, 3), float(rank))]
+                        for sample_i in range(4)] for key in CPU_LABEL_KEYS}
+        batch = move_batch({"img": inputs + rank, **labels}, torch.device("cpu"))
+
+        class LabelProbe(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.tensor([.2, -.3]))
+                self.unused = torch.nn.Parameter(torch.tensor(1.))
+                self.checked_labels = 0
+
+            def forward(self, current):
+                assert_cpu_label_residency(current)
+                for key in CPU_LABEL_KEYS:
+                    for sample_i, objects in enumerate(current[key]):
+                        for object_i, value in enumerate(objects):
+                            if value is not labels[key][sample_i][object_i]:
+                                raise AssertionError("DDP must preserve the original CPU cache tensors.")
+                            self.checked_labels += 1
+                targets = torch.stack([objects[0][0, 0] for objects in current["view_graspness_list"]])
+                return (current["img"] @ self.weight - targets).square().mean()
+
+        module = LabelProbe()
+        network = training.build_training_network(module, world_size=2)
+        optimizer = torch.optim.SGD(network.parameters(), lr=.01)
+        all_inputs = torch.cat((inputs, inputs + 1))
+        all_targets = torch.cat((torch.zeros(4), torch.ones(4)))
+        # Catch any future recursive input-copy path, in addition to verifying
+        # actual forward/backward synchronization over two Gloo processes.
+        with patch("torch.nn.parallel.distributed._to_kwargs",
+                   side_effect=AssertionError("DDP must not recursively transfer the cache")):
+            for _ in range(2):
+                reference = module.weight.detach().clone().requires_grad_(True)
+                reference_loss = (all_inputs @ reference - all_targets).square().mean()
+                expected_grad, = torch.autograd.grad(reference_loss, reference)
+                optimizer.zero_grad(set_to_none=True)
+                loss = network(batch)
+                loss.backward()
+                torch.testing.assert_close(module.weight.grad, expected_grad)
+                if module.unused.grad is not None:
+                    raise AssertionError("Unused parameter unexpectedly received a gradient.")
+                optimizer.step()
+                torch.testing.assert_close(module.weight, reference.detach() - .01 * expected_grad)
+        (Path(result_dir) / f"rank_{rank}.json").write_text(json.dumps(
+            {"rank": rank, "checked_labels": module.checked_labels, "weight": module.weight.detach().tolist()}
+        ), encoding="utf-8")
+    finally:
+        dist.destroy_process_group()
+
+
+class DistributedInputTests(unittest.TestCase):
+    def test_explicit_transfer_preserves_cpu_cache(self):
+        batch = synthetic_batch()
+        batch["view_graspness_list"] = [[torch.ones(2, 8), torch.ones(3, 8)]]
+        # meta exercises a non-CPU dense-input transfer without needing a GPU.
+        moved = move_batch(batch, torch.device("meta"))
+        self.assertEqual(moved["img"].device.type, "meta")
+        for key in CPU_LABEL_KEYS.intersection(batch):
+            self.assertIs(moved[key], batch[key])
+        assert_cpu_label_residency(moved)
+
+    def test_model_boundary_rejects_a_moved_cache_before_forward(self):
+        batch = synthetic_batch()
+        batch["view_graspness_list"] = [[torch.empty(2, 8, device="meta")]]
+        model = torch.nn.Module()
+        module = training.DepthTrainingModule(model, training_args(), None)
+        with patch.object(model, "forward") as forward:
+            with self.assertRaisesRegex(RuntimeError, r"view_graspness_list\[0\]\[0\].*device_ids=None"):
+                module(batch, pair_seed=0)
+            forward.assert_not_called()
+
+    @unittest.skipUnless(torch.distributed.is_available() and torch.distributed.is_gloo_available(),
+                         "Two-process CPU regression requires Gloo.")
+    def test_two_rank_ddp_preserves_cache_and_synchronizes_gradients(self):
+        with tempfile.TemporaryDirectory(prefix="cva_depth_ddp_") as directory:
+            rendezvous = (Path(directory) / "rendezvous").as_uri()
+            torch.multiprocessing.spawn(cpu_ddp_label_worker, args=(rendezvous, directory), nprocs=2, join=True)
+            results = [json.loads((Path(directory) / f"rank_{rank}.json").read_text(encoding="utf-8"))
+                       for rank in range(2)]
+            self.assertEqual([r["rank"] for r in results], [0, 1])
+            self.assertTrue(all(r["checked_labels"] == 2 * len(CPU_LABEL_KEYS) * 4 * 2 for r in results))
+            self.assertEqual(results[0]["weight"], results[1]["weight"])
 
 
 class GeometryTests(unittest.TestCase):

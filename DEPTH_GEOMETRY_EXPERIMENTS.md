@@ -100,6 +100,13 @@ CUDA_VISIBLE_DEVICES=0,1 NPROC_PER_NODE=2 EPOCHS=5 \
   bash scripts/run_cva_depth_controls.sh
 ```
 
+DDP uses `device_ids=None`, matching the existing distillation trainer. Each
+process explicitly moves its model and dense inputs to its local GPU, while
+variable-length CDF/width/view caches stay on CPU for row selection. Setting
+`device_ids=[local_rank]` would make DDP recursively move those full caches to
+CUDA and violate the label matcher's CPU-residency requirement. The trainer
+checks this requirement before calling the model.
+
 | Variant | Objective in addition to existing grasp supervision |
 |---|---|
 | `none` | Original full-map masked metric L1 |
@@ -171,6 +178,9 @@ All launchers accept additional Python arguments after the script name.
 `test_cva_depth_geometry.py` runs CPU tensor, gradient, replay-contract and CLI
 tests, including the real CVA selector/grouping/CDF decoder with synthetic
 ViewNet and label fixtures and equivalence to main's supervised loss. It also
+uses two CPU/Gloo processes to verify that the production DDP wrapper preserves
+nested CPU labels and synchronizes gradients to the combined-batch reference.
+This distributed test is skipped when Gloo is unavailable. The suite also
 checks Bash syntax, paths containing spaces, DDP/resume launch arguments and
 independent control initialization when Bash is available. Bash tests are skipped
 if unavailable; Windows can set `DEPTH_TEST_BASH` to a GNU Bash executable.

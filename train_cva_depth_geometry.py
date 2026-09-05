@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader, DistributedSampler, Subset
 from cva_depth_geometry import (depth_metrics, matched_depth_pairs, metric_depth_loss,
                                 pair_metrics, relative_depth_loss)
 from cva_depth_experiment import (GRASP_WEIGHT_DEFAULTS, add_common_arguments, append_jsonl, checkpoint_metadata,
-                                  grasp_objective, load_model, make_dataset, move_batch,
+                                  assert_cpu_label_residency, grasp_objective, load_model, make_dataset, move_batch,
                                   pair_config, seed_all, seed_worker, validate_output_dir, write_json)
 
 
@@ -84,6 +84,7 @@ class DepthTrainingModule(torch.nn.Module):
             self.model.depth_net.train(training)
 
     def forward(self, batch, pair_seed, relative_multiplier=1.0):
+        assert_cpu_label_residency(batch)
         if self.args.train_scope == "joint":
             ep = dict(batch)
             ep["cva_force_process_grasp_labels"] = True
@@ -115,6 +116,17 @@ def parameter_groups(module):
     ids = {id(p) for p in depth}
     grasp = [p for p in module.parameters() if p.requires_grad and id(p) not in ids]
     return depth, grasp
+
+
+def build_training_network(module, world_size):
+    if world_size <= 1:
+        return module
+    # Match train_cva_distill_ddp.py: device_ids=[local_rank] makes DDP's
+    # _to_kwargs recursively copy the full variable-length label cache to GPU.
+    # Model parameters and dense inputs are already on this rank's GPU; None
+    # preserves CPU labels while keeping ordinary DDP gradient synchronization.
+    return DistributedDataParallel(module, device_ids=None, find_unused_parameters=True,
+                                   broadcast_buffers=False)
 
 
 def gradient_norm(parameters):
@@ -201,8 +213,7 @@ def main(argv=None):
         eval_loader = DataLoader(Subset(eval_data, list(range(rank, len(eval_data), world_size))),
                                  batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
                                  collate_fn=collate_fn, worker_init_fn=seed_worker, pin_memory=True)
-        network = DistributedDataParallel(module, device_ids=[local_rank], find_unused_parameters=True,
-                                          broadcast_buffers=False) if world_size > 1 else module
+        network = build_training_network(module, world_size)
         del checkpoint
         for epoch in range(start_epoch, args.epochs):
             seed_all(args.seed + epoch * 100003 + rank)
