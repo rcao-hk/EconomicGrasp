@@ -6,35 +6,13 @@ import argparse
 import json
 import os
 import random
+import sys
 import time
 from collections import Counter
 from typing import Dict, Mapping
 
-import numpy as np
-import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
 
-from exact_action_cdf_common import atomic_save_json, friction_to_cdf_target
-from models.p2_gripper_cdf_field import (
-    P2_PROBE_VERSION,
-    P2ScratchCdfMLP,
-    P2FieldConfig,
-    active_evidence_blocks,
-    validate_variant,
-)
-from p2_gripper_field_cache import (
-    P2GripperFieldCacheDataset,
-    collate_p2_gripper_field,
-    scan_p2_cache,
-)
-from p2_gripper_field_common import (
-    save_p2_predictor_checkpoint,
-    validate_base_checkpoint,
-)
-
-
-def parse_args():
+def _consume_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--variant",
@@ -60,7 +38,38 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--save_interval", type=int, default=5)
     parser.add_argument("--device", default="cuda:0")
-    return parser.parse_args()
+    args = parser.parse_args()
+    # Importing models.p2_gripper_cdf_field executes models/__init__.py first.
+    # That package imports utils.arguments, whose global parser would otherwise
+    # try to parse these trainer-specific flags and abort as "unrecognized".
+    sys.argv[:] = [sys.argv[0]]
+    return args
+
+
+ARGS = _consume_args()
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+
+from exact_action_cdf_common import atomic_save_json, friction_to_cdf_target
+from models.p2_gripper_cdf_field import (
+    P2_PROBE_VERSION,
+    P2ScratchCdfMLP,
+    P2FieldConfig,
+    active_evidence_blocks,
+    validate_variant,
+)
+from p2_gripper_field_cache import (
+    P2GripperFieldCacheDataset,
+    collate_p2_gripper_field,
+    scan_p2_cache,
+)
+from p2_gripper_field_common import (
+    save_p2_predictor_checkpoint,
+    validate_base_checkpoint,
+)
 
 
 def seed_everything(seed: int) -> None:
@@ -264,7 +273,7 @@ def evaluate(model, loader, device, amp_enabled, variant):
 
 
 def main():
-    args = parse_args()
+    args = ARGS
     variant = validate_variant(args.variant)
     if args.epochs <= 0 or args.batch_size <= 0 or args.hidden_dim <= 0:
         raise ValueError("epochs, batch_size, and hidden_dim must be positive")

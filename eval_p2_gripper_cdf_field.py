@@ -6,7 +6,29 @@ import argparse
 import csv
 import json
 import os
+import sys
 from typing import Dict, List, Mapping, Sequence, Tuple
+
+
+def _consume_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset_root", required=True)
+    parser.add_argument("--prediction_root", required=True)
+    parser.add_argument("--train_root", required=True)
+    parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--camera", default="realsense")
+    parser.add_argument("--sample_interval", type=int, default=10)
+    parser.add_argument("--num_workers", type=int, default=10)
+    parser.add_argument("--bootstrap_samples", type=int, default=10000)
+    parser.add_argument("--bootstrap_seed", type=int, default=0)
+    args = parser.parse_args()
+    # Consume evaluator-specific CLI before importing the models package;
+    # models/__init__.py imports utils.arguments and its global parser.
+    sys.argv[:] = [sys.argv[0]]
+    return args
+
+
+ARGS = _consume_args()
 
 import numpy as np
 from graspnetAPI import GraspNetEval
@@ -24,20 +46,6 @@ INCREMENTAL_PAIRS: Tuple[Tuple[str, str, str], ...] = (
     ("p2_b", "p2_a", "P2-B minus P2-A"),
     ("p2_c", "p2_b", "P2-C minus P2-B"),
 )
-
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset_root", required=True)
-    parser.add_argument("--prediction_root", required=True)
-    parser.add_argument("--train_root", required=True)
-    parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--camera", default="realsense")
-    parser.add_argument("--sample_interval", type=int, default=10)
-    parser.add_argument("--num_workers", type=int, default=10)
-    parser.add_argument("--bootstrap_samples", type=int, default=10000)
-    parser.add_argument("--bootstrap_seed", type=int, default=0)
-    return parser.parse_args()
 
 
 def read_json(path: str):
@@ -198,7 +206,7 @@ def paired_scene_statistics(
 
 
 def main():
-    args = parse_args()
+    args = ARGS
     if args.sample_interval <= 0:
         raise ValueError("sample_interval must be positive")
     output_dir = os.path.abspath(args.output_dir)

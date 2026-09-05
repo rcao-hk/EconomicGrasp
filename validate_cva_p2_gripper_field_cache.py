@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
-"""Validate the P2 scratch-MLP gripper-field cache."""
+"""Validate the P2 scratch-MLP gripper-field cache.
+
+Important: consume this script's CLI before importing any EconomicGrasp modules.
+Some project modules may import ``utils.arguments``, whose global parser calls
+``parse_args()`` at import time.  If P2-specific flags are still present in
+``sys.argv`` at that point, the global parser reports every P2 flag as
+"unrecognized arguments" before this validator gets a chance to parse them.
+"""
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import sys
 from collections import Counter
 
-from exact_action_cdf_common import atomic_save_json
-from models.p2_gripper_cdf_field import P2FieldConfig
-from p2_gripper_field_cache import save_inventory, scan_p2_cache
-from p2_gripper_field_common import validate_base_checkpoint
 
-
-def parse_args():
+def _consume_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cache_dir", required=True)
     parser.add_argument("--base_checkpoint", required=True)
@@ -29,11 +32,24 @@ def parse_args():
     parser.add_argument("--require_all_scenes", type=int, choices=(0, 1), default=0)
     parser.add_argument("--min_frames_per_scene", type=int, default=26)
     parser.add_argument("--output_json", default="")
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # Prevent a transitive import of utils.arguments from re-parsing P2 flags.
+    sys.argv[:] = [sys.argv[0]]
+    return args
 
 
-def main():
-    args = parse_args()
+ARGS = _consume_args()
+
+# Project imports intentionally come *after* P2 CLI consumption.
+from exact_action_cdf_common import atomic_save_json
+from models.p2_gripper_cdf_field import P2FieldConfig
+from p2_gripper_field_cache import save_inventory, scan_p2_cache
+from p2_gripper_field_common import validate_base_checkpoint
+
+
+def main() -> None:
+    args = ARGS
     _, _, base_sha = validate_base_checkpoint(
         args.base_checkpoint,
         expected_pose_depth_mode=args.expected_pose_depth_mode,
@@ -72,6 +88,7 @@ def main():
             raise RuntimeError(
                 f"Formal P2 cache incomplete: missing={missing}, insufficient={insufficient}"
             )
+
     output = args.output_json or os.path.join(
         os.path.abspath(args.cache_dir), "cache_inventory.json"
     )
