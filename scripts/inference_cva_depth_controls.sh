@@ -30,4 +30,7 @@ fi
 if [[ -n "${CONTROLS_DIR:-}" ]]; then
   INFER_ARGS+=(--controls_dir "$CONTROLS_DIR")
 fi
+if [[ -n "${GPU_IDS:-}" ]]; then
+  INFER_ARGS+=(--gpu_ids "$GPU_IDS")
+fi
 run_depth_eval_command "$PYTHON" -u inference_cva_depth_controls.py "${DEPTH_EVAL_ARGS[@]}" "${INFER_ARGS[@]}" "$@"

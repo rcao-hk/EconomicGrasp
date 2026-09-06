@@ -9,10 +9,13 @@ checkpoints/protocols must use a different prediction_root.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import math
 import os
 from pathlib import Path
+import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -22,6 +25,16 @@ from cva_depth_evaluation import (CONTRACT_VERSION, add_selection_arguments, ann
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+def parse_gpu_ids(value):
+    identifiers = tuple(part.strip() for part in value.split(","))
+    if any(not re.fullmatch(r"(?:[0-9]+|GPU-[A-Za-z0-9-]+|MIG-[A-Za-z0-9/-]+)", item) for item in identifiers):
+        raise argparse.ArgumentTypeError("gpu_ids must contain CUDA device indices or GPU/MIG UUIDs, e.g. 1,2.")
+    identifiers = tuple(str(int(item)) if item.isdigit() else item for item in identifiers)
+    if len(set(identifiers)) != len(identifiers):
+        raise argparse.ArgumentTypeError("gpu_ids must not contain duplicate devices.")
+    return identifiers
 
 
 def parse_args(argv=None):
@@ -38,6 +51,8 @@ def parse_args(argv=None):
     parser.add_argument("--collision_voxel_size", type=float, default=0.01)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument("--gpu_ids", type=parse_gpu_ids,
+                        help="One concurrent variant/split job per listed GPU, e.g. 1,2. Omit for legacy serial inference.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--m_point", type=int, default=1024)
     parser.add_argument("--num_point", type=int, default=20000)
@@ -128,6 +143,8 @@ def inference_command(args, record, split, dump_dir):
         command.append("--use_fuse_depth")
     if args.topk_views == 4:
         command.append("--use_top4_view_infer")
+    if args.gpu_ids is not None:
+        command.append("--require_cuda")
     return command
 
 
@@ -157,8 +174,7 @@ def assert_checkpoint_unchanged(record):
                          "Wait for training or select an immutable epoch file and a new prediction_root.")
 
 
-def main(argv=None):
-    args = parse_args(argv)
+def build_jobs(args):
     args.dataset_root = str(Path(args.dataset_root).resolve())
     records = {}
     for variant in args.variants:
@@ -190,29 +206,138 @@ def main(argv=None):
                 raise ValueError(f"Different checkpoint/protocol/code already occupies {dump_dir}. Use a new prediction_root.")
             if not previous and dump_dir.exists() and any(dump_dir.iterdir()):
                 raise ValueError(f"Nonempty dump directory has no manifest: {dump_dir}. Use a new prediction_root.")
-            jobs.append((variant, split, record, dump_dir, identity, previous))
-    for variant, split, record, dump_dir, identity, previous in jobs:
-        command = inference_command(args, record, split, dump_dir)
-        print(f"[DEPTH INFER] {variant}/{split}: {shlex.join(command)}", flush=True)
-        if args.dry_run:
-            continue
-        assert_checkpoint_unchanged(record)
-        if previous and previous.get("status") == "complete":
-            coverage = check_dumps(dump_dir, split, args.camera, args.frame_stride)
-            if coverage != previous.get("coverage"):
-                raise ValueError(f"Completed prediction files changed: {dump_dir}. Use a new prediction_root.")
-            print(f"[SKIP] Complete matching inference: {dump_dir}", flush=True)
-            continue
-        manifest = {"variant": variant, "identity": identity, "checkpoint": record, "status": "running",
-                    "command": command, "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
-                    "annotation_ids": annotation_ids(args.frame_stride)}
-        write_json(dump_dir / "inference_manifest.json", manifest)
-        start = time.perf_counter()
-        run_logged(command, dump_dir / "inference.log")
-        assert_checkpoint_unchanged(record)
-        manifest.update(status="complete", elapsed_seconds=time.perf_counter() - start,
-                        coverage=check_dumps(dump_dir, split, args.camera, args.frame_stride))
-        write_json(dump_dir / "inference_manifest.json", manifest)
+            jobs.append({"variant": variant, "split": split, "checkpoint": record, "dump_dir": dump_dir,
+                         "identity": identity, "previous": previous,
+                         "command": inference_command(args, record, split, dump_dir)})
+    return jobs
+
+
+def prepare_job(args, job, gpu_id=None):
+    record, dump_dir, previous = job["checkpoint"], job["dump_dir"], job["previous"]
+    assert_checkpoint_unchanged(record)
+    if previous and previous.get("status") == "complete":
+        coverage = check_dumps(dump_dir, job["split"], args.camera, args.frame_stride)
+        if coverage != previous.get("coverage"):
+            raise ValueError(f"Completed prediction files changed: {dump_dir}. Use a new prediction_root.")
+        print(f"[SKIP] Complete matching inference: {dump_dir}", flush=True)
+        return None
+    manifest = {"variant": job["variant"], "identity": job["identity"], "checkpoint": record, "status": "running",
+                "command": job["command"], "cuda_visible_devices": gpu_id if gpu_id is not None else os.environ.get("CUDA_VISIBLE_DEVICES"),
+                "annotation_ids": annotation_ids(args.frame_stride)}
+    write_json(dump_dir / "inference_manifest.json", manifest)
+    return {**job, "manifest": manifest, "started": time.perf_counter(), "log_path": dump_dir / "inference.log"}
+
+
+def complete_job(args, state):
+    assert_checkpoint_unchanged(state["checkpoint"])
+    state["manifest"].update(status="complete", elapsed_seconds=time.perf_counter() - state["started"],
+                             coverage=check_dumps(state["dump_dir"], state["split"], args.camera, args.frame_stride))
+    write_json(state["dump_dir"] / "inference_manifest.json", state["manifest"])
+
+
+def signal_job(process, force=False):
+    try:
+        if os.name == "posix":
+            # Include DataLoader workers, even if the model process already exited.
+            os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
+        elif process.poll() is None:
+            process.kill() if force else process.terminate()
+    except ProcessLookupError:
+        pass
+
+
+def stop_jobs(active):
+    states = list(active.values())
+    for state in states:
+        signal_job(state["process"])
+    deadline = time.monotonic() + 5
+    for state in states:
+        process = state["process"]
+        try:
+            process.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            signal_job(process, force=True)
+            process.wait()
+        finally:
+            # Terminate any surviving workers in a failed POSIX process group.
+            signal_job(process, force=True)
+            state["log"].close()
+
+
+def run_gpu_jobs(args, jobs):
+    """Use independent processes, one per device; never split/reorder a frame set."""
+    pending, active = deque(jobs), {}
+    print(f"[SCHEDULE] GPUs={','.join(args.gpu_ids)} jobs={len(jobs)} batch_per_GPU={args.batch_size}", flush=True)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    previous_sigint = signal.getsignal(signal.SIGINT)
+
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt("GPU inference interrupted; stopping child processes.")
+
+    signal.signal(signal.SIGTERM, interrupted)
+    try:
+        while pending or active:
+            # Check failures before assigning more work to any device.
+            for gpu_id, state in list(active.items()):
+                code = state["process"].poll()
+                if code is None:
+                    continue
+                state["log"].close()
+                if code:
+                    with state["log_path"].open(encoding="utf-8", errors="replace") as stream:
+                        tail = "".join(deque(stream, maxlen=20))
+                    raise RuntimeError(f"GPU {gpu_id}: {state['variant']}/{state['split']} exited with {code}. "
+                                       f"Log: {state['log_path']}\n{tail}")
+                complete_job(args, state)
+                print(f"[DONE] GPU={gpu_id} {state['variant']}/{state['split']} "
+                      f"seconds={time.perf_counter() - state['started']:.1f}", flush=True)
+                del active[gpu_id]
+            for gpu_id in args.gpu_ids:
+                while gpu_id not in active and pending:
+                    state = prepare_job(args, pending.popleft(), gpu_id)
+                    if state is None:
+                        continue
+                    env = dict(os.environ, CUDA_VISIBLE_DEVICES=gpu_id)
+                    log = state["log_path"].open("a", encoding="utf-8")
+                    log.write(f"\n[GPU {gpu_id}] {shlex.join(state['command'])}\n")
+                    log.flush()
+                    try:
+                        process = subprocess.Popen(state["command"], cwd=ROOT, env=env, stdout=log,
+                                                   stderr=subprocess.STDOUT, start_new_session=(os.name == "posix"))
+                    except BaseException:
+                        log.close()
+                        raise
+                    active[gpu_id] = {**state, "process": process, "log": log}
+                    print(f"[RUN] GPU={gpu_id} {state['variant']}/{state['split']} log={state['log_path']}", flush=True)
+            if active:
+                time.sleep(0.2)
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            stop_jobs(active)
+        finally:
+            signal.signal(signal.SIGTERM, previous_sigterm)
+            signal.signal(signal.SIGINT, previous_sigint)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    jobs = build_jobs(args)
+    if args.dry_run:
+        if args.gpu_ids is not None:
+            print(f"[PLAN] GPUs={','.join(args.gpu_ids)}: one variant/split job per GPU, next job goes to a free GPU.")
+        for job in jobs:
+            print(f"[DEPTH INFER] {job['variant']}/{job['split']}: {shlex.join(job['command'])}", flush=True)
+    elif args.gpu_ids is not None:
+        run_gpu_jobs(args, jobs)
+    else:
+        for job in jobs:
+            print(f"[DEPTH INFER] {job['variant']}/{job['split']}: {shlex.join(job['command'])}", flush=True)
+            state = prepare_job(args, job)
+            if state is not None:
+                run_logged(state["command"], state["log_path"])
+                complete_job(args, state)
 
 
 if __name__ == "__main__":

@@ -203,38 +203,66 @@ with the final `checkpoint.tar` from all three arms after the same training
 budget. `best_geometry.tar` is an optional secondary comparison, selected by
 depth metrics, not grasp AP; selected epochs can differ and are recorded.
 
-```bash
-export DATASET_ROOT="/data/robotarm/dataset/graspnet"  # your actual dataset path
-export BASE_CHECKPOINT="/data2/robotarm/result/grasp/rgbgrasp/log/economicgrasp_dpt_cva_cdf_distill_stage1/epoch_15_train_0.6009606198008898_val_1.1028128399874995.tar"
-export OUTPUT_ROOT="/data2/robotarm/result/grasp/rgbgrasp/diagnosis/cva_depth_controls"
-export RUN_TAG="stage1_e15_seed0"  # the actual training RUN_TAG, including any suffix
-export CONTROLS_DIR="$OUTPUT_ROOT/controls_${RUN_TAG}"
-export PREDICTION_ROOT="$OUTPUT_ROOT/ap_${RUN_TAG}_top1_full"
-
-# All three test splits, all 256 frames/scene; sequential inference on GPU 1.
-export TOPK_VIEWS=1 FRAME_STRIDE=1 COLLISION_THRESH=0
-CUDA_VISIBLE_DEVICES=1 INFER_BATCH_SIZE=1 EVAL_NUM_WORKERS=4 \
-  bash scripts/run_cva_depth_controls_eval.sh
-```
-
-Alternatively, run the two stages separately:
+**Edit the user-settings block at the top of
+`scripts/run_cva_depth_controls_eval.sh`, then run it without any environment
+prefixes:**
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 INFER_BATCH_SIZE=1 \
-  bash scripts/inference_cva_depth_controls.sh
-EVAL_NUM_WORKERS=4 bash scripts/eval_cva_depth_controls.sh
+bash scripts/run_cva_depth_controls_eval.sh
 ```
 
-The inference process uses one GPU (the first visible device); `NPROC_PER_NODE`
-is a training setting and does not launch distributed inference here. AP uses
-CPU workers and requires the GraspNetAPI/dataset assets, but no checkpoint or
-GPU. `EVAL_NUM_WORKERS` is independent of inference data-loader workers.
+The file contains explicit settings for the GPU list, per-GPU inference batch,
+CPU worker counts, dataset/checkpoint paths, actual training `RUN_TAG`, output
+directory, variants, splits and decoding protocol. These values override
+inherited environment variables. The configured defaults include:
 
-| Environment variable | Default / meaning |
+```bash
+GPU_IDS="1,2"
+INFER_BATCH_SIZE=3
+INFER_NUM_WORKERS=2
+EVAL_NUM_WORKERS=4
+RUN_TAG="stage1_e15_seed0"  # change to your actual training tag, including any suffix
+VARIANTS="base,none,foreground,anchor"
+SPLITS="test_seen,test_similar,test_novel"
+TOPK_VIEWS=1
+FRAME_STRIDE=1
+COLLISION_THRESH=0
+RUN_MODE="all"
+DRY_RUN=0
+```
+
+Check `DATASET_ROOT`, `BASE_CHECKPOINT`, `CONTROLS_DIR` and `PREDICTION_ROOT` in
+the same block. The default output is
+`$OUTPUT_ROOT/ap_${RUN_TAG}_top${TOPK_VIEWS}_stride${FRAME_STRIDE}_bs${INFER_BATCH_SIZE}_mgpu`.
+Change `DRY_RUN` to `1` in the file to print the configured commands. Set
+`RUN_MODE="inference"` or `RUN_MODE="ap"` there to run only one stage.
+
+Multi-GPU inference schedules complete **variant x split** jobs. Each listed
+GPU runs at most one independent model process; a free GPU takes the next job.
+Four checkpoints x three splits produce 12 jobs (three controls alone produce
+nine). Every job retains the original frame order, seed, batch size and output
+layout. No DDP or `NPROC_PER_NODE` is involved. A single variant/split remains
+one job, so at most `min(number of GPUs, number of pending jobs)` GPUs are used.
+
+`GPU_IDS="1,2"` assigns one job to device 1 and one to device 2. Each child
+receives exactly one `CUDA_VISIBLE_DEVICES` value and uses its local `cuda:0`.
+GPU UUIDs are also accepted; unavailable devices raise an error instead of
+silently falling back to CPU. `INFER_BATCH_SIZE=3` means three frames **per GPU**,
+and does not need to match the training batch. Changing the GPU list alone does
+not invalidate completed matching predictions.
+
+All inference jobs must succeed before AP begins. AP runs one variant/split at
+a time with `EVAL_NUM_WORKERS` CPU processes; it does not multiply that worker
+count by the number of GPUs. It requires the GraspNetAPI/dataset assets, but no
+checkpoint or GPU. This entry evaluates grasp AP; it does not yet export depth
+error metrics on the inference frames.
+
+| Setting in the combined launcher | Default / meaning |
 |---|---|
-| `BASE_CHECKPOINT` | Original student; falls back to `CHECKPOINT`. Required when `VARIANTS` includes `base`. |
-| `CONTROLS_DIR` | Parent of `none/`, `foreground/`, `anchor/`; can be derived from `OUTPUT_ROOT` + `RUN_TAG`. |
-| `PREDICTION_ROOT` | Required separate directory for predictions and AP results. |
+| `GPU_IDS` | `1,2`; use `1` for one GPU or e.g. `0,1,2,3` for four. |
+| `BASE_CHECKPOINT` | Original Stage-1 initialization checkpoint, explicitly configured in the file. Required when `VARIANTS` includes `base`. |
+| `CONTROLS_DIR` | Parent of `none/`, `foreground/`, `anchor/`; defaults to `$OUTPUT_ROOT/controls_${RUN_TAG}`. |
+| `PREDICTION_ROOT` | Separate directory for predictions and AP results, derived in the settings block or set explicitly. |
 | `CHECKPOINT_NAME` | `checkpoint.tar`; can be `epoch_04.tar` or `best_geometry.tar`. |
 | `VARIANTS` | `base,none,foreground,anchor`; select a comma-separated subset to evaluate completed arms. |
 | `SPLITS` | `test_seen,test_similar,test_novel`; comma-separated subset permitted. |
@@ -242,14 +270,17 @@ GPU. `EVAL_NUM_WORKERS` is independent of inference data-loader workers.
 | `FRAME_STRIDE` | `1` (full); `10` selects annotation IDs 0,10,...,250 in each scene. |
 | `COLLISION_THRESH` | `0`; positive values enable the legacy captured-cloud collision postprocessor. |
 | `COLLISION_VOXEL_SIZE` | `0.01` metres. |
-| `INFER_BATCH_SIZE` / `INFER_NUM_WORKERS` | `1` / `2`. |
+| `INFER_BATCH_SIZE` / `INFER_NUM_WORKERS` | `3` / `2` per GPU. |
 | `EVAL_NUM_WORKERS` | `4` CPU evaluation processes. |
+| `RUN_MODE` | `all`; `inference` only generates predictions, `ap` only evaluates existing predictions. |
 | `CHECK_ONLY` | `1` checks all manifests/dumps without computing AP. |
 | `FORCE_EVAL` | `1` recomputes already cached AP results. |
 | `DRY_RUN` | `1` prints Bash-assembled commands without requiring files/CUDA. |
 
-Each individual Bash launcher accepts extra arguments for its Python entry.
-The combined launcher accepts environment settings only. Python inference's
+The standalone inference/AP Bash launchers still accept environment settings
+and extra Python arguments; standalone inference accepts `GPU_IDS` as well.
+The combined launcher is configured by editing its own settings block and does
+not accept command-line arguments. Python inference's
 `--dry_run` also reads/validates the actual checkpoints and prints each underlying
 model command, but does not launch inference. Pose-FiLM dimensions and
 `use_fuse_depth` are read from checkpoint metadata; no manual fuse-depth flag is
@@ -295,6 +326,11 @@ command; rerun evaluation with the full selection to consolidate cached results.
 
 Repeated identical inference commands skip completed matching variant/split
 dumps. An interrupted split is recomputed in full; there is no per-frame resume.
+Each concurrent job writes its model output to its own `inference.log`. The
+console reports GPU assignments, completions and log paths. If a job fails, the
+launcher reports its log tail, stops outstanding jobs and prevents AP from
+starting. Ctrl-C and SIGTERM stop/reap child processes; Linux cleanup includes
+their DataLoader workers. Completed jobs are retained for the next run.
 Different checkpoints, inference settings or recorded code require a new
 `PREDICTION_ROOT`. Checkpoint hashes are checked before/after each inference job;
 if training overwrites `checkpoint.tar`, that job cannot be marked complete.
@@ -323,5 +359,11 @@ Use the smoke command above before launching full controls.
 `test_cva_depth_evaluation.py` adds CPU tests for the real inference frame
 selector, checkpoint/command contracts, missing/corrupt dumps, interrupted-run
 recovery, AP aggregation/differences/cache, upstream vs sampled API dispatch,
-CLI help and real Bash quoting/launching. Its evaluator/model subprocess fixtures
-test orchestration and metric arithmetic, not physical grasp correctness.
+CLI help and real Bash quoting/launching. Real CPU child processes verify GPU
+environment isolation, all 12 variant/split jobs, concurrency limits, dynamic
+queue refill, cache reuse after GPU-list changes, and failure/interrupt cleanup.
+Bash tests edit a temporary copy of the configuration block, verify that those
+settings override inherited variables, and check that failed inference prevents
+AP. These fixtures test orchestration and metric arithmetic, not physical grasp
+correctness or actual CUDA memory/performance. POSIX process-group cleanup of
+DataLoader descendants still needs confirmation on the Linux training host.

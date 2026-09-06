@@ -27,6 +27,8 @@ def _parse_distillation_inference_args():
         default="auto",
         choices=("auto", "0", "1", "2"),
     )
+    parser.add_argument("--require_cuda", action="store_true",
+                        help="Fail if the selected GPU is unavailable instead of falling back to CPU.")
     args, remaining = parser.parse_known_args()
     sys.argv = [sys.argv[0], *remaining]
     return args
@@ -260,6 +262,8 @@ def _assert_inference_geometry_role(end_points, expected_source: str) -> None:
 
 
 def inference() -> None:
+    if DISTILL_INFER_ARGS.require_cuda and not torch.cuda.is_available():
+        raise RuntimeError(f"Requested CUDA device is unavailable: CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')!r}.")
     seed = int(getattr(cfgs, "seed", 0))
     random.seed(seed)
     np.random.seed(seed)
