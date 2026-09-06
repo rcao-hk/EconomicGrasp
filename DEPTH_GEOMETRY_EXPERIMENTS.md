@@ -173,6 +173,138 @@ experiment from a checkpoint, omit `RESUME` and use a new output directory.
 All launchers accept additional Python arguments after the script name.
 `DRY_RUN=1` prints the assembled command without running Python.
 
+## Inference and GraspNet AP for the controls
+
+The repository already contains the following relevant Python entry points:
+
+| Entry point | Use |
+|---|---|
+| `inference_cva_distill.py` | Strict Stage-0/1/2 CVA-CDF inference. Use its Stage-1/2 RGB student path for these checkpoints. |
+| `inference_cva.py` | General legacy/CDF CVA inference; lacks the distillation checkpoint/input-contract checks. |
+| `inference_cva_distill_p0b.py` | P0-B student/teacher/oracle-hybrid diagnostic inference. |
+| `eval.py` | Existing GraspNet AP evaluation for a single dump/split; saves the raw accuracy array. |
+| `eval_cva_distill_p0b.py` | P0-B-specific AP summary with completeness checks. |
+
+`scripts/` is ignored in this repository. The tracked version did not include
+inference/AP Bash launchers for these entries; ignored scripts on the training
+machine may exist independently. The new launchers below are explicitly tracked
+without changing that ignore rule.
+
+The new root-level `inference_cva_depth_controls.py` orchestrates the existing
+`inference_cva_distill.py`, preserving the real model, selector and CDF decoder.
+`eval_cva_depth_controls.py` calls `GraspNetEval.eval_seen/eval_similar/eval_novel`.
+It does not introduce a new grasp metric or any training-time geometry evaluation.
+The existing inference entry now applies `--seed` to Python/NumPy/PyTorch and
+seeds data-loader workers from PyTorch. This controls random sampling, but does
+not promise bitwise deterministic CUDA kernels.
+
+Keep the original initialization checkpoint as `BASE_CHECKPOINT`. Compare it
+with the final `checkpoint.tar` from all three arms after the same training
+budget. `best_geometry.tar` is an optional secondary comparison, selected by
+depth metrics, not grasp AP; selected epochs can differ and are recorded.
+
+```bash
+export DATASET_ROOT="/data/robotarm/dataset/graspnet"  # your actual dataset path
+export BASE_CHECKPOINT="/data2/robotarm/result/grasp/rgbgrasp/log/economicgrasp_dpt_cva_cdf_distill_stage1/epoch_15_train_0.6009606198008898_val_1.1028128399874995.tar"
+export OUTPUT_ROOT="/data2/robotarm/result/grasp/rgbgrasp/diagnosis/cva_depth_controls"
+export RUN_TAG="stage1_e15_seed0"  # the actual training RUN_TAG, including any suffix
+export CONTROLS_DIR="$OUTPUT_ROOT/controls_${RUN_TAG}"
+export PREDICTION_ROOT="$OUTPUT_ROOT/ap_${RUN_TAG}_top1_full"
+
+# All three test splits, all 256 frames/scene; sequential inference on GPU 1.
+export TOPK_VIEWS=1 FRAME_STRIDE=1 COLLISION_THRESH=0
+CUDA_VISIBLE_DEVICES=1 INFER_BATCH_SIZE=1 EVAL_NUM_WORKERS=4 \
+  bash scripts/run_cva_depth_controls_eval.sh
+```
+
+Alternatively, run the two stages separately:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 INFER_BATCH_SIZE=1 \
+  bash scripts/inference_cva_depth_controls.sh
+EVAL_NUM_WORKERS=4 bash scripts/eval_cva_depth_controls.sh
+```
+
+The inference process uses one GPU (the first visible device); `NPROC_PER_NODE`
+is a training setting and does not launch distributed inference here. AP uses
+CPU workers and requires the GraspNetAPI/dataset assets, but no checkpoint or
+GPU. `EVAL_NUM_WORKERS` is independent of inference data-loader workers.
+
+| Environment variable | Default / meaning |
+|---|---|
+| `BASE_CHECKPOINT` | Original student; falls back to `CHECKPOINT`. Required when `VARIANTS` includes `base`. |
+| `CONTROLS_DIR` | Parent of `none/`, `foreground/`, `anchor/`; can be derived from `OUTPUT_ROOT` + `RUN_TAG`. |
+| `PREDICTION_ROOT` | Required separate directory for predictions and AP results. |
+| `CHECKPOINT_NAME` | `checkpoint.tar`; can be `epoch_04.tar` or `best_geometry.tar`. |
+| `VARIANTS` | `base,none,foreground,anchor`; select a comma-separated subset to evaluate completed arms. |
+| `SPLITS` | `test_seen,test_similar,test_novel`; comma-separated subset permitted. |
+| `TOPK_VIEWS` | `1`; set `4` for Top-4 decoding, with a new prediction directory. |
+| `FRAME_STRIDE` | `1` (full); `10` selects annotation IDs 0,10,...,250 in each scene. |
+| `COLLISION_THRESH` | `0`; positive values enable the legacy captured-cloud collision postprocessor. |
+| `COLLISION_VOXEL_SIZE` | `0.01` metres. |
+| `INFER_BATCH_SIZE` / `INFER_NUM_WORKERS` | `1` / `2`. |
+| `EVAL_NUM_WORKERS` | `4` CPU evaluation processes. |
+| `CHECK_ONLY` | `1` checks all manifests/dumps without computing AP. |
+| `FORCE_EVAL` | `1` recomputes already cached AP results. |
+| `DRY_RUN` | `1` prints Bash-assembled commands without requiring files/CUDA. |
+
+Each individual Bash launcher accepts extra arguments for its Python entry.
+The combined launcher accepts environment settings only. Python inference's
+`--dry_run` also reads/validates the actual checkpoints and prints each underlying
+model command, but does not launch inference. Pose-FiLM dimensions and
+`use_fuse_depth` are read from checkpoint metadata; no manual fuse-depth flag is
+needed. These input contracts must agree across the compared checkpoints.
+
+For an initial cheaper pass, use a new `PREDICTION_ROOT`, `SPLITS=test_seen` and
+`FRAME_STRIDE=10`. **Sampled AP requires the existing GraspNetAPI fork supporting
+`anno_sample_ratio`.** The unmodified upstream API supports the full protocol
+(`FRAME_STRIDE=1`); the new evaluator fails clearly if sampling is unavailable.
+It verifies the returned accuracy tensor has exactly 30 scenes x selected frames
+x 50 ranks x 6 friction thresholds. Sampled results must be labelled as sampled,
+not reported as the complete benchmark.
+
+Do not pass the same literal `sample_interval` to the old Python entries:
+legacy inference takes a fraction (`0.1`), whereas `eval.py` takes an integer
+stride (`10`). The new entries use `FRAME_STRIDE` once at inference time and read
+the exact sampling protocol from manifests during AP evaluation.
+
+Set Top-1/Top-4 and collision filtering identically for every arm. The default
+`COLLISION_THRESH=0` disables the extra captured-cloud postprocessor; official
+AP still performs its own geometric evaluation. To reproduce older experiments
+that used collision threshold `0.01`, set it explicitly for all four checkpoints.
+Such postprocessing uses captured depth outside the RGB model, so record that
+protocol when interpreting RGB-only results. Additional pre-evaluation NMS is
+not applied; the installed GraspNetAPI supplies its normal evaluation behavior.
+
+Outputs:
+
+* `PREDICTION_ROOT/<variant>/<split>/scene_XXXX/<camera>/AAAA.npy`: predicted grasps.
+* Each variant/split also has `inference.log` and `inference_manifest.json`,
+  recording checkpoint SHA256, input contract, command, seed, sampling and coverage.
+* `ap_<split>_<camera>.npy` / `.json`: raw official accuracy tensor and AP summary,
+  including per-scene AP and evaluator source fingerprints.
+* `PREDICTION_ROOT/ap_summary.csv` / `.json`: AP, AP0.4 and AP0.8 in percent.
+* `PREDICTION_ROOT/ap_deltas.csv`: differences in percentage points for
+  `none - base`, `foreground - none`, `anchor - foreground`, and `anchor - none`.
+
+AP is the mean precision over ranks 1..50, all evaluated frames and friction
+coefficients 0.2,0.4,0.6,0.8,1.0,1.2; AP0.4/AP0.8 fix the friction coefficient.
+This follows the [official GraspNet evaluator](https://github.com/graspnet/graspnetAPI/blob/master/graspnetAPI/graspnet_eval.py).
+The table describes only the variants/splits requested in the latest evaluation
+command; rerun evaluation with the full selection to consolidate cached results.
+
+Repeated identical inference commands skip completed matching variant/split
+dumps. An interrupted split is recomputed in full; there is no per-frame resume.
+Different checkpoints, inference settings or recorded code require a new
+`PREDICTION_ROOT`. Checkpoint hashes are checked before/after each inference job;
+if training overwrites `checkpoint.tar`, that job cannot be marked complete.
+Wait until training finishes or select an immutable saved epoch file.
+AP refuses missing, extra, corrupt or changed dump files;
+valid empty `(0,17)` grasp arrays remain valid evaluation inputs. The AP cache
+uses input/evaluator identities, output-array SHA256 and prediction-file size/
+mtime fingerprints; prediction fingerprints are not full content hashes.
+Prediction files are retained. Matching AP jobs are reused unless `FORCE_EVAL=1`.
+
 ## Verification scope
 
 `test_cva_depth_geometry.py` runs CPU tensor, gradient, replay-contract and CLI
@@ -187,3 +319,9 @@ if unavailable; Windows can set `DEPTH_TEST_BASH` to a GNU Bash executable.
 The tests do not import the full CUDA model/dataset stack. Full dataset loading,
 CUDA kernels, multi-GPU training and AP still require the real training machine.
 Use the smoke command above before launching full controls.
+
+`test_cva_depth_evaluation.py` adds CPU tests for the real inference frame
+selector, checkpoint/command contracts, missing/corrupt dumps, interrupted-run
+recovery, AP aggregation/differences/cache, upstream vs sampled API dispatch,
+CLI help and real Bash quoting/launching. Its evaluator/model subprocess fixtures
+test orchestration and metric arithmetic, not physical grasp correctness.

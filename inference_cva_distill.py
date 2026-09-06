@@ -8,6 +8,7 @@ roles use the same deterministic image-space FPS selector.
 
 import argparse
 import os
+import random
 import sys
 import time
 from typing import List, Mapping, Tuple
@@ -45,7 +46,9 @@ from models.economicgrasp_dpt_distill import (
 
 
 def _worker_init(worker_id: int) -> None:
-    np.random.seed(np.random.get_state()[1][0] + worker_id)
+    seed = torch.initial_seed() % (2**32)
+    np.random.seed(seed)
+    random.seed(seed)
 
 
 def _build_subset(
@@ -95,7 +98,7 @@ def _read_checkpoint(checkpoint_path: str):
         raise FileNotFoundError(
             f"CVA model checkpoint not found: {checkpoint_path}"
         )
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
         raise RuntimeError(
             "This inference script requires a full Stage-0/1/2 checkpoint with "
@@ -257,6 +260,12 @@ def _assert_inference_geometry_role(end_points, expected_source: str) -> None:
 
 
 def inference() -> None:
+    seed = int(getattr(cfgs, "seed", 0))
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     if not cfgs.multi_modal:
         raise RuntimeError("CVA inference requires --multi_modal.")
     if bool(getattr(cfgs, "kview_use_collision", False)):
