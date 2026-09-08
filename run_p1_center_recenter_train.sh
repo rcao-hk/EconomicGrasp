@@ -23,6 +23,8 @@ set -euo pipefail
 #   CENTER_BETA_M=0.01
 #   MAX_RESIDUAL_M=0.08
 #   P1_HIDDEN_DIM=128
+#   P1_TRAIN_SAMPLE_INTERVAL=0.1  # scene-stratified 1/10 train frames
+#   P1_EVAL_SAMPLE_INTERVAL=0.1   # scene-stratified 1/10 validation frames
 #   ENABLE_EVAL=1
 #   CDF_LABEL_FOLDER=...
 #   GRASPNESS_MODE=...
@@ -45,6 +47,8 @@ CENTER_LOSS_WEIGHT="${CENTER_LOSS_WEIGHT:-1.0}"
 CENTER_BETA_M="${CENTER_BETA_M:-0.01}"
 MAX_RESIDUAL_M="${MAX_RESIDUAL_M:-0.08}"
 P1_HIDDEN_DIM="${P1_HIDDEN_DIM:-128}"
+P1_TRAIN_SAMPLE_INTERVAL="${P1_TRAIN_SAMPLE_INTERVAL:-1.0}"
+P1_EVAL_SAMPLE_INTERVAL="${P1_EVAL_SAMPLE_INTERVAL:-1.0}"
 ENABLE_EVAL="${ENABLE_EVAL:-1}"
 SEED="${SEED:-0}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
@@ -89,6 +93,8 @@ ARGS=(
   --p1_center_beta_m "${CENTER_BETA_M}"
   --p1_max_residual_m "${MAX_RESIDUAL_M}"
   --p1_hidden_dim "${P1_HIDDEN_DIM}"
+  --p1_train_sample_interval "${P1_TRAIN_SAMPLE_INTERVAL}"
+  --p1_eval_sample_interval "${P1_EVAL_SAMPLE_INTERVAL}"
 )
 
 if [[ "${USE_FUSE_DEPTH}" == "1" ]]; then
@@ -107,6 +113,7 @@ fi
 echo "[P1-TRAIN] mode=${P1_TRAIN_MODE} GPUs=${GPUS} nproc=${NPROC}"
 echo "[P1-TRAIN] init=${INIT_CKPT}"
 echo "[P1-TRAIN] output=${OUTPUT_ROOT} lr=${LEARNING_RATE}"
+echo "[P1-TRAIN] sample_interval train=${P1_TRAIN_SAMPLE_INTERVAL} eval=${P1_EVAL_SAMPLE_INTERVAL}"
 
 # EXTRA_ARGS is intentionally expanded last for local experiment controls.
 # shellcheck disable=SC2086
