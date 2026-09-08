@@ -25,9 +25,9 @@ set -euo pipefail
 #   P1_HIDDEN_DIM=128
 #   P1_TRAIN_SAMPLE_INTERVAL=0.1  # scene-stratified 1/10 train frames
 #   P1_EVAL_SAMPLE_INTERVAL=0.1   # scene-stratified 1/10 validation frames
+#   GRASPNESS_MODE=scene          # scene | instance; default scene
 #   ENABLE_EVAL=1
 #   CDF_LABEL_FOLDER=...
-#   GRASPNESS_MODE=...
 #   EXTRA_ARGS="..."
 
 : "${DATASET_ROOT:?Set DATASET_ROOT}"
@@ -49,6 +49,7 @@ MAX_RESIDUAL_M="${MAX_RESIDUAL_M:-0.08}"
 P1_HIDDEN_DIM="${P1_HIDDEN_DIM:-128}"
 P1_TRAIN_SAMPLE_INTERVAL="${P1_TRAIN_SAMPLE_INTERVAL:-1.0}"
 P1_EVAL_SAMPLE_INTERVAL="${P1_EVAL_SAMPLE_INTERVAL:-1.0}"
+GRASPNESS_MODE="${GRASPNESS_MODE:-scene}"
 ENABLE_EVAL="${ENABLE_EVAL:-1}"
 SEED="${SEED:-0}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
@@ -66,6 +67,15 @@ case "${P1_TRAIN_MODE}" in
     ;;
 esac
 LEARNING_RATE="${LEARNING_RATE:-${DEFAULT_LR}}"
+
+case "${GRASPNESS_MODE}" in
+  scene|instance)
+    ;;
+  *)
+    echo "Invalid GRASPNESS_MODE=${GRASPNESS_MODE}; expected scene or instance" >&2
+    exit 2
+    ;;
+esac
 
 IFS=',' read -r -a GPU_ARRAY <<< "${GPUS}"
 NPROC="${#GPU_ARRAY[@]}"
@@ -88,6 +98,7 @@ ARGS=(
   --eval_num_workers "${EVAL_NUM_WORKERS}"
   --learning_rate "${LEARNING_RATE}"
   --seed "${SEED}"
+  --graspness_mode "${GRASPNESS_MODE}"
   --p1_train_mode "${P1_TRAIN_MODE}"
   --p1_center_loss_weight "${CENTER_LOSS_WEIGHT}"
   --p1_center_beta_m "${CENTER_BETA_M}"
@@ -106,13 +117,11 @@ fi
 if [[ -n "${CDF_LABEL_FOLDER:-}" ]]; then
   ARGS+=(--cdf_label_folder "${CDF_LABEL_FOLDER}")
 fi
-if [[ -n "${GRASPNESS_MODE:-}" ]]; then
-  ARGS+=(--graspness_mode "${GRASPNESS_MODE}")
-fi
 
 echo "[P1-TRAIN] mode=${P1_TRAIN_MODE} GPUs=${GPUS} nproc=${NPROC}"
 echo "[P1-TRAIN] init=${INIT_CKPT}"
 echo "[P1-TRAIN] output=${OUTPUT_ROOT} lr=${LEARNING_RATE}"
+echo "[P1-TRAIN] graspness_mode=${GRASPNESS_MODE}"
 echo "[P1-TRAIN] sample_interval train=${P1_TRAIN_SAMPLE_INTERVAL} eval=${P1_EVAL_SAMPLE_INTERVAL}"
 
 # EXTRA_ARGS is intentionally expanded last for local experiment controls.
