@@ -116,7 +116,48 @@ Default beta is `0.01 m`. The ordinary CVA-CDF supervised objective is retained
 for logging and for `head_grasp`/`joint`. No teacher, force-closure evaluator,
 CAD evaluator, or Dex-Net call is introduced.
 
-## First run
+## Fast scene-stratified subsampling
+
+P1 training adds two experiment-local arguments:
+
+```text
+--p1_train_sample_interval FLOAT
+--p1_eval_sample_interval FLOAT
+```
+
+Both default to `1.0`, preserving the previous full-dataset behavior. A value of
+`0.1` keeps about one tenth of the frames **inside every scene**. Sampling is:
+
+- deterministic;
+- scene-stratified;
+- evenly spread through each scene's frame sequence;
+- based on the dataset's actual `scenename` mapping rather than assuming a fixed
+  number of frames per scene.
+
+This is deliberately different from selecting only 10% of scenes. All train or
+validation scenes remain represented, so object/clutter/viewpoint diversity is
+preserved as much as possible during the fast P1 mechanism test.
+
+The trainer reconstructs the DDP samplers and DataLoaders after subsetting.
+Training still shuffles the selected subset epoch by epoch; validation remains
+deterministic. Checkpoints record:
+
+```text
+p1_sampling_protocol
+p1_train_sample_interval
+p1_eval_sample_interval
+p1_train_full_size
+p1_train_selected_size
+p1_train_scene_count
+p1_eval_full_size
+p1_eval_selected_size
+p1_eval_scene_count
+```
+
+A resumed P1 run must use the same train/eval sample intervals. Older P1
+checkpoints without these fields are interpreted as `1.0 / 1.0`.
+
+## Recommended 1/10 mechanism run
 
 ```bash
 git checkout exp/p0-pose-space-cdf-transport
@@ -125,7 +166,32 @@ DATASET_ROOT=/path/to/graspnet \
 INIT_CKPT=/path/to/stage1_checkpoint_20.tar \
 GPUS=0,1,2,3,4,5 \
 P1_TRAIN_MODE=center_only \
-OUTPUT_ROOT=/path/to/results/p1_center_only \
+P1_TRAIN_SAMPLE_INTERVAL=0.1 \
+P1_EVAL_SAMPLE_INTERVAL=0.1 \
+OUTPUT_ROOT=/path/to/results/p1_center_only_10pct \
+POSE_DEPTH_MODE=global_film \
+USE_FUSE_DEPTH=1 \
+MAX_EPOCH=5 \
+bash run_p1_center_recenter_train.sh
+```
+
+This is the recommended first mechanism-validation configuration. If center MAE
+falls substantially but grasp metrics do not move on the 1/10 validation set,
+do not immediately spend compute on a full-data `center_only` run; first inspect
+whether sparse center accuracy is actually the causal bottleneck.
+
+## Full-data run
+
+Omit the two interval variables or set both to `1.0`:
+
+```bash
+DATASET_ROOT=/path/to/graspnet \
+INIT_CKPT=/path/to/stage1_checkpoint_20.tar \
+GPUS=0,1,2,3,4,5 \
+P1_TRAIN_MODE=center_only \
+P1_TRAIN_SAMPLE_INTERVAL=1.0 \
+P1_EVAL_SAMPLE_INTERVAL=1.0 \
+OUTPUT_ROOT=/path/to/results/p1_center_only_full \
 POSE_DEPTH_MODE=global_film \
 USE_FUSE_DEPTH=1 \
 MAX_EPOCH=5 \
