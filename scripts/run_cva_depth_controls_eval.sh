@@ -4,7 +4,7 @@ set -euo pipefail
 
 # ---- User settings: these values override inherited environment variables. ----
 PYTHON="python"                          # Python from the activated grasp environment.
-GPU_IDS="1,2"                            # CUDA device IDs; one inference process per GPU.
+GPU_IDS="1,2,3,5,6"                            # CUDA device IDs; one inference process per GPU.
 INFER_BATCH_SIZE=3                       # Per GPU, independent of training batch size.
 INFER_NUM_WORKERS=2                      # DataLoader workers per GPU process.
 EVAL_NUM_WORKERS=4                       # CPU processes for AP; total, not per GPU.
@@ -15,13 +15,13 @@ OUTPUT_ROOT="/data2/robotarm/result/grasp/rgbgrasp/diagnosis/cva_depth_controls"
 RUN_TAG="stage1_e15_seed0"                # Actual training tag, including any suffix.
 CONTROLS_DIR="$OUTPUT_ROOT/controls_${RUN_TAG}"
 CHECKPOINT_NAME="checkpoint.tar"          # Same saved filename in each trained arm.
-VARIANTS="base,none,foreground,anchor"     # Remove base if only the three controls are needed.
+VARIANTS="base,anchor"     # Remove base if only the three controls are needed.
 SPLITS="test_seen,test_similar,test_novel"
 
 CAMERA="realsense"
 TOPK_VIEWS=1                             # 1 or 4; identical for every variant.
-FRAME_STRIDE=1                           # 1 = full benchmark; 10 = sampled API fork required.
-COLLISION_THRESH=0                       # >0 uses the captured-cloud collision postprocessor.
+FRAME_STRIDE=10                           # 1 = full benchmark; 10 = sampled API fork required.
+COLLISION_THRESH=0.01                       # >0 uses the captured-cloud collision postprocessor.
 COLLISION_VOXEL_SIZE=0.01
 SEED=0
 M_POINT=1024
