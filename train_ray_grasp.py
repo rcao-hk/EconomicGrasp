@@ -19,11 +19,13 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+# IMPORTANT: do not import anything from ``models`` before parse_cli() has
+# consumed all --ray_* arguments. models/__init__.py imports legacy modules,
+# which import utils.arguments and execute its global parse_args().
 from utils.ray_grasp_runtime import (
     parse_cli, init_distributed, cleanup, load_model, build_dataset, make_loader,
     move_batch, json_write, reduce_statistics,
 )
-from models.ray_grasp_ops import loss_sums, metric_sums
 
 
 def sampling_record(indices):
@@ -56,6 +58,10 @@ def objective(sums, weights, world, synchronize):
 
 
 def epoch_loop(network, raw, loader, cfg, args, device, world, weights, epoch, optimizer=None):
+    # Safe here: main() has already called parse_cli(), so the repository-global
+    # argparse instance has seen only shared arguments.
+    from models.ray_grasp_ops import loss_sums, metric_sums
+
     training = optimizer is not None
     raw.train(training)
     stats = new_stats(len(raw.kview_grasp_module.offsets_m))
@@ -89,6 +95,7 @@ def epoch_loop(network, raw, loader, cfg, args, device, world, weights, epoch, o
 
 
 def main():
+    # This must be the first operation that can reach utils.arguments.
     args, cfg = parse_cli(training=True)
     if not math.isfinite(args.ray_support_weight) or args.ray_support_weight < 0 or args.ray_log_every <= 0:
         raise ValueError("Support weight must be nonnegative and log interval positive.")
