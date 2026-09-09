@@ -1,4 +1,10 @@
-"""Runtime helpers for the isolated P2 experiment; import-safe until parse_cli."""
+"""Runtime helpers for the isolated P2 experiment; import-safe until parse_cli.
+
+Important: this module MUST NOT import anything under ``models`` at module-import
+time. ``models/__init__.py`` imports legacy model modules that import
+``utils.arguments`` and therefore execute the repository's global
+``parse_args()``. P2-specific arguments have to be consumed first.
+"""
 from __future__ import annotations
 
 import argparse
@@ -15,10 +21,29 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, Subset, DistributedSampler
 
-from models.ray_grasp_ops import DEFAULT_OFFSETS_MM, parse_offsets
+# Keep these tiny CLI-only helpers local. Importing models.ray_grasp_ops here
+# would execute models/__init__.py -> legacy models -> utils.arguments too early.
+DEFAULT_OFFSETS_MM = (-40.0, -20.0, -10.0, 0.0, 10.0, 20.0, 40.0)
+
+
+def _parse_offsets(text):
+    values = tuple(float(x) for x in (text.split(",") if isinstance(text, str) else text))
+    if not values or not all(math.isfinite(x) for x in values):
+        raise ValueError("Ray offsets must be a nonempty finite list in millimetres.")
+    if len(set(values)) != len(values) or values.count(0.0) != 1:
+        raise ValueError("Ray offsets must be unique and include exactly one zero.")
+    if max(map(abs, values)) > 250:
+        raise ValueError("Ray offsets exceed 250 mm; check the units.")
+    return values
 
 
 def parse_cli(training: bool):
+    """Consume P2 flags before importing the repository-global parser.
+
+    This ordering is a hard contract. ``utils.arguments`` parses ``sys.argv``
+    at import time, so any P2 flag left in argv at that point becomes an
+    ``unrecognized arguments`` error.
+    """
     p = argparse.ArgumentParser(add_help=False, description="P2 ray-specific arguments (shared flags below)")
     p.add_argument("--ray_offsets_mm", default=None,
                    help="Comma-separated mm; pass negative values as --ray_offsets_mm=-40,-20,-10,0,10,20,40")
@@ -39,9 +64,13 @@ def parse_cli(training: bool):
     if "--help" in sys.argv or "-h" in sys.argv:
         p.print_help()
     args, remaining = p.parse_known_args()
+
+    # Record only shared flags, then remove every P2 flag before the legacy
+    # parser is imported. Do not import any models module above this point.
     explicit = {x.split("=")[0] for x in remaining if x.startswith("--")}
     sys.argv = [sys.argv[0], *remaining]
     from utils.arguments import cfgs
+
     cfgs.multi_modal, cfgs.use_cdf, cfgs.extend_angle = True, True, True
     cfgs.graspness_mode = cfgs.graspness_mode or "scene"
     if cfgs.graspness_mode not in ("scene", "instance"):
@@ -153,6 +182,8 @@ def move_batch(batch, device):
 
 
 def load_model(args, cfg, device):
+    # Safe now: parse_cli has already stripped P2 flags and imported the shared
+    # parser before this function can be called.
     from models.economicgrasp_ray import RayConditionedGrasp, RAY_CONTRACT_VERSION
     if not cfg.checkpoint_path or not Path(cfg.checkpoint_path).is_file():
         raise FileNotFoundError(f"Checkpoint not found: {cfg.checkpoint_path}")
@@ -180,7 +211,7 @@ def load_model(args, cfg, device):
     for key in ("min_depth", "max_depth", "bin_num", "num_view", "num_angle", "num_depth"):
         if key in ck and float(ck[key]) != float(getattr(cfg, key)):
             raise ValueError(f"Checkpoint {key}={ck[key]} differs from CLI={getattr(cfg, key)}.")
-    offsets = parse_offsets(args.ray_offsets_mm or (ck.get("ray_offsets_mm") if is_ray else DEFAULT_OFFSETS_MM))
+    offsets = _parse_offsets(args.ray_offsets_mm or (ck.get("ray_offsets_mm") if is_ray else DEFAULT_OFFSETS_MM))
     if is_ray and offsets != tuple(ck["ray_offsets_mm"]):
         raise ValueError("Do not change the trained ray grid at inference/resume; use --ray_selection zero for a slice.")
     if is_ray and int(ck.get("m_point", cfg.m_point)) != cfg.m_point:
