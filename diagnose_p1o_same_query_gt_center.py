@@ -302,6 +302,21 @@ def _assert_same_query(
     oracle: Mapping[str, Any],
 ) -> Dict[str, float]:
     metrics: Dict[str, float] = {}
+
+    # The dense predicted geometry must be bitwise/numerically unchanged; P1-O
+    # is a sparse-center intervention only.
+    bdepth = _require_tensor(baseline, "depth_map_used_for_geometry").detach()
+    odepth = _require_tensor(oracle, "depth_map_used_for_geometry").detach()
+    if bdepth.shape != odepth.shape:
+        raise RuntimeError("Baseline/oracle dense geometry shapes differ.")
+    dense_max_diff = float((bdepth - odepth).abs().max().item())
+    metrics["dense_geometry_max_abs_diff_m"] = dense_max_diff
+    if dense_max_diff > float(P1O_ARGS.p1o_assert_atol):
+        raise RuntimeError(
+            "P1-O changed dense predicted geometry, violating the sparse-only "
+            f"contract: max_abs_diff={dense_max_diff:.3e}."
+        )
+
     for key in ("kview_base_token_sel_idx", "token_sel_idx"):
         a = _require_tensor(baseline, key).detach().long()
         b = _require_tensor(oracle, key).detach().long()
@@ -350,6 +365,22 @@ def _accumulate_oracle_metrics(
     base_xyz = _require_tensor(oracle, "p1o_center_xyz_base").detach()
     gt_xyz = _require_tensor(oracle, "p1o_center_xyz_gt").detach()
     oracle_xyz = _require_tensor(oracle, "p1o_center_xyz_oracle").detach()
+    downstream_xyz = _require_tensor(oracle, "xyz_graspable").detach()
+    if downstream_xyz.shape != oracle_xyz.shape:
+        raise RuntimeError(
+            "P1-O downstream xyz_graspable shape differs from oracle sparse "
+            f"center shape: {tuple(downstream_xyz.shape)} vs {tuple(oracle_xyz.shape)}."
+        )
+    downstream_max_diff = float((downstream_xyz - oracle_xyz).abs().max().item())
+    if downstream_max_diff > float(P1O_ARGS.p1o_assert_atol):
+        raise RuntimeError(
+            "P1-O GT center was not propagated as the downstream grasp center: "
+            f"max_abs_diff={downstream_max_diff:.3e}."
+        )
+    sums["downstream_center_max_abs_diff_m"] = max(
+        sums.get("downstream_center_max_abs_diff_m", 0.0),
+        downstream_max_diff,
+    )
 
     total = int(valid.numel())
     nvalid = int(valid.sum().item())
@@ -705,6 +736,12 @@ def inference() -> None:
         ),
         "query_pixel_idx_mismatch_ratio": _mean_metric(
             metric_sums, metric_counts, "token_sel_idx_mismatch_ratio"
+        ),
+        "dense_geometry_max_abs_diff_m": _mean_metric(
+            metric_sums, metric_counts, "dense_geometry_max_abs_diff_m"
+        ),
+        "downstream_center_max_abs_diff_m": float(
+            metric_sums.get("downstream_center_max_abs_diff_m", float("nan"))
         ),
         "view_index_change_ratio": _mean_metric(
             metric_sums, metric_counts, "view_index_change_ratio"
