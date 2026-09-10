@@ -1,8 +1,8 @@
 """Pure tensor operations for P3 ray-evidence aggregation.
 
-No repository model or global argparse modules are imported here.  P3 retains K
-metric center hypotheses through representation formation and performs only the
-unavoidable final grasp decode over (ray depth, angle, insertion depth).
+P3 keeps K metric-center hypotheses through representation formation and makes
+no hard depth decision before the grasp head.  The only K decision happens in
+the final task decode over K x angle x insertion-depth.
 """
 from __future__ import annotations
 
@@ -19,17 +19,14 @@ def parse_offsets(value: str | Sequence[float]) -> tuple[float, ...]:
     values = tuple(float(x) for x in (value.split(",") if isinstance(value, str) else value))
     if not values or not all(math.isfinite(x) for x in values):
         raise ValueError("P3 ray offsets must be a non-empty finite list in millimetres.")
-    if len(set(values)) != len(values):
-        raise ValueError("P3 ray offsets must be unique.")
-    if values.count(0.0) != 1:
-        raise ValueError("P3 requires exactly one zero-offset center.")
+    if len(set(values)) != len(values) or values.count(0.0) != 1:
+        raise ValueError("P3 offsets must be unique and contain exactly one zero.")
     if max(abs(x) for x in values) > 250.0:
         raise ValueError("P3 ray offsets exceed 250 mm; check units.")
     return values
 
 
 def backproject_uvz(uv: torch.Tensor, z: torch.Tensor, camera_k: torch.Tensor) -> torch.Tensor:
-    """Backproject camera-z depth. uv=[B,Q,2], z=[B,Q], K=[B,3,3]."""
     if uv.dim() != 3 or uv.shape[-1] != 2 or z.shape != uv.shape[:2]:
         raise ValueError("Expected uv [B,Q,2] and z [B,Q].")
     if camera_k.shape != (uv.shape[0], 3, 3):
@@ -46,21 +43,8 @@ def backproject_uvz(uv: torch.Tensor, z: torch.Tensor, camera_k: torch.Tensor) -
     return torch.stack((x, y, z), dim=-1)
 
 
-def build_ray_centers(
-    base_xyz: torch.Tensor,
-    token_idx: torch.Tensor,
-    camera_k: torch.Tensor,
-    image_width: int,
-    offsets_m: torch.Tensor,
-    min_depth: float,
-    max_depth: float,
-):
-    """Return centers [B,Q,K,3], in_range [B,Q,K], descriptor [B,Q,K,5].
-
-    The offsets perturb camera z, not Euclidean ray length.  The zero-offset
-    center is copied from the base query exactly to make the identity control
-    strict.  Out-of-range hypotheses are numerically clamped but always masked.
-    """
+def build_ray_centers(base_xyz, token_idx, camera_k, image_width, offsets_m, min_depth, max_depth):
+    """Build [B,Q,K,3] camera-z hypotheses and [B,Q,K,5] ray descriptors."""
     if base_xyz.dim() != 3 or base_xyz.shape[-1] != 3:
         raise ValueError("base_xyz must be [B,Q,3].")
     if token_idx.shape != base_xyz.shape[:2] or offsets_m.dim() != 1:
@@ -69,9 +53,8 @@ def build_ray_centers(
         raise FloatingPointError("P3 received a non-finite base center.")
     B, Q, _ = base_xyz.shape
     z0 = base_xyz[..., 2].detach()
-    u = (token_idx % int(image_width)).to(z0)
-    v = (token_idx // int(image_width)).to(z0)
-    uv = torch.stack((u, v), dim=-1)
+    uv = torch.stack(((token_idx % int(image_width)).to(z0),
+                      (token_idx // int(image_width)).to(z0)), dim=-1)
     ray_at_one = backproject_uvz(uv, torch.ones_like(z0), camera_k)
     offsets = offsets_m.to(z0).view(1, 1, -1)
     z = z0.unsqueeze(-1) + offsets
@@ -84,7 +67,6 @@ def build_ray_centers(
         raise ValueError("P3 needs one zero-offset hypothesis.")
     centers = centers.clone()
     centers[:, :, int(zero_idx.item())] = base_xyz.detach()
-
     z_span = max(float(max_depth) - float(min_depth), 1e-6)
     off_scale = max(float(offsets_m.abs().max().item()), 0.01)
     rx = ray_at_one[..., 0].unsqueeze(-1).expand(B, Q, offsets_m.numel())
@@ -99,7 +81,6 @@ def build_ray_centers(
 
 
 def compact_cdf_utility(bins: torch.Tensor, num_thresholds: int) -> torch.Tensor:
-    """Convert compact CDF onset bins 0..T to mean success utility in [0,1]."""
     if num_thresholds <= 0:
         raise ValueError("num_thresholds must be positive.")
     bins = bins.long()
@@ -113,7 +94,6 @@ def compact_cdf_utility(bins: torch.Tensor, num_thresholds: int) -> torch.Tensor
 
 
 def predicted_raw_utility(cdf_logits: torch.Tensor) -> torch.Tensor:
-    """CDF mean utility [B,Q,K,A,D] from logits [B,T,Q,K,A,D]."""
     if cdf_logits.dim() != 6:
         raise ValueError("P3 CDF logits must be [B,T,Q,K,A,D].")
     return torch.sigmoid(cdf_logits.float()).mean(dim=1)
@@ -134,23 +114,15 @@ def _sum_count(value: torch.Tensor, mask: torch.Tensor):
 
 
 def loss_sums(end_points: Mapping[str, torch.Tensor]):
-    """Sufficient statistics for the P3 objective.
-
-    CDF/width preserve the original label masks.  The viability term is balanced
-    between 5-mm label-support positives and negatives.  The joint utility loss
-    directly calibrates the score used for the final KxAxD decode: valid CDF
-    operations use their compact target utility, while hypotheses outside the
-    5-mm label domain are known zero targets.  Selected-view-but-unlabelled
-    surface hypotheses remain unknown rather than being forced negative.
-    """
+    """CDF + width + balanced viability + balanced final joint-utility losses."""
     cdf = end_points["p3_cdf_logits"].float()                    # B,T,Q,K,A,D
-    width = end_points["p3_width_pred"] .float()                # B,D,Q,K,A
+    width = end_points["p3_width_pred"].float()                  # B,D,Q,K,A
     viability = end_points["p3_viability_logits"].float()       # B,Q,K
     bins = end_points["p3_cdf_bins"].long()                     # B,Q,K,A,D
     cdf_valid = end_points["p3_cdf_valid"].bool()
-    width_label = end_points["p3_width_label"].float()           # B,Q,K,A,D metres
+    width_label = end_points["p3_width_label"].float()
     width_valid = end_points["p3_width_valid"].bool()
-    point_support = end_points["p3_point_support"].bool()        # B,Q,K
+    point_support = end_points["p3_point_support"].bool()
     point_known = end_points["p3_point_known"].bool()
     in_range = end_points["p3_in_range"].bool()
     if cdf.dim() != 6:
@@ -184,22 +156,19 @@ def loss_sums(end_points: Mapping[str, torch.Tensor]):
     viability_pos = viability_known & point_support
     viability_neg = viability_known & (~point_support)
 
-    target_utility = compact_cdf_utility(bins, T).to(cdf)
-    target_utility = target_utility.masked_fill(~cdf_valid, 0.0)
+    target_utility = compact_cdf_utility(bins, T).to(cdf).masked_fill(~cdf_valid, 0.0)
     pred_joint = predicted_joint_utility(cdf, viability)
-    # Known joint targets: evaluator-labelled operations OR centers known to be
-    # outside the 5-mm grasp-label domain.  Missing selected-view labels at a
-    # geometrically supported center stay unknown.
+    # At a supported center with missing selected-view labels the target remains
+    # unknown.  At an off-support center the final grasp field is a known zero
+    # for this label-domain objective, without changing the masked CDF semantics.
     off_surface = viability_known & (~point_support)
-    joint_known = cdf_valid | off_surface[..., None, None]
-    joint_known &= in_range[..., None, None]
+    joint_known = (cdf_valid | off_surface[..., None, None]) & in_range[..., None, None]
     joint_target = torch.where(cdf_valid, target_utility, torch.zeros_like(target_utility))
     joint_map = F.binary_cross_entropy(
         pred_joint.clamp(1e-6, 1.0 - 1e-6), joint_target, reduction="none"
     )
     joint_pos = joint_known & (joint_target > 0)
     joint_neg = joint_known & (~joint_pos)
-
     return {
         "cdf": _sum_count(cdf_map, cdf_mask),
         "width": _sum_count(width_map, width_mask),
@@ -212,16 +181,15 @@ def loss_sums(end_points: Mapping[str, torch.Tensor]):
 
 def final_indices(end_points: Mapping[str, torch.Tensor], score_mode: str = "joint",
                   force_zero: bool = False):
-    """Return final k/a/d and per-ray score.  No pre-representation selection."""
+    """Final task decode indices; no depth selection occurred before this point."""
     cdf = end_points["p3_cdf_logits"]
     in_range = end_points["p3_in_range"].bool()
     offsets = end_points["p3_offsets_m"]
-    utility = (
-        predicted_joint_utility(cdf, end_points["p3_viability_logits"])
-        if score_mode == "joint"
-        else predicted_raw_utility(cdf)
-    )
-    if score_mode not in ("joint", "raw"):
+    if score_mode == "joint":
+        utility = predicted_joint_utility(cdf, end_points["p3_viability_logits"])
+    elif score_mode == "raw":
+        utility = predicted_raw_utility(cdf)
+    else:
         raise ValueError("P3 score_mode must be joint or raw.")
     utility = utility.masked_fill(~in_range[..., None, None], -1.0)
     B, Q, K, A, D = utility.shape
@@ -233,34 +201,30 @@ def final_indices(end_points: Mapping[str, torch.Tensor], score_mode: str = "joi
         sub = utility[:, :, int(zero.item())].reshape(B, Q, A * D)
         op = sub.argmax(-1)
         score = sub.gather(-1, op.unsqueeze(-1)).squeeze(-1)
-        a = torch.div(op, D, rounding_mode="floor")
-        d = torch.remainder(op, D)
-        return k, a, d, score, utility
+        return k, torch.div(op, D, rounding_mode="floor"), torch.remainder(op, D), score, utility
     flat = utility.reshape(B, Q, K * A * D)
     idx = flat.argmax(-1)
     score = flat.gather(-1, idx.unsqueeze(-1)).squeeze(-1)
     per_k = A * D
     k = torch.div(idx, per_k, rounding_mode="floor")
     rem = torch.remainder(idx, per_k)
-    a = torch.div(rem, D, rounding_mode="floor")
-    d = torch.remainder(rem, D)
-    return k, a, d, score, utility
+    return k, torch.div(rem, D, rounding_mode="floor"), torch.remainder(rem, D), score, utility
 
 
 @torch.no_grad()
 def metric_sums(end_points: Mapping[str, torch.Tensor]):
-    """Coverage and final-decode diagnostics; not an analytic AP oracle."""
+    """Exact final-KAD target utility plus center-coverage diagnostics."""
     offsets = end_points["p3_offsets_m"]
     point = end_points["p3_point_support"].bool()
     known = end_points["p3_point_known"].bool() & end_points["p3_in_range"].bool()
-    cdf_valid = end_points["p3_cdf_valid"].bool().any(-1).any(-1)
+    cdf_mask_full = end_points["p3_cdf_valid"].bool()
+    cdf_valid_k = cdf_mask_full.any(-1).any(-1)
     bins = end_points["p3_cdf_bins"].long()
     T = int(end_points["p3_cdf_logits"].shape[1])
     gt_util = compact_cdf_utility(bins, T).to(end_points["p3_cdf_logits"])
-    gt_util = gt_util.masked_fill(~end_points["p3_cdf_valid"].bool(), 0.0)
-    target_best_kad = gt_util.reshape(*gt_util.shape[:3], -1).max(-1).values
-    target_best_kad *= point.float()
-    positive_ray = target_best_kad.max(-1).values > 0
+    gt_util = gt_util.masked_fill(~cdf_mask_full, 0.0)            # B,Q,K,A,D
+    oracle_gt = gt_util.flatten(2).max(-1).values                 # B,Q
+    positive_ray = oracle_gt > 0
     any_known = known.any(-1)
     zero = int(torch.nonzero(offsets == 0, as_tuple=False).flatten()[0].item())
 
@@ -272,14 +236,16 @@ def metric_sums(end_points: Mapping[str, torch.Tensor]):
     result = {
         "p3_base_point_support": pair(point[..., zero].float(), known[..., zero]),
         "p3_any_point_support": pair((point & known).any(-1).float(), any_known),
-        "p3_any_cdf_support": pair((cdf_valid & known).any(-1).float(), any_known),
+        "p3_any_cdf_support": pair((cdf_valid_k & known).any(-1).float(), any_known),
     }
+    B, Q, K, A, D = gt_util.shape
+    gt_flat = gt_util.reshape(B, Q, K * A * D)
     for mode in ("joint", "raw"):
         k, a, d, score, _ = final_indices(end_points, score_mode=mode, force_zero=False)
         selected_point = point.gather(-1, k.unsqueeze(-1)).squeeze(-1)
-        selected_cdf = cdf_valid.gather(-1, k.unsqueeze(-1)).squeeze(-1)
-        selected_gt = target_best_kad.gather(-1, k.unsqueeze(-1)).squeeze(-1)
-        oracle_gt = target_best_kad.max(-1).values
+        selected_cdf = cdf_valid_k.gather(-1, k.unsqueeze(-1)).squeeze(-1)
+        selected_flat_idx = k * (A * D) + a * D + d
+        selected_gt = gt_flat.gather(-1, selected_flat_idx.unsqueeze(-1)).squeeze(-1)
         signed = offsets.to(score)[k]
         prefix = f"p3_{mode}"
         result.update({
