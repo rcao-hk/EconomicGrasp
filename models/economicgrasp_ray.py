@@ -26,7 +26,7 @@ PART_KEYS = (
     "xyz_graspable", "token_sel_xyz", "token_sel_idx", "grasp_top_view_xyz", "grasp_top_view_inds",
     "kview_query_parent", "kview_query_view_rank", "kview_effective_k_int",
     "grasp_cdf_pred_angle_depth", "grasp_width_pred_angle_depth",
-    "ray_support_logits", "ray_in_range", "ray_offset_m",
+    "ray_support_logits", "ray_in_range", "ray_offset_m", "ray_descriptor", "ray_context_feature",
     "batch_grasp_point", "batch_grasp_cdf_bins_angle_depth", "batch_grasp_cdf_valid_mask",
     "batch_grasp_cdf_thresholds", "batch_grasp_width_angle_depth",
     "batch_grasp_width_valid_mask_angle_depth", "ray_support_target", "ray_support_known",
@@ -61,6 +61,16 @@ class RayDecoder(nn.Module):
 
     def forward(self, group_features_angle, end_points):
         descriptor = end_points["ray_descriptor"].to(group_features_angle)
+        B, C, QA = group_features_angle.shape
+        Q, A = descriptor.shape[1], int(self.base.num_angle)
+        if QA != Q * A:
+            raise RuntimeError("Ray context extraction requires base-major [Q*A] ordering.")
+        # Additive endpoint only: no v1 parameter or prediction is changed. P2-v2
+        # consumes this frozen local feature after all K hypotheses are evaluated.
+        end_points["ray_context_feature"] = (
+            group_features_angle.detach().reshape(B, C, Q, A).mean(-1).transpose(1, 2).contiguous()
+        )  # [B,Q,C]
+        end_points["ray_descriptor"] = descriptor.detach()
         if self.training and self.checkpoint_decoder and torch.is_grad_enabled():
             cdf, width, support = checkpoint(self._predict, group_features_angle.detach(), descriptor,
                                               use_reentrant=False, preserve_rng_state=True)
