@@ -1,0 +1,420 @@
+{
+  "checks": {
+    "cdf_shape_compatible": true,
+    "contract_version_current": true,
+    "core_sources_unmodified_by_legacy_installer": true,
+    "dedicated_runtime_complete": true,
+    "legacy_use_gt_depth_disabled": true,
+    "student_current_pred_geometry": true,
+    "student_teacher_same_seed_mode": true,
+    "teacher_current_gt_geometry": true
+  },
+  "failed_checks": [],
+  "p0_runtime": {
+    "legacy_installed_markers": {},
+    "missing_symbols": [],
+    "path": "/home/robotarm/EconomicGrasp/models/economicgrasp_dpt_p0.py",
+    "query_semantics": "same ordered image-FPS pixels and selected view indices; teacher center XYZ is recomputed from teacher geometry",
+    "required_symbols": [
+      "assert_p0_exact_query_output",
+      "build_p0_exact_query_input",
+      "economicgrasp_dpt_p0_student",
+      "economicgrasp_dpt_p0_teacher",
+      "economicgrasp_dpt_student",
+      "economicgrasp_dpt_teacher",
+      "enable_p0_exact_query_runtime",
+      "extract_p0_query_contract",
+      "forward_with_p0_geometry_override",
+      "runtime_contract"
+    ],
+    "source_files_modified": [],
+    "source_patch_required": false
+  },
+  "python_symbols": {
+    "dataset/graspnet_dataset.py": {
+      "assignments": [
+        "BASE_DIR",
+        "ROOT_DIR"
+      ],
+      "classes": [
+        "GraspNetDataset",
+        "GraspNetMultiDataset",
+        "GraspNetTransDataset"
+      ],
+      "functions": [
+        "collate_fn"
+      ]
+    },
+    "eval.py": {
+      "assignments": [
+        "parser",
+        "cfgs"
+      ],
+      "classes": [],
+      "functions": [
+        "_scene_range_for_split",
+        "_remove_dump_files",
+        "evaluate"
+      ]
+    },
+    "inference_cva_distill.py": {
+      "assignments": [
+        "DISTILL_INFER_ARGS"
+      ],
+      "classes": [],
+      "functions": [
+        "_parse_distillation_inference_args",
+        "_worker_init",
+        "_build_subset",
+        "_move_fixed_inputs",
+        "_read_checkpoint",
+        "_resolve_distill_stage",
+        "_validate_checkpoint_contract",
+        "_load_checkpoint_strict",
+        "_assert_inference_geometry_role",
+        "inference"
+      ]
+    },
+    "models/economicgrasp_bip3d.py": {
+      "assignments": [],
+      "classes": [
+        "FFN",
+        "SingleScaleDepthFusionSpatialEnhancer",
+        "economicgrasp_bip3d",
+        "GeometryAwareDenseFieldViewNet",
+        "GeometryAwareDenseFieldAttnViewNet",
+        "ProjectedViewGrouping",
+        "ProjectedSurfaceCylinderGrouping",
+        "ViewConditionedDeformable2DGrouping",
+        "DepthDisLocalAttnGrouping",
+        "MetricRegionCropGrouping",
+        "Grasp_Head_Local_Interaction_Collision",
+        "Grasp_Head_Local_Interaction_Dropout",
+        "economicgrasp_dpt",
+        "economicgrasp_dpt_rotnet"
+      ],
+      "functions": [
+        "gather_depth_by_img_idxs",
+        "pred_decode_collision",
+        "pred_decode_collision_filter",
+        "_cva_decode_query_indices",
+        "_validate_pred_decode_mode",
+        "pred_decode_center_view_angle",
+        "_expected_from_score_logits",
+        "_decode_depth_from_logits",
+        "_get_full_rotation",
+        "pred_decode_rotnet_cva"
+      ]
+    },
+    "models/economicgrasp_dpt_distill.py": {
+      "assignments": [
+        "DISTILL_CONTRACT_VERSION",
+        "_DISTILL_TARGET_KEYS"
+      ],
+      "classes": [
+        "economicgrasp_dpt_distill",
+        "economicgrasp_dpt_teacher",
+        "economicgrasp_dpt_student",
+        "OutputDistillationConfig"
+      ],
+      "functions": [
+        "extract_distillation_targets",
+        "load_checkpoint_state",
+        "_zero_from_student",
+        "_normalize_view_score_shape",
+        "_gather_query_dim",
+        "_masked_mean",
+        "_assert_shared_base_image_fps",
+        "_same_seed_query_match",
+        "compute_output_distillation_loss"
+      ]
+    },
+    "models/economicgrasp_dpt_p0.py": {
+      "assignments": [
+        "P0_RUNTIME_SCHEMA_VERSION",
+        "P0_GEOMETRY_OVERRIDE_KEY",
+        "P0_FORCED_QUERY_KEY",
+        "P0_GEOMETRY_MARKER",
+        "P0_QUERY_MARKER",
+        "P0_GEOMETRY_MARKER_KEY",
+        "P0_QUERY_MARKER_KEY",
+        "economicgrasp_dpt_student",
+        "economicgrasp_dpt_teacher",
+        "__all__"
+      ],
+      "classes": [
+        "P0RuntimeContractError",
+        "_P0RuntimeMixin",
+        "economicgrasp_dpt_p0_student",
+        "economicgrasp_dpt_p0_teacher"
+      ],
+      "functions": [
+        "runtime_contract",
+        "_scalar_like",
+        "_normalize_depth_override",
+        "_replace_depth_net_output",
+        "_temporary_instance_method",
+        "_require_rank2_long",
+        "_canonicalize_query_contract",
+        "extract_p0_query_contract",
+        "assert_p0_exact_query_output",
+        "build_p0_exact_query_input",
+        "forward_with_p0_geometry_override",
+        "enable_p0_exact_query_runtime"
+      ]
+    },
+    "models/kview_query_transformer.py": {
+      "assignments": [
+        "CenterViewAngleCandidateDecoder"
+      ],
+      "classes": [
+        "KViewQueryTransformerConfig",
+        "KViewQuerySelector",
+        "ViewConditionedAttentionGrouping",
+        "_WithinCenterViewTransformerLayer",
+        "KViewQueryTransformerGraspHeadDropout",
+        "KViewQueryTransformerLocalGraspModule",
+        "SimpleAttentionModule",
+        "CenterViewAngleLegacyCandidateDecoder",
+        "CenterViewAngleCDFCandidateDecoder",
+        "CenterViewAngleQueryTransformerLocalGraspModule",
+        "GeometryAwareDenseFieldRotNet",
+        "FullRotationCandidateDecoder",
+        "FullRotationCVALocalTransformer",
+        "GeometryAwareRotProposalCVALocalGraspModule"
+      ],
+      "functions": [
+        "_rank0_only",
+        "_entropy",
+        "_safe_scalar",
+        "_bincount_float",
+        "_hist_ratio",
+        "_safe_mean_masked",
+        "_tensor_to_numpy",
+        "_add_hist_to_endpoints",
+        "_find_first_tensor",
+        "_extract_query_valid_mask",
+        "_derive_pose_labels_from_endpoints",
+        "_hist_counts",
+        "_add_hist_logs",
+        "_extract_class_label",
+        "_angle_label_keys",
+        "_depth_label_keys",
+        "_score_label_keys",
+        "_backup_base_view_labels",
+        "_restore_base_view_labels_for_view_loss",
+        "_add_kview_selected_view_label_debug",
+        "_call_label_process",
+        "_fullrot_matrix_to_6d",
+        "_fullrot_score_expected"
+      ]
+    }
+  },
+  "related_repository_scripts": [
+    "check_cva_view_oracle.py",
+    "diagnose_cva_candidate_validity.py",
+    "diagnose_cva_privileged_oracle_hybrid.py",
+    "diagnose_graspnet_eval.py",
+    "eval_cva_distill_p0b.py",
+    "eval_cva_joint_utility_diagnostics.py",
+    "eval_stagewise_oracle.py",
+    "inference_cva_distill.py",
+    "inference_cva_distill_p0b.py",
+    "inference_stagewise_oracle.py",
+    "install_p0_gradient_audit.py",
+    "libs/MinkowskiEngine/MinkowskiEngine/diagnostics.py",
+    "models/economicgrasp_dpt_distill.py",
+    "models/economicgrasp_dpt_p0.py",
+    "models/oracle_selective_cdf_kd.py",
+    "models/p0b_oracle_hybrid.py",
+    "models/p0b_topk_exact_override.py",
+    "models/privileged_kd_diagnostics.py",
+    "models/privileged_kd_priority12.py",
+    "models/rgb_geometry_diagnostics.py",
+    "p0_a_geometry_weight_matrix.py",
+    "p0_a_summarize.py",
+    "p0_b_candidate_ranking.py",
+    "p0_c_summarize_gradients.py",
+    "p0_c_teacher_information.py",
+    "p0_collect_paired_query_cache.py",
+    "p0_d_decodability_probe.py",
+    "p0_dump_current_candidates.py",
+    "p0_preflight.py",
+    "tools/analyze_distill_training_logs.py",
+    "tools/selftest_oracle_selective_cdf_kd.py",
+    "tools/selftest_p0b_gate_modes.py",
+    "tools/summarize_p0b_results.py",
+    "tools/validate_p0b_inference.py",
+    "train_cva_distill_ddp.py",
+    "train_cva_distill_oracle_selective_ddp.py",
+    "train_cva_distill_p0_gradient_audit.py",
+    "train_cva_distill_uniform_exact_query_ddp.py",
+    "train_cva_distill_view_only_exact.py"
+  ],
+  "repo_root": "/home/robotarm/EconomicGrasp",
+  "required_files": [
+    "/home/robotarm/EconomicGrasp/models/economicgrasp_dpt_distill.py",
+    "/home/robotarm/EconomicGrasp/models/economicgrasp_bip3d.py",
+    "/home/robotarm/EconomicGrasp/models/kview_query_transformer.py",
+    "/home/robotarm/EconomicGrasp/models/economicgrasp_dpt_p0.py",
+    "/home/robotarm/EconomicGrasp/dataset/graspnet_dataset.py",
+    "/home/robotarm/EconomicGrasp/inference_cva_distill.py",
+    "/home/robotarm/EconomicGrasp/eval.py"
+  ],
+  "status": "pass",
+  "student": {
+    "cdf_bias_key": "kview_grasp_module.decoder.cdf_head.bias",
+    "cdf_weight_key": "kview_grasp_module.decoder.cdf_head.weight",
+    "contract_version": 2,
+    "depth_head_executed": true,
+    "distill_stage": 1,
+    "feature_dim": 64,
+    "geometry_depth_source": "pred",
+    "legacy_dataset_use_gt_depth": false,
+    "metadata": {
+      "camera_gravity_key": "camera_gravity_vec",
+      "camera_pose_key": "camera_pose_vec",
+      "depth_head_executed": true,
+      "distill_contract_version": 2,
+      "distill_stage": 1,
+      "distillation_config": {
+        "cdf_weight": 1.0,
+        "depth_weight": 0.0,
+        "eps": 1e-06,
+        "graspness_weight": 1.0,
+        "max_depth": 1.0,
+        "max_query_view_angle_deg": 35.0,
+        "min_depth": 0.2,
+        "objectness_weight": 1.0,
+        "overall_weight": 1.0,
+        "temperature": 1.0,
+        "view_weight": 1.0,
+        "width_positive_threshold": 0.5,
+        "width_weight": 0.1
+      },
+      "epoch": 16,
+      "geometry_depth_source": "pred",
+      "legacy_dataset_use_gt_depth": false,
+      "pose_depth_mode": "global_film",
+      "pose_hidden_dim": 64,
+      "ray_gravity_hidden_dim": 64,
+      "ray_gravity_mid_dim": 32,
+      "seed_selection_mode": "image_fps",
+      "stage2_shared_teacher_image_fps": false,
+      "teacher_checkpoint": "",
+      "teacher_geometry_depth_source": null,
+      "use_fuse_depth": true
+    },
+    "num_depths": 4,
+    "num_thresholds": 6,
+    "path": "/data2/robotarm/result/grasp/rgbgrasp/log/economicgrasp_dpt_cva_cdf_distill_stage1/epoch_15_train_0.6009606198008898_val_1.1028128399874995.tar",
+    "pose_depth_mode": "global_film",
+    "seed_selection_mode": "image_fps",
+    "sha256": "0cb8cd54bd5eef44a81c8d8de6969003377224d41a84b2002ba662bb8ce0c69c",
+    "use_fuse_depth": true
+  },
+  "teacher": {
+    "cdf_bias_key": "kview_grasp_module.decoder.cdf_head.bias",
+    "cdf_weight_key": "kview_grasp_module.decoder.cdf_head.weight",
+    "contract_version": 2,
+    "depth_head_executed": false,
+    "distill_stage": 0,
+    "feature_dim": 64,
+    "geometry_depth_source": "gt",
+    "legacy_dataset_use_gt_depth": false,
+    "metadata": {
+      "camera_gravity_key": "camera_gravity_vec",
+      "camera_pose_key": "camera_pose_vec",
+      "depth_head_executed": false,
+      "distill_contract_version": 2,
+      "distill_stage": 0,
+      "distillation_config": {
+        "cdf_weight": 1.0,
+        "depth_weight": 0.0,
+        "eps": 1e-06,
+        "graspness_weight": 1.0,
+        "max_depth": 1.0,
+        "max_query_view_angle_deg": 35.0,
+        "min_depth": 0.2,
+        "objectness_weight": 1.0,
+        "overall_weight": 1.0,
+        "temperature": 1.0,
+        "view_weight": 1.0,
+        "width_positive_threshold": 0.5,
+        "width_weight": 0.1
+      },
+      "epoch": 11,
+      "geometry_depth_source": "gt",
+      "legacy_dataset_use_gt_depth": false,
+      "pose_depth_mode": "none",
+      "pose_hidden_dim": 64,
+      "ray_gravity_hidden_dim": 64,
+      "ray_gravity_mid_dim": 32,
+      "seed_selection_mode": "image_fps",
+      "stage2_shared_teacher_image_fps": false,
+      "teacher_checkpoint": "",
+      "teacher_geometry_depth_source": null,
+      "use_fuse_depth": true
+    },
+    "num_depths": 4,
+    "num_thresholds": 6,
+    "path": "/data2/robotarm/result/grasp/rgbgrasp/log/economicgrasp_dpt_cva_cdf_distill_stage0/epoch_10_train_0.5914001755289813_val_0.9547808316189456.tar",
+    "pose_depth_mode": "none",
+    "seed_selection_mode": "image_fps",
+    "sha256": "70e3dcc45bfcdc167005f66e76f47842c301e281e933979db3aa53f5a18eb2c7",
+    "use_fuse_depth": true
+  },
+  "uniform": {
+    "cdf_bias_key": "kview_grasp_module.decoder.cdf_head.bias",
+    "cdf_weight_key": "kview_grasp_module.decoder.cdf_head.weight",
+    "contract_version": 2,
+    "depth_head_executed": true,
+    "distill_stage": 2,
+    "feature_dim": 64,
+    "geometry_depth_source": "pred",
+    "legacy_dataset_use_gt_depth": false,
+    "metadata": {
+      "camera_gravity_key": "camera_gravity_vec",
+      "camera_pose_key": "camera_pose_vec",
+      "depth_head_executed": true,
+      "distill_contract_version": 2,
+      "distill_stage": 2,
+      "distillation_config": {
+        "cdf_weight": 1.0,
+        "depth_weight": 0.0,
+        "eps": 1e-06,
+        "graspness_weight": 0.0,
+        "max_depth": 1.0,
+        "max_query_view_angle_deg": 35.0,
+        "min_depth": 0.2,
+        "objectness_weight": 0.0,
+        "overall_weight": 1.0,
+        "temperature": 1.0,
+        "view_weight": 0.0,
+        "width_positive_threshold": 0.5,
+        "width_weight": 0.0
+      },
+      "epoch": 14,
+      "geometry_depth_source": "pred",
+      "legacy_dataset_use_gt_depth": false,
+      "pose_depth_mode": "global_film",
+      "pose_hidden_dim": 64,
+      "ray_gravity_hidden_dim": 64,
+      "ray_gravity_mid_dim": 32,
+      "seed_selection_mode": "image_fps",
+      "stage2_seed_source": "student",
+      "stage2_shared_teacher_image_fps": false,
+      "stage2_teacher_reuses_student_image_fps": true,
+      "teacher_checkpoint": "/data2/robotarm/result/grasp/rgbgrasp/log/economicgrasp_dpt_cva_cdf_distill_stage0/epoch_10_train_0.5914001755289813_val_0.9547808316189456.tar",
+      "teacher_geometry_depth_source": "gt",
+      "use_fuse_depth": true
+    },
+    "num_depths": 4,
+    "num_thresholds": 6,
+    "path": "/data2/robotarm/result/grasp/rgbgrasp/log/economicgrasp_dpt_cva_cdf_stage2_uniform_exact_query/epoch_13_train_0.7070983753332841_val_1.0985244782895989.tar",
+    "pose_depth_mode": "global_film",
+    "seed_selection_mode": "image_fps",
+    "sha256": "85e572d519ac72587f034241a28ac90d5699c9387cd019ee6d4532b678132d7e",
+    "use_fuse_depth": true
+  }
+}
