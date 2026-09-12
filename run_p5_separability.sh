@@ -17,6 +17,18 @@ PROBE_DEVICE="${PROBE_DEVICE:-cuda}"
 PROBE_EPOCHS="${PROBE_EPOCHS:-15}"
 PROBE_BATCH_SIZE="${PROBE_BATCH_SIZE:-8192}"
 MAX_TRAIN_QUERIES="${MAX_TRAIN_QUERIES:-250000}"
+# Set to 1 to delete intermediate rank*_chunk*.npz extraction shards after
+# successful analysis (or after extraction-only smoke). summary.json/extract.log
+# and all files under analysis/ are preserved.
+REMOVE_DUMP_FILES="${REMOVE_DUMP_FILES:-0}"
+
+case "${REMOVE_DUMP_FILES}" in
+  0|1) ;;
+  *)
+    echo "REMOVE_DUMP_FILES must be 0 or 1, got: ${REMOVE_DUMP_FILES}" >&2
+    exit 2
+    ;;
+esac
 
 IFS=',' read -r -a GPU_ARRAY <<< "${GPUS}"
 if [[ ${#GPU_ARRAY[@]} -lt 1 ]]; then
@@ -31,6 +43,21 @@ TASK_NAMES=(train_native train_corrupt seen_native seen_corrupt)
 TASK_SPLITS=(train train test_seen test_seen)
 TASK_CONDS=(native corrupt native corrupt)
 TASK_FRACS=("${TRAIN_SAMPLE_INTERVAL}" "${TRAIN_SAMPLE_INTERVAL}" "${EVAL_SAMPLE_INTERVAL}" "${EVAL_SAMPLE_INTERVAL}")
+
+cleanup_dump_files() {
+  if [[ "${REMOVE_DUMP_FILES}" != "1" ]]; then
+    return 0
+  fi
+  echo "[P5-DIAG] removing intermediate dump shards (rank*_chunk*.npz)"
+  local name dir
+  for name in "${TASK_NAMES[@]}"; do
+    dir="${OUTPUT_ROOT}/${name}"
+    if [[ -d "${dir}" ]]; then
+      find "${dir}" -maxdepth 1 -type f -name 'rank*_chunk*.npz' -delete
+    fi
+  done
+  echo "[P5-DIAG] dump cleanup complete; summaries/logs and analysis outputs preserved"
+}
 
 run_task() {
   local idx="$1"
@@ -83,6 +110,7 @@ done
 
 if [[ "${DIAG_MAX_BATCHES}" != "0" ]]; then
   echo "[P5-DIAG] extraction smoke complete; skip probe analysis because DIAG_MAX_BATCHES != 0"
+  cleanup_dump_files
   exit 0
 fi
 
@@ -103,5 +131,9 @@ python analyze_p5_separability.py \
   --probe_batch_size "${PROBE_BATCH_SIZE}" \
   --max_train_queries_per_condition "${MAX_TRAIN_QUERIES}" \
   > "${OUTPUT_ROOT}/analysis.log" 2>&1
+
+# Only clean up after analyze_p5_separability.py returns successfully. If probe
+# analysis fails, the shards are kept for debugging/re-running analysis.
+cleanup_dump_files
 
 echo "[P5-DIAG] done: ${OUTPUT_ROOT}/analysis/RESULTS.md"
