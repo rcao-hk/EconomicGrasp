@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 import random
 import sys
@@ -28,7 +27,8 @@ def _parse_diag_flags():
                    help="0 keeps every coherent known query; otherwise deterministic uniform subsample.")
     p.add_argument("--diag_safe_radius_m", type=float, default=0.005)
     p.add_argument("--diag_seed", type=int, default=73191)
-    p.add_argument("--diag_corrupt_seed", type=int, default=55117)
+    p.add_argument("--diag_corrupt_seed", type=int, default=55117,
+                   help="Same default seed as P5-v1.1 corrupt validation.")
     p.add_argument("--diag_flush_frames", type=int, default=32)
     p.add_argument("--diag_max_batches", type=int, default=0)
     args, remaining = p.parse_known_args()
@@ -81,7 +81,7 @@ def _flush(buffers, root: Path, rank: int, chunk_id: int):
 def main():
     args, cfg = parse_p5_cli(training=False)
     if cfg.batch_size != 1:
-        raise ValueError("P5 separability extraction currently requires --batch_size 1 for GPU-count invariant corruption.")
+        raise ValueError("P5 separability extraction currently requires --batch_size 1.")
     if D.diag_condition == "corrupt" and int(D.diag_corrupt_seed) < 0:
         raise ValueError("diag_corrupt_seed must be non-negative.")
 
@@ -107,6 +107,16 @@ def main():
         cfg.eval_num_workers = cfg.num_workers
         loader, _ = make_loader(dataset, indices, cfg, rank, world, training=False)
         shard = indices[rank::world]
+
+        # Match P5-v1.1 validation semantics: for the corrupt condition, reset
+        # RNG once before traversing the split, then consume the structured
+        # corruption sequence in deterministic loader order.  With the launcher
+        # each extraction condition uses one process/GPU, so Seen-corrupt is
+        # directly comparable with the training log's fixed corrupt validation.
+        if D.diag_condition == "corrupt":
+            corrupt_seed = int(D.diag_corrupt_seed) + rank
+            random.seed(corrupt_seed); np.random.seed(corrupt_seed % (2**32))
+            torch.manual_seed(corrupt_seed); torch.cuda.manual_seed_all(corrupt_seed)
 
         hook_cache = {}
         def evidence_hook(_module, inputs, output):
@@ -134,13 +144,7 @@ def main():
             if D.diag_max_batches and step >= D.diag_max_batches:
                 break
             global_idx = int(shard[step])
-            # Make corrupted geometry invariant to rank/world-size for batch=1.
-            if D.diag_condition == "corrupt":
-                seed = int(D.diag_corrupt_seed) + global_idx
-                random.seed(seed); np.random.seed(seed % (2**32))
-                torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
-            else:
-                seed = int(D.diag_seed) + global_idx
+            sample_seed = int(D.diag_seed) + global_idx
 
             batch = move_batch(batch, device)
             hook_cache.clear()
@@ -183,7 +187,7 @@ def main():
 
             known_idx = torch.where(outcomes["known"][0])[0].detach().cpu()
             if D.diag_query_sample_per_frame and known_idx.numel() > D.diag_query_sample_per_frame:
-                gen = torch.Generator(device="cpu").manual_seed(seed + 9973)
+                gen = torch.Generator(device="cpu").manual_seed(sample_seed + 9973)
                 perm = torch.randperm(known_idx.numel(), generator=gen)[:D.diag_query_sample_per_frame]
                 known_idx = known_idx[perm]
             idx = known_idx.to(device)
@@ -218,7 +222,6 @@ def main():
         chunk_id = _flush(buffers, out_root, rank, chunk_id)
         h1.remove(); h2.remove()
 
-        # Aggregate sufficient statistics and basic counts across ranks.
         names = sorted(stats)
         packed = torch.tensor([stats[k] for k in names], dtype=torch.float64, device=device)
         counts = torch.tensor([processed_frames, kept_queries], dtype=torch.float64, device=device)
@@ -245,6 +248,7 @@ def main():
                 "safe_radius_m": float(D.diag_safe_radius_m),
                 "query_sample_per_frame": int(D.diag_query_sample_per_frame),
                 "corrupt_seed": int(D.diag_corrupt_seed),
+                "corrupt_seed_semantics": "single split-level reset, matching P5-v1.1 validation",
                 "processed_frames": int(counts[0].item()),
                 "kept_known_queries": int(counts[1].item()),
                 "world_size": int(world),
