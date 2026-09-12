@@ -96,13 +96,21 @@ OUTPUT_ROOT=/data2/robotarm/result/grasp/rgbgrasp/p5_separability \
 TRAIN_SAMPLE_INTERVAL=0.1 \
 EVAL_SAMPLE_INTERVAL=0.1 \
 QUERY_SAMPLE_PER_FRAME=128 \
+REMOVE_DUMP_FILES=1 \
 bash run_p5_separability.sh
 ```
+
+`REMOVE_DUMP_FILES=1` deletes only the intermediate extraction shards
+`rank*_chunk*.npz` after probe analysis finishes successfully. It preserves
+`summary.json`, `extract.log`, `analysis.log`, and all files under `analysis/`.
+The default is `REMOVE_DUMP_FILES=0`, so failed analysis keeps the dumps for
+re-running/debugging. In extraction-only smoke mode, cleanup happens after the
+smoke extraction completes.
 
 For a fast extraction smoke:
 
 ```bash
-DIAG_MAX_BATCHES=2 bash run_p5_separability.sh
+DIAG_MAX_BATCHES=2 REMOVE_DUMP_FILES=1 bash run_p5_separability.sh
 ```
 
 Smoke mode intentionally skips probe fitting.
