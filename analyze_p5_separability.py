@@ -137,7 +137,6 @@ def fit_probe(X: np.ndarray, y: np.ndarray, args, device: torch.device, seed: in
 def probe_score(probe, X):
     X = np.asarray(X, dtype=np.float32)
     z = ((X - probe["mean"]) / probe["std"]) @ probe["weight"] + probe["bias"]
-    # Ranking metrics do not require sigmoid, but probabilities are convenient for export.
     z = np.clip(z, -40.0, 40.0)
     return 1.0 / (1.0 + np.exp(-z))
 
@@ -159,7 +158,7 @@ def gate_rows(dataset_name, arrays, task, feature, regime, scores, train_y, trai
         active = np.zeros(len(scores), dtype=bool)
         active[order[:k]] = True
         rows.append({"dataset": dataset_name, "task": task, "feature": feature,
-                     "train_regime": regime, "gate": f"top_{int(frac*100)}pct", 
+                     "train_regime": regime, "gate": f"top_{int(frac*100)}pct",
                      **gated_query_metrics(arrays, active)})
     for fpr in (0.01, 0.02, 0.05):
         threshold = threshold_for_safe_fpr(train_y, train_scores, fpr)
@@ -196,19 +195,27 @@ def main():
     probe_rows = []
     gate_results = []
     saved_probes = {}
+    task_ids = {"need_repair": 1, "beneficial": 2}
+    feature_ids = {name: i + 1 for i, name in enumerate(FEATURE_NAMES)}
+    regime_ids = {"native": 1, "corrupt": 2, "mixed": 3}
 
-    # Train all three domain regimes.  These are cheap linear probes, not new P5 models.
     for task in ("need_repair", "beneficial"):
         for feature in FEATURE_NAMES:
             for regime, train in train_sets.items():
                 y_train = train[task].astype(np.uint8)
-                probe = fit_probe(train[feature], y_train, args, device,
-                                  seed=args.seed + hash((task, feature, regime)) % 100000)
+                probe_seed = (
+                    int(args.seed)
+                    + 10000 * task_ids[task]
+                    + 100 * feature_ids[feature]
+                    + regime_ids[regime]
+                )
+                probe = fit_probe(train[feature], y_train, args, device, seed=probe_seed)
                 train_score = probe_score(probe, train[feature])
                 probe_key = f"{task}/{feature}/{regime}"
                 saved_probes[probe_key] = {
                     "mean": probe["mean"].tolist(), "std": probe["std"].tolist(),
                     "weight": probe["weight"].tolist(), "bias": probe["bias"],
+                    "seed": probe_seed,
                 }
                 for dataset_name, eval_arrays in eval_sets.items():
                     score = probe_score(probe, eval_arrays[feature])
@@ -248,7 +255,6 @@ def main():
     }
     (out / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 
-    # Compact Markdown: mixed-domain probes are the main representation comparison.
     lines = [
         "# P5 safe-vs-repairable separability diagnostic", "",
         "## Linear probe: mixed train -> Seen", "",
@@ -266,7 +272,6 @@ def main():
             )
     lines += ["", "## Oracle activation bounds", "",
               "These use the existing P5 repair vector; only activation changes.", ""]
-    # Use one arbitrary feature/regime row because oracle metrics are representation-independent.
     for dataset_name in ("seen_native", "seen_corrupt"):
         subset = [r for r in gate_results if r["dataset"] == dataset_name and
                   r["task"] == "need_repair" and r["feature"] == "F0" and
