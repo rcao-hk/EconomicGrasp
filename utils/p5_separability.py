@@ -106,10 +106,9 @@ def build_feature_views(
     v_norm = (token_idx // W).float() / max(float(H - 1), 1.0) * 2.0 - 1.0
     z_norm = 2.0 * (z - float(min_depth)) / max(float(max_depth - min_depth), 1e-6) - 1.0
     insertion = (depth_idx + 1.0) * 0.01
-    num_angle = max(int(getattr(end_points.get("p5_rotation", None), "shape", [0])[0] if False else 12), 1)
-    # EconomicGrasp controlled protocol uses 12 in-plane angles; angle index itself
-    # remains useful even if a later diagnostic changes this number.
-    angle_norm = angle_idx / max(11.0, 1.0) * 2.0 - 1.0
+    cdf = end_points.get("grasp_cdf_pred_angle_depth")
+    num_angle = int(cdf.shape[-2]) if torch.is_tensor(cdf) and cdf.dim() == 5 else 12
+    angle_norm = angle_idx / max(float(num_angle - 1), 1.0) * 2.0 - 1.0
 
     f0 = torch.cat((
         raw_score.unsqueeze(-1), z_norm.unsqueeze(-1), width.unsqueeze(-1),
@@ -250,7 +249,6 @@ def classification_summary(y: np.ndarray, score: np.ndarray) -> Dict[str, float]
         if not np.any(neg) or not np.any(pos):
             out[f"recall_at_safe_fpr_{int(fpr*100)}pct"] = float("nan")
             continue
-        # Highest threshold allowing approximately the requested negative FPR.
         neg_s = np.sort(s[neg])[::-1]
         k = max(1, int(math.ceil(fpr * len(neg_s))))
         threshold = neg_s[min(k - 1, len(neg_s) - 1)]
