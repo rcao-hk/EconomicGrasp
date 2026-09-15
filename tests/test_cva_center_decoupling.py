@@ -54,3 +54,14 @@ def test_e01_translation_replacement_preserves_every_other_grasp_field():
     keep = list(range(13)) + [16]
     assert torch.equal(out[:, keep], pred[:, keep])
     assert torch.equal(out[:, 13:16], replacement[0])
+
+
+def test_e11_can_be_formed_from_e10_by_translation_replacement():
+    # E10 and E11 intentionally share all read-center-dependent outputs.  E11
+    # differs only in the emitted xyz, so no second grouping/CDF pass is needed.
+    e10 = torch.randn(5, 17)
+    ref = torch.randn(1, 5, 3)
+    e11 = replace_decoded_translation([e10], ref)[0]
+    keep = list(range(13)) + [16]
+    assert torch.equal(e11[:, keep], e10[:, keep])
+    assert torch.equal(e11[:, 13:16], ref[0])
