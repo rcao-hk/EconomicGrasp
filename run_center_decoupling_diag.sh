@@ -21,6 +21,14 @@ FC_MODE=${FC_MODE:-reuse_contacts}
 VERIFY_N=${VERIFY_N:-0}
 SAVE_RAW_GRASPS=${SAVE_RAW_GRASPS:-0}
 
+# Fast diagnostic controls.  The defaults preserve the main causal question
+# while avoiding unnecessary exact-action evaluation of all 1024 image-FPS
+# queries in every frame.  QUERY_EVAL_NUM=0 restores exhaustive evaluation.
+QUERY_EVAL_NUM=${QUERY_EVAL_NUM:-128}
+QUERY_EVAL_MODE=${QUERY_EVAL_MODE:-topk_uniform}
+EVAL_VALID_ONLY=${EVAL_VALID_ONLY:-1}
+PROFILE_TIMING=${PROFILE_TIMING:-1}
+
 # One process per split.  Splits are assigned to GPUs round-robin, with at most
 # one active diagnostic process per listed GPU.  This matches the repository's
 # multi-GPU inference launchers and avoids sharing one model process across GPUs.
@@ -38,6 +46,18 @@ esac
 case "${SAVE_RAW_GRASPS}" in
   0|1) ;;
   *) echo "SAVE_RAW_GRASPS must be 0 or 1" >&2; exit 2 ;;
+esac
+case "${EVAL_VALID_ONLY}" in
+  0|1) ;;
+  *) echo "EVAL_VALID_ONLY must be 0 or 1" >&2; exit 2 ;;
+esac
+case "${PROFILE_TIMING}" in
+  0|1) ;;
+  *) echo "PROFILE_TIMING must be 0 or 1" >&2; exit 2 ;;
+esac
+case "${QUERY_EVAL_MODE}" in
+  all|topk|uniform|topk_uniform) ;;
+  *) echo "QUERY_EVAL_MODE must be one of: all, topk, uniform, topk_uniform" >&2; exit 2 ;;
 esac
 
 if [[ "${POSE_DEPTH_MODE}" != "global_film" ]]; then
@@ -61,6 +81,12 @@ fi
 extra=()
 if [[ "${SAVE_RAW_GRASPS}" == "1" ]]; then
   extra+=(--save_raw_grasps)
+fi
+if [[ "${EVAL_VALID_ONLY}" == "1" ]]; then
+  extra+=(--eval_valid_only)
+fi
+if [[ "${PROFILE_TIMING}" == "1" ]]; then
+  extra+=(--profile_timing)
 fi
 
 mkdir -p "${OUTPUT_ROOT}"
@@ -103,11 +129,14 @@ launch_split() {
     --pose_depth_mode "${POSE_DEPTH_MODE}"
     --fc_mode "${FC_MODE}"
     --verify_n "${VERIFY_N}"
+    --query_eval_num "${QUERY_EVAL_NUM}"
+    --query_eval_mode "${QUERY_EVAL_MODE}"
   )
   args+=("${extra[@]}")
 
-  echo "[CENTER-DIAG][LAUNCH] split=${split} gpu=${gpu} pose_depth=${POSE_DEPTH_MODE} sample=${SAMPLE_INTERVAL}"
-  CUDA_VISIBLE_DEVICES="${gpu}" python "${args[@]}" >"${out}/diagnostic.log" 2>&1 &
+  echo "[CENTER-DIAG][LAUNCH] split=${split} gpu=${gpu} pose_depth=${POSE_DEPTH_MODE} sample=${SAMPLE_INTERVAL} query_mode=${QUERY_EVAL_MODE} query_num=${QUERY_EVAL_NUM} valid_only=${EVAL_VALID_ONLY}"
+  OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+    CUDA_VISIBLE_DEVICES="${gpu}" python "${args[@]}" >"${out}/diagnostic.log" 2>&1 &
   PIDS+=("$!")
   ACTIVE_SPLITS+=("${split}")
 }
