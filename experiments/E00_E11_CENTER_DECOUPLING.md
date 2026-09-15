@@ -34,8 +34,9 @@ backprojected on the same camera ray:
 
 `c_ref = z_ref * [(u-cx)/fx, (v-cy)/fy, 1]`.
 
-Invalid reference depth falls back to the native center and is marked invalid;
-such queries are excluded from paired aggregate statistics.
+Invalid reference depth falls back to the native center and is marked invalid.
+With `EVAL_VALID_ONLY=1` (default launcher setting), such queries are removed
+before exact-action evaluation.
 
 ## Four variants
 
@@ -46,43 +47,76 @@ such queries are excluded from paired aggregate statistics.
 | E10 | reference center | predicted center | read-center-only mechanism diagnostic |
 | E11 | reference center | reference center | coherent re-read + translation intervention |
 
-E01 copies the native decoded grasp and changes only columns 13:16 (xyz). E10
-and E11 re-run only angle expansion, local cross-attention grouping and the
-frozen CDF/width decoder. View prediction/selection is not re-run.
+E01 copies the native decoded grasp and changes only columns 13:16 (xyz).
+E10/E11 share **one** counterfactual local grouping + CDF/width decode because
+their read center is identical. E11 is then produced from E10 by replacing only
+xyz. This removes a redundant second counterfactual forward without changing the
+experiment.
 
 The strict invariants are:
 
 - E00 and E01 must be identical in score, width, height, insertion depth,
   rotation and object-id; only xyz may differ.
 - E10 and E11 must satisfy the same invariant.
-- all four variants must contain exactly one grasp per native Top-1 image-FPS
-  query and preserve query order.
+- all variants preserve native query identity/order before optional paired query
+  subsampling.
 
-## Stage-1 depth configuration
+## Fast exact-evaluation path
 
-The canonical checkpoint used by this diagnostic,
-`economicgrasp_dpt_cva_cdf_distill_stage1`, was trained with pose-conditioned
-metric depth using `pose_depth_mode=global_film`. The launcher therefore defaults
-to:
+The expensive part of this diagnostic is usually the CPU GraspNet/DexNet exact
+evaluator, not DPT inference. The fast path therefore preserves the causal
+comparison while reducing unnecessary evaluator work.
 
-```bash
-POSE_DEPTH_MODE=global_film
+### 1. One exact-evaluator call per frame
+
+The evaluated E00/E01/E10/E11 arrays are concatenated and passed to
+`ExactGraspNetActionEvaluator.evaluate()` once. The returned arrays are then
+split back into four equal variant blocks. This avoids repeating scene/model
+pose setup and object assignment four times.
+
+### 2. Reference-valid-only evaluation
+
+`EVAL_VALID_ONLY=1` evaluates only queries whose rendered/fused reference depth
+is finite and inside the configured metric-depth range. These are exactly the
+queries used by the paired center intervention.
+
+### 3. Deterministic paired query subsampling
+
+The launcher defaults to:
+
+```text
+QUERY_EVAL_MODE=topk_uniform
+QUERY_EVAL_NUM=128
 ```
 
-Do not switch this to `none` when evaluating that checkpoint. A different mode
-should only be supplied for a checkpoint trained with the corresponding depth
-architecture.
+Selection uses **E00/native information only**, before any intervention, so E01,
+E10 and E11 cannot influence which queries are evaluated. The same query ids are
+used for all four variants.
+
+Modes:
+
+- `all`: all eligible native queries;
+- `topk`: highest E00 decoded scores;
+- `uniform`: deterministic evenly spaced native query ids;
+- `topk_uniform`: half highest-score queries + half deterministic population
+  coverage from the remaining queries.
+
+`QUERY_EVAL_NUM=0` restores exhaustive evaluation of every eligible native query.
+
+The fast 128-query setting is intended for mechanism diagnosis. Once a clear
+paired effect is found, use `QUERY_EVAL_NUM=0` for exhaustive confirmation on
+selected splits/scenes.
 
 ## Evaluation
 
-The primary diagnostic uses `ExactGraspNetActionEvaluator` directly on every
-raw same-query candidate, before model-free collision filtering, NMS or Top-K
+The diagnostic uses `ExactGraspNetActionEvaluator` directly on every selected
+same-query candidate, before model-free collision filtering, NMS or Top-K scene
 ranking. This removes candidate-count/ranking confounds and reports:
 
 - official-style friction result for each exact action;
 - collision / pure-collision / empty;
 - success at friction thresholds 0.4 and 0.8;
-- the reference-center displacement in mm.
+- reference-center displacement in mm.
 
 Primary causal comparisons:
 
@@ -102,15 +136,25 @@ Interpretation:
 - large reference-center headroom but weak E11: the candidate location is
   useful, but current RGB/local evidence cannot reliably evaluate it.
 
-## Multi-GPU run
+## Timing
 
-`run_center_decoupling_diag.sh` launches one independent split per GPU. Splits
-are assigned to the GPUs listed in `GPUS` round-robin, and the launcher waits in
-waves if there are more splits than GPUs. Each worker writes its own
-`<OUTPUT_ROOT>/<split>/diagnostic.log`, so there is no shared model process or
-output-file race.
+With `PROFILE_TIMING=1`, `per_sample_summary.csv` and `summary.json` include:
 
-Recommended 3-GPU 10% diagnostic:
+- native Stage-1 forward + E00 decode time;
+- shared counterfactual E10/E11 local re-read time;
+- total exact-evaluator time;
+- evaluator collision time;
+- evaluator force-closure time.
+
+This makes it explicit whether further optimization should target GPU inference
+or CPU force-closure evaluation.
+
+## Run
+
+The canonical `economicgrasp_dpt_cva_cdf_distill_stage1` checkpoint uses
+`POSE_DEPTH_MODE=global_film`; the launcher therefore defaults to this mode.
+
+Recommended fast 10% diagnostic on three GPUs:
 
 ```bash
 DATASET_ROOT=/data/robotarm/dataset/graspnet \
@@ -119,26 +163,12 @@ OUTPUT_ROOT=/data2/robotarm/result/grasp/rgbgrasp/center_decoupling_diag \
 GPUS=0,1,2 \
 SPLITS=test_seen,test_similar,test_novel \
 SAMPLE_INTERVAL=0.1 \
-POSE_DEPTH_MODE=global_film \
+QUERY_EVAL_MODE=topk_uniform \
+QUERY_EVAL_NUM=128 \
+EVAL_VALID_ONLY=1 \
+PROFILE_TIMING=1 \
 bash run_center_decoupling_diag.sh
 ```
-
-`POSE_DEPTH_MODE=global_film` is already the launcher default and can be omitted
-for the canonical Stage-1 checkpoint.
-
-With fewer GPUs, for example:
-
-```bash
-GPUS=0,1 \
-SPLITS=test_seen,test_similar,test_novel \
-SAMPLE_INTERVAL=0.1 \
-bash run_center_decoupling_diag.sh
-```
-
-`test_seen` and `test_similar` run first; `test_novel` starts after that wave
-finishes. Supplying more than three GPUs does not accelerate the default three
-splits because the current launcher parallelizes across splits rather than
-sharding one split across multiple GPUs.
 
 Fast smoke:
 
@@ -147,7 +177,18 @@ GPUS=0 \
 SPLITS=test_seen \
 MAX_SAMPLES=2 \
 NUM_WORKERS=0 \
+QUERY_EVAL_NUM=32 \
 VERIFY_N=4 \
+bash run_center_decoupling_diag.sh
+```
+
+Exhaustive confirmation:
+
+```bash
+GPUS=0,1,2 \
+QUERY_EVAL_MODE=all \
+QUERY_EVAL_NUM=0 \
+EVAL_VALID_ONLY=1 \
 bash run_center_decoupling_diag.sh
 ```
 
@@ -161,12 +202,11 @@ pytest -q tests/test_cva_center_decoupling.py
 
 Each split directory contains:
 
-- `diagnostic.log`: stdout/stderr of that GPU worker;
-- `per_query.csv`: one row for every `(scene, anno, query, variant)`;
-- `per_sample_summary.csv`: sample-level exact-action means over valid reference
-  queries;
-- `summary.json`: aggregate variant metrics, paired deltas and intervention
-  invariant checks;
+- `per_query.csv`: one row for every evaluated `(scene, anno, native query,
+  variant)`;
+- `per_sample_summary.csv`: sample-level exact-action metrics and timing;
+- `summary.json`: aggregate variant metrics, paired deltas, timing, evaluated
+  fraction and invariant checks;
 - optional `raw_grasps/<variant>/scene_xxxx/xxxx.npy` when
   `SAVE_RAW_GRASPS=1`.
 
