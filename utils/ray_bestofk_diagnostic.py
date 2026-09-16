@@ -1,8 +1,6 @@
 """Utilities for frozen multi-center exact-action ray diagnostics."""
 from __future__ import annotations
 
-from typing import Sequence, Tuple
-
 import numpy as np
 import torch
 
@@ -58,6 +56,8 @@ def select_raw_score(raw_score, valid):
         raise ValueError("raw_score and valid must share [K,N].")
     if np.any(~v.any(axis=0)):
         raise ValueError("Every query needs at least one valid hypothesis.")
+    if np.any(v & ~np.isfinite(s)):
+        raise FloatingPointError("A valid ray hypothesis has a non-finite raw CDF score.")
     return np.argmax(np.where(v, s, -np.inf), axis=0).astype(np.int64)
 
 
@@ -69,6 +69,10 @@ def select_exact_oracle(utility, raw_score, valid):
         raise ValueError("utility, raw_score and valid must share [K,N].")
     if np.any(~v.any(axis=0)):
         raise ValueError("Every query needs at least one valid hypothesis.")
+    if np.any(v & ~np.isfinite(u)):
+        raise FloatingPointError("A valid ray hypothesis has non-finite exact utility.")
+    if np.any(v & ~np.isfinite(s)):
+        raise FloatingPointError("A valid ray hypothesis has a non-finite raw CDF score.")
     masked_u = np.where(v, u, -np.inf)
     best_u = masked_u.max(axis=0, keepdims=True)
     tie = v & np.isclose(masked_u, best_u, atol=1e-8, rtol=0.0)
