@@ -85,7 +85,7 @@ mine_one_split() {
       --max_samples "${MINE_MAX_SAMPLES}"
       --num_workers "${MINE_NUM_WORKERS}"
       --pose_depth_mode "${POSE_DEPTH_MODE}"
-      --offsets_mm "${OFFSETS_MM}"
+      "--offsets_mm=${OFFSETS_MM}"
       --query_eval_num "${MINE_QUERY_EVAL_NUM}"
       --query_eval_mode "${MINE_QUERY_EVAL_MODE}"
       --fc_mode "${FC_MODE}"
