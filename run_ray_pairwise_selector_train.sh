@@ -6,9 +6,20 @@ PYTHON_BIN=${PYTHON_BIN:-python}
 DATASET_ROOT=${DATASET_ROOT:-/data/robotarm/dataset/graspnet}
 STAGE1_CKPT=${STAGE1_CKPT:-/data2/robotarm/result/grasp/rgbgrasp/log/economicgrasp_dpt_cva_cdf_distill_stage1/epoch_15_train_0.6009606198008898_val_1.1028128399874995.tar}
 WORK_ROOT=${WORK_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/ray_pairwise_selector}
-CACHE_ROOT=${CACHE_ROOT:-${WORK_ROOT}/cache_train}
+CACHE_ROOT=${CACHE_ROOT:-${WORK_ROOT}/cache_train_seenval}
 TRAIN_OUT=${TRAIN_OUT:-${WORK_ROOT}/train}
 PHASES=${PHASES:-mine,train}
+
+# Cache protocol:
+#   train split     -> scenes 0000-0099, used for selector fitting
+#   test_seen split -> scenes 0100-0129, used ONLY for validation/checkpoint and
+#                      native-fallback threshold selection
+# Because test_seen is consumed as validation, it is no longer a held-out test
+# split for this protocol. Final generalization tests should focus on
+# test_similar/test_novel.
+TRAIN_MINE_SPLIT=${TRAIN_MINE_SPLIT:-train}
+VAL_MINE_SPLIT=${VAL_MINE_SPLIT:-test_seen}
+VAL_SCENE_START=${VAL_SCENE_START:-100}
 
 MINE_GPUS=${MINE_GPUS:-0,1,2,3,4,5}
 MINE_SAMPLE_INTERVAL=${MINE_SAMPLE_INTERVAL:-0.1}
@@ -25,7 +36,6 @@ NOOP_CHECK_SAMPLES=${NOOP_CHECK_SAMPLES:-1}
 NOOP_ATOL=${NOOP_ATOL:-5e-5}
 
 TRAIN_GPU=${TRAIN_GPU:-0}
-VAL_SCENE_START=${VAL_SCENE_START:-80}
 EPOCHS=${EPOCHS:-20}
 LR=${LR:-1e-4}
 WEIGHT_DECAY=${WEIGHT_DECAY:-1e-4}
@@ -51,12 +61,18 @@ export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}"
 has_phase() { [[ ",${PHASES}," == *",$1,"* ]]; }
 mkdir -p "${WORK_ROOT}" "${CACHE_ROOT}" "${TRAIN_OUT}" "${WORK_ROOT}/logs"
 
-if has_phase mine; then
-  IFS=',' read -r -a GPU_ARRAY <<< "${MINE_GPUS}"
-  NSHARDS=${#GPU_ARRAY[@]}
-  [[ ${NSHARDS} -gt 0 ]] || { echo "No MINE_GPUS specified" >&2; exit 2; }
-  PIDS=()
-  echo "[PAIR-PIPE] mining train exact-action cache with ${NSHARDS} shards"
+# Launch one dataset split over all requested GPUs. Both train and validation
+# splits deliberately write scene_xxxx/ann_xxxx.npz files into the SAME cache
+# root; their GraspNet scene IDs are disjoint. The miner's generic protocol file
+# names are renamed after each wave so the second split cannot overwrite the
+# first split's metadata.
+mine_one_split() {
+  local split="$1"
+  local tag="${split//\//_}"
+  local -a pids=()
+  local i gpu failed pid src dst
+
+  echo "[PAIR-PIPE] mining split=${split} exact-action cache with ${NSHARDS} shards"
   for i in "${!GPU_ARRAY[@]}"; do
     gpu="${GPU_ARRAY[$i]}"
     args=(
@@ -64,7 +80,7 @@ if has_phase mine; then
       --dataset_root "${DATASET_ROOT}"
       --checkpoint_path "${STAGE1_CKPT}"
       --output_dir "${CACHE_ROOT}"
-      --split train
+      --split "${split}"
       --sample_interval "${MINE_SAMPLE_INTERVAL}"
       --max_samples "${MINE_MAX_SAMPLES}"
       --num_workers "${MINE_NUM_WORKERS}"
@@ -80,15 +96,46 @@ if has_phase mine; then
       --noop_atol "${NOOP_ATOL}"
     )
     if [[ "${MINE_OVERWRITE}" == "1" ]]; then args+=(--overwrite); fi
-    echo "[PAIR-PIPE][MINE] shard=${i}/${NSHARDS} gpu=${gpu}"
+    echo "[PAIR-PIPE][MINE] split=${split} shard=${i}/${NSHARDS} gpu=${gpu}"
     CUDA_VISIBLE_DEVICES="${gpu}" "${PYTHON_BIN}" "${args[@]}" \
-      >"${WORK_ROOT}/logs/mine_shard${i}.log" 2>&1 &
-    PIDS+=("$!")
+      >"${WORK_ROOT}/logs/mine_${tag}_shard${i}.log" 2>&1 &
+    pids+=("$!")
   done
+
   failed=0
-  for pid in "${PIDS[@]}"; do wait "${pid}" || failed=1; done
-  [[ ${failed} -eq 0 ]] || { echo "Mining failed; inspect ${WORK_ROOT}/logs/mine_shard*.log" >&2; exit 1; }
-  echo "[PAIR-PIPE] cache mining complete"
+  for pid in "${pids[@]}"; do
+    wait "${pid}" || failed=1
+  done
+  [[ ${failed} -eq 0 ]] || {
+    echo "Mining split=${split} failed; inspect ${WORK_ROOT}/logs/mine_${tag}_shard*.log" >&2
+    exit 1
+  }
+
+  # Preserve each split's mining protocol instead of letting the next split
+  # overwrite protocol_shardXX.json in the shared cache root.
+  for i in "${!GPU_ARRAY[@]}"; do
+    src="${CACHE_ROOT}/protocol_shard$(printf '%02d' "${i}").json"
+    dst="${CACHE_ROOT}/protocol_${tag}_shard$(printf '%02d' "${i}").json"
+    if [[ -f "${src}" ]]; then
+      mv -f "${src}" "${dst}"
+    fi
+  done
+  echo "[PAIR-PIPE] mining split=${split} complete"
+}
+
+if has_phase mine; then
+  IFS=',' read -r -a GPU_ARRAY <<< "${MINE_GPUS}"
+  NSHARDS=${#GPU_ARRAY[@]}
+  [[ ${NSHARDS} -gt 0 ]] || { echo "No MINE_GPUS specified" >&2; exit 2; }
+
+  echo "[PAIR-PIPE] validation protocol: train=${TRAIN_MINE_SPLIT}, val=${VAL_MINE_SPLIT}, VAL_SCENE_START=${VAL_SCENE_START}"
+  if [[ "${TRAIN_MINE_SPLIT}" != "train" || "${VAL_MINE_SPLIT}" != "test_seen" || "${VAL_SCENE_START}" != "100" ]]; then
+    echo "[PAIR-PIPE][WARN] non-canonical split override requested. Ensure cache scene IDs satisfy train < VAL_SCENE_START and val >= VAL_SCENE_START." >&2
+  fi
+
+  mine_one_split "${TRAIN_MINE_SPLIT}"
+  mine_one_split "${VAL_MINE_SPLIT}"
+  echo "[PAIR-PIPE] shared train+validation cache mining complete: ${CACHE_ROOT}"
 fi
 
 if has_phase train; then
@@ -114,11 +161,13 @@ if has_phase train; then
     --max_val_frames "${MAX_VAL_FRAMES}"
   )
   if [[ -n "${RESUME}" ]]; then args+=(--resume "${RESUME}"); fi
-  echo "[PAIR-PIPE][TRAIN] gpu=${TRAIN_GPU} cache=${CACHE_ROOT}"
+  echo "[PAIR-PIPE][TRAIN] gpu=${TRAIN_GPU} cache=${CACHE_ROOT} train_scene<${VAL_SCENE_START} val_scene>=${VAL_SCENE_START}"
   CUDA_VISIBLE_DEVICES="${TRAIN_GPU}" "${PYTHON_BIN}" "${args[@]}" \
     2>&1 | tee "${WORK_ROOT}/logs/train.log"
 fi
 
 echo "[PAIR-PIPE] completed"
 echo "  cache: ${CACHE_ROOT}"
+echo "  train split: ${TRAIN_MINE_SPLIT} (expected scenes 0000-0099)"
+echo "  validation split: ${VAL_MINE_SPLIT} (expected scenes 0100-0129)"
 echo "  best selector: ${TRAIN_OUT}/checkpoint_best.tar"
