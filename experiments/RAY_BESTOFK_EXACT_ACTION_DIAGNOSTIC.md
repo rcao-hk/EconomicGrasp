@@ -1,6 +1,6 @@
 # Frozen ray best-of-K exact-action diagnostic
 
-Branch: `exp/ray-bestofk-exact-action-diagnostic-final`
+Branch: `exp/ray-bestofk-exact-action-diagnostic`
 
 ## Question
 
