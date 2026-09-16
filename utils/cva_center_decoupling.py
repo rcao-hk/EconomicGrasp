@@ -1,6 +1,6 @@
 """Controlled center-decoupling diagnostics for the CVA-CDF model.
 
-This module intentionally does not change the deployed model.  It reuses a
+This module intentionally does not change the deployed model. It reuses a
 completed Stage-1 forward pass and intervenes *after* the center-view selector:
 
 E00: read at predicted center, output predicted center (native baseline)
@@ -10,9 +10,18 @@ E10: re-read/re-decode at the reference center, but output the predicted center
 E11: re-read/re-decode at the reference center and output the reference center
 
 The image feature map, predicted depth map, image-FPS token, selected approach
-view, proposal maps and all model weights are held fixed.  This isolates the
+view, proposal maps and all model weights are held fixed. This isolates the
 roles of the center used to read local evidence and the center emitted as the
 6-DoF grasp translation.
+
+Important implementation invariant
+----------------------------------
+The counterfactual reread must consume exactly the same auxiliary evidence maps
+as the native forward. In particular, the native EconomicGrasp-DPT forward
+passes ``grasp_sel = graspness_score.clamp(0, 1)`` into CVA grouping. Therefore
+this module reuses ``dbg_grasp_sel`` when available and otherwise applies the
+same clamp to ``graspness_score``. Using the unclipped graspness logits/scores
+would confound E10/E11 with an unintended evidence-map change.
 """
 from __future__ import annotations
 
@@ -56,13 +65,16 @@ def gather_reference_centers_from_depth(
     elif gt_depth.dim() == 4:
         gt_depth = gt_depth[:, :1]
     else:
-        raise ValueError(f"gt_depth_m must be [B,H,W] or [B,1,H,W], got {tuple(gt_depth.shape)}")
+        raise ValueError(
+            f"gt_depth_m must be [B,H,W] or [B,1,H,W], got {tuple(gt_depth.shape)}"
+        )
 
     B, _, H, W = gt_depth.shape
     if token_idx.shape[0] != B or native_xyz.shape[:2] != token_idx.shape:
         raise ValueError(
             "Batch/query mismatch among GT depth, base token indices and base centers: "
-            f"depth={tuple(gt_depth.shape)}, idx={tuple(token_idx.shape)}, xyz={tuple(native_xyz.shape)}"
+            f"depth={tuple(gt_depth.shape)}, idx={tuple(token_idx.shape)}, "
+            f"xyz={tuple(native_xyz.shape)}"
         )
     if bool(((token_idx < 0) | (token_idx >= H * W)).any()):
         raise ValueError("kview_base_token_sel_idx contains an out-of-range pixel index.")
@@ -89,25 +101,21 @@ def gather_reference_centers_from_depth(
 
 
 def _top1_query_contract(end_points: Mapping[str, object]):
-    """Extract the exact post-selector Top-1 query contract.
-
-    The diagnostic deliberately forbids Top-K view expansion.  Otherwise E01
-    translation replacement and E10/E11 query pairing would need rank-aware
-    center expansion and would no longer isolate center depth as cleanly.
-    """
+    """Extract the exact post-selector Top-1 query contract."""
     seed_features = _require_tensor(end_points, "kview_base_seed_features")
     token_idx = _require_tensor(end_points, "kview_base_token_sel_idx").long()
     native_xyz = _require_tensor(end_points, "kview_base_xyz_graspable").float()
     view_xyz = _require_tensor(end_points, "grasp_top_view_xyz").float()
     view_inds = _require_tensor(end_points, "grasp_top_view_inds").long()
 
-    B, C, M = seed_features.shape
+    B, _, M = seed_features.shape
     if token_idx.shape != (B, M) or native_xyz.shape != (B, M, 3):
         raise ValueError("Malformed base CVA query contract.")
     if view_xyz.shape != (B, M, 3) or view_inds.shape != (B, M):
         raise RuntimeError(
             "Center-decoupling diagnostic requires deterministic Top-1 CVA inference. "
-            f"Got base M={M}, view_xyz={tuple(view_xyz.shape)}, view_inds={tuple(view_inds.shape)}."
+            f"Got base M={M}, view_xyz={tuple(view_xyz.shape)}, "
+            f"view_inds={tuple(view_inds.shape)}."
         )
 
     effective_k = end_points.get("kview_effective_k_int", 1)
@@ -123,6 +131,43 @@ def _top1_query_contract(end_points: Mapping[str, object]):
     return seed_features, native_xyz, token_idx, view_xyz, view_inds
 
 
+def _native_grouping_graspness_map(
+    native_end_points: Mapping[str, object],
+    *,
+    B: int,
+    H: int,
+    W: int,
+) -> torch.Tensor:
+    """Recover exactly the graspness evidence map used by native CVA grouping.
+
+    ``economicgrasp_dpt.forward`` computes ``grasp_sel = grasp_raw.clamp(0, 1)``
+    and passes that tensor into ``kview_grasp_module``. It also stores the same
+    flattened tensor as ``dbg_grasp_sel``. Prefer this exact diagnostic tensor;
+    for older checkpoints/code paths without it, reconstruct the native value by
+    applying the identical clamp to ``graspness_score``.
+    """
+    selected = native_end_points.get("dbg_grasp_sel", None)
+    if torch.is_tensor(selected):
+        selected = selected.float()
+        if selected.shape == (B, H * W):
+            return selected.view(B, 1, H, W).contiguous()
+        if selected.shape == (B, 1, H * W):
+            return selected.view(B, 1, H, W).contiguous()
+        raise ValueError(
+            "dbg_grasp_sel is present but not aligned with the native feature map: "
+            f"got {tuple(selected.shape)}, expected [{B},{H * W}] or "
+            f"[{B},1,{H * W}]."
+        )
+
+    raw = _require_tensor(native_end_points, "graspness_score").float()
+    if raw.shape[-1] != H * W:
+        raise ValueError(
+            "graspness_score is not aligned with img_feat_dpt: "
+            f"got {tuple(raw.shape)}, expected last dim {H * W}."
+        )
+    return raw[:, :1].clamp(0.0, 1.0).view(B, 1, H, W).contiguous()
+
+
 def rerun_cdf_with_read_center(
     model: torch.nn.Module,
     native_end_points: Mapping[str, object],
@@ -132,32 +177,39 @@ def rerun_cdf_with_read_center(
 ):
     """Re-run only angle expansion, local grouping and CDF/width decoding.
 
-    View prediction and view selection are *not* re-run.  All image/depth
-    memories are reused from the native forward pass.
+    View prediction and view selection are *not* re-run. All image/depth
+    memories and auxiliary grouping evidence are reused from the native forward.
+    The only intended intervention before the final decoder is ``read_center``.
     """
     module = getattr(model, "kview_grasp_module", None)
     if module is None:
         raise AttributeError("Model has no kview_grasp_module.")
     if not bool(getattr(model, "use_cdf", False)):
-        raise RuntimeError("Center-decoupling diagnostic is defined for the CDF head only.")
+        raise RuntimeError(
+            "Center-decoupling diagnostic is defined for the CDF head only."
+        )
 
-    seed_features, native_xyz, token_idx, view_xyz, view_inds = _top1_query_contract(native_end_points)
+    seed_features, native_xyz, token_idx, view_xyz, view_inds = (
+        _top1_query_contract(native_end_points)
+    )
     if read_center.shape != native_xyz.shape or output_center.shape != native_xyz.shape:
         raise ValueError(
             "read_center/output_center must match native center shape "
-            f"{tuple(native_xyz.shape)}; got {tuple(read_center.shape)} / {tuple(output_center.shape)}"
+            f"{tuple(native_xyz.shape)}; got {tuple(read_center.shape)} / "
+            f"{tuple(output_center.shape)}"
         )
 
     feat_map = _require_tensor(native_end_points, "img_feat_dpt")
     depth_map = _require_tensor(native_end_points, "depth_map_used_for_geometry")
     camera_K = _require_tensor(native_end_points, "K")
     objectness = _require_tensor(native_end_points, "objectness_score")
-    graspness = _require_tensor(native_end_points, "graspness_score")
     B, _, H, W = feat_map.shape
-    if objectness.shape[-1] != H * W or graspness.shape[-1] != H * W:
-        raise ValueError("Flattened proposal maps are not aligned with img_feat_dpt.")
+    if objectness.shape[-1] != H * W:
+        raise ValueError("Flattened objectness map is not aligned with img_feat_dpt.")
     objectness_logits = objectness.view(B, objectness.shape[1], H, W).contiguous()
-    graspness_map = graspness[:, :1].view(B, 1, H, W).contiguous()
+    graspness_map = _native_grouping_graspness_map(
+        native_end_points, B=B, H=H, W=W
+    ).to(device=feat_map.device, dtype=feat_map.dtype)
 
     local_ep: Dict[str, object] = {}
     seed_a, xyz_a, token_a, rot_a, local_ep = module._expand_angle_queries(
@@ -181,9 +233,6 @@ def rerun_cdf_with_read_center(
     )
     decoded = module.decoder(grouped, local_ep)
 
-    # Build the smallest strict endpoint contract needed by the repository's
-    # native CDF decoder.  The output center is intentionally independent of the
-    # center used above for feature reading.
     decode_ep: Dict[str, object] = {
         "xyz_graspable": output_center,
         "grasp_top_view_xyz": view_xyz,
@@ -193,8 +242,6 @@ def rerun_cdf_with_read_center(
         "D: CDF enabled": torch.ones((), device=output_center.device),
         "kview_effective_k_int": 1,
     }
-    # Native query-index helper accepts these metadata when present.  For Top-1
-    # they are copied verbatim to guarantee the same parent/rank semantics.
     for key in (
         "kview_query_parent",
         "kview_query_view_rank",
@@ -207,22 +254,74 @@ def rerun_cdf_with_read_center(
     return decode_ep, grouped
 
 
+def native_reread_equivalence_metrics(
+    native_end_points: Mapping[str, object],
+    replay_end_points: Mapping[str, object],
+) -> Dict[str, float]:
+    """Measure no-op reread parity for the two deployed CDF decoder outputs.
+
+    Call ``rerun_cdf_with_read_center`` with both ``read_center`` and
+    ``output_center`` equal to the native center. In eval mode, a correct
+    counterfactual implementation should reproduce the native CDF and width
+    tensors up to normal floating-point replay noise.
+    """
+    metrics: Dict[str, float] = {}
+    for key, short in (
+        ("grasp_cdf_pred_angle_depth", "cdf"),
+        ("grasp_width_pred_angle_depth", "width"),
+    ):
+        native = _require_tensor(native_end_points, key).float()
+        replay = _require_tensor(replay_end_points, key).float()
+        if native.shape != replay.shape:
+            raise RuntimeError(
+                f"No-op reread {key} shape mismatch: native={tuple(native.shape)}, "
+                f"replay={tuple(replay.shape)}"
+            )
+        diff = (native - replay).abs()
+        metrics[f"noop_{short}_max_abs"] = float(diff.max().item()) if diff.numel() else 0.0
+        metrics[f"noop_{short}_mean_abs"] = float(diff.mean().item()) if diff.numel() else 0.0
+    return metrics
+
+
+def assert_native_reread_equivalent(
+    native_end_points: Mapping[str, object],
+    replay_end_points: Mapping[str, object],
+    *,
+    atol: float = 5.0e-5,
+) -> Dict[str, float]:
+    """Fail fast if a native-center reread changes CDF/width unexpectedly."""
+    metrics = native_reread_equivalence_metrics(native_end_points, replay_end_points)
+    worst = max(
+        metrics.get("noop_cdf_max_abs", 0.0),
+        metrics.get("noop_width_max_abs", 0.0),
+    )
+    if worst > float(atol):
+        raise RuntimeError(
+            "Native-center no-op reread does not reproduce the native CVA-CDF "
+            f"outputs: max_abs={worst:.3e} > atol={float(atol):.3e}; "
+            f"details={metrics}. Do not interpret E10/E11 until this passes."
+        )
+    return metrics
+
+
 def replace_decoded_translation(
     grasp_preds,
     replacement_xyz: torch.Tensor,
 ):
-    """E01 intervention: preserve native grasp decisions, replace xyz only."""
+    """Preserve decoded grasp decisions and replace xyz translation only."""
     if len(grasp_preds) != replacement_xyz.shape[0]:
         raise ValueError("Batch size mismatch in translation replacement.")
     outputs = []
     for b, pred in enumerate(grasp_preds):
         if pred.dim() != 2 or pred.shape[-1] != 17:
-            raise ValueError(f"Decoded grasps must be [N,17], got {tuple(pred.shape)}")
+            raise ValueError(
+                f"Decoded grasps must be [N,17], got {tuple(pred.shape)}"
+            )
         xyz = replacement_xyz[b]
         if pred.shape[0] != xyz.shape[0]:
             raise RuntimeError(
-                "E01 requires one decoded Top-1 grasp per native image-FPS query: "
-                f"pred={pred.shape[0]}, xyz={xyz.shape[0]}."
+                "Translation replacement requires one decoded Top-1 grasp per "
+                f"native image-FPS query: pred={pred.shape[0]}, xyz={xyz.shape[0]}."
             )
         out = pred.clone()
         out[:, 13:16] = xyz.to(device=out.device, dtype=out.dtype)
