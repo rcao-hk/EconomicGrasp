@@ -75,7 +75,7 @@ launch_split() {
     --max_samples "${MAX_SAMPLES}"
     --num_workers "${NUM_WORKERS}"
     --pose_depth_mode "${POSE_DEPTH_MODE}"
-    --offsets_mm "${OFFSETS_MM}"
+    "--offsets_mm=${OFFSETS_MM}"
     --query_eval_num "${QUERY_EVAL_NUM}"
     --query_eval_mode "${QUERY_EVAL_MODE}"
     --fc_mode "${FC_MODE}"
