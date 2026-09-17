@@ -5,11 +5,14 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_BIN=${PYTHON_BIN:-python}
 WORK_ROOT=${WORK_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/ray_pairwise_selector}
 
-# Current canonical layout keeps selector-fit and validation caches separate:
-#   TRAIN_CACHE_ROOT: GraspNet train scenes 0000-0099
-#   VAL_CACHE_ROOT:   test_seen scenes 0100-0129, used as validation only
-# The analyzer itself expects one cache root, so this launcher creates a
-# symlink-only union view. No .npz payload is copied or modified.
+# Cache layout accepted by this launcher:
+#   TRAIN_CACHE_ROOT may be either a pure train cache (scene 0000-0099)
+#   or a previously merged cache that also contains validation scenes.
+#   VAL_CACHE_ROOT may be a pure validation cache or may contain extra scenes.
+# The union is built by scene-id range, not by assuming either source root is pure:
+#   scene_id <  VAL_SCENE_START -> TRAIN_CACHE_ROOT
+#   scene_id >= VAL_SCENE_START -> VAL_CACHE_ROOT
+# This keeps train/val provenance explicit without copying .npz payloads.
 TRAIN_CACHE_ROOT=${TRAIN_CACHE_ROOT:-${WORK_ROOT}/cache}
 VAL_CACHE_ROOT=${VAL_CACHE_ROOT:-${WORK_ROOT}/cache_val}
 UNION_CACHE_ROOT=${UNION_CACHE_ROOT:-${WORK_ROOT}/cache_decodability_union}
@@ -37,35 +40,41 @@ mkdir -p "${OUTPUT_ROOT}"
 prepare_union_cache() {
   local src dst base sid
   local train_dirs=0 val_dirs=0
+  local ignored_train_val_dirs=0 ignored_val_train_dirs=0
 
   rm -rf "${UNION_CACHE_ROOT}"
   mkdir -p "${UNION_CACHE_ROOT}"
   shopt -s nullglob
 
+  # TRAIN_CACHE_ROOT is authoritative only for train-range scenes.  It is legal
+  # for this root to already contain merged validation scenes from an earlier
+  # pipeline; those scenes are deliberately ignored here.
   for src in "${TRAIN_CACHE_ROOT}"/scene_*; do
     [[ -d "${src}" ]] || continue
     base="$(basename "${src}")"
     sid=$((10#${base#scene_}))
     if (( sid >= VAL_SCENE_START )); then
-      echo "Unexpected validation-range scene in TRAIN_CACHE_ROOT: ${src}" >&2
-      exit 2
+      ignored_train_val_dirs=$((ignored_train_val_dirs + 1))
+      continue
     fi
     dst="${UNION_CACHE_ROOT}/${base}"
     ln -s "$(readlink -f "${src}")" "${dst}"
     train_dirs=$((train_dirs + 1))
   done
 
+  # VAL_CACHE_ROOT is authoritative only for validation-range scenes. Extra
+  # train-range scenes are ignored rather than treated as a fatal layout error.
   for src in "${VAL_CACHE_ROOT}"/scene_*; do
     [[ -d "${src}" ]] || continue
     base="$(basename "${src}")"
     sid=$((10#${base#scene_}))
     if (( sid < VAL_SCENE_START )); then
-      echo "Unexpected train-range scene in VAL_CACHE_ROOT: ${src}" >&2
-      exit 2
+      ignored_val_train_dirs=$((ignored_val_train_dirs + 1))
+      continue
     fi
     dst="${UNION_CACHE_ROOT}/${base}"
     if [[ -e "${dst}" || -L "${dst}" ]]; then
-      echo "Duplicate scene while building union cache: ${base}" >&2
+      echo "Duplicate validation scene while building union cache: ${base}" >&2
       exit 2
     fi
     ln -s "$(readlink -f "${src}")" "${dst}"
@@ -74,6 +83,12 @@ prepare_union_cache() {
   shopt -u nullglob
 
   echo "[DECODE-RUN][UNION] train_scene_dirs=${train_dirs} val_scene_dirs=${val_dirs} root=${UNION_CACHE_ROOT}"
+  if (( ignored_train_val_dirs > 0 )); then
+    echo "[DECODE-RUN][UNION] ignored ${ignored_train_val_dirs} validation-range scene dirs already present in TRAIN_CACHE_ROOT"
+  fi
+  if (( ignored_val_train_dirs > 0 )); then
+    echo "[DECODE-RUN][UNION] ignored ${ignored_val_train_dirs} train-range scene dirs present in VAL_CACHE_ROOT"
+  fi
 
   TRAIN_CACHE_ENV="${TRAIN_CACHE_ROOT}" VAL_CACHE_ENV="${VAL_CACHE_ROOT}" UNION_CACHE_ENV="${UNION_CACHE_ROOT}" VAL_START_ENV="${VAL_SCENE_START}" "${PYTHON_BIN}" - <<'PY'
 import os
@@ -87,18 +102,27 @@ start = int(os.environ["VAL_START_ENV"])
 def files(root):
     return list(root.glob("scene_*/ann_*.npz"))
 
-train_src = files(train_root)
-val_src = files(val_root)
+def sid(p):
+    return int(p.parent.name.split("_")[-1])
+
+# Only compare the ranges that each source root is authoritative for.
+train_src_all = files(train_root)
+val_src_all = files(val_root)
+train_src = [p for p in train_src_all if sid(p) < start]
+val_src = [p for p in val_src_all if sid(p) >= start]
 union = files(union_root)
-train_union = [p for p in union if int(p.parent.name.split("_")[-1]) < start]
-val_union = [p for p in union if int(p.parent.name.split("_")[-1]) >= start]
+train_union = [p for p in union if sid(p) < start]
+val_union = [p for p in union if sid(p) >= start]
 
 print(
-    f"[DECODE-RUN][CACHE] train_src={len(train_src)} val_src={len(val_src)} "
-    f"union_train={len(train_union)} union_val={len(val_union)}"
+    f"[DECODE-RUN][CACHE] train_src_valid={len(train_src)} val_src_valid={len(val_src)} "
+    f"union_train={len(train_union)} union_val={len(val_union)} "
+    f"train_root_total={len(train_src_all)} val_root_total={len(val_src_all)}"
 )
 if not train_src or not val_src:
-    raise SystemExit("Train or validation cache is empty.")
+    raise SystemExit(
+        "Train or validation cache is empty in its authoritative scene-id range."
+    )
 if len(train_src) != len(train_union) or len(val_src) != len(val_union):
     raise SystemExit(
         "Union cache count mismatch; check scene IDs and cache roots before analysis."
@@ -151,7 +175,7 @@ for name_raw in "${CKPT_NAMES[@]}"; do
 done
 
 echo "[DECODE-RUN] completed: ${OUTPUT_ROOT}"
-echo "  train cache: ${TRAIN_CACHE_ROOT}"
-echo "  validation cache: ${VAL_CACHE_ROOT}"
+echo "  train source cache: ${TRAIN_CACHE_ROOT} (only scene < ${VAL_SCENE_START} used)"
+echo "  validation source cache: ${VAL_CACHE_ROOT} (only scene >= ${VAL_SCENE_START} used)"
 echo "  union cache (symlinks only): ${UNION_CACHE_ROOT}"
 find "${OUTPUT_ROOT}" -maxdepth 2 -name REPORT.md -print
