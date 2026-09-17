@@ -7,16 +7,14 @@ DATASET_ROOT=${DATASET_ROOT:-/data/robotarm/dataset/graspnet}
 STAGE1_CKPT=${STAGE1_CKPT:-/data2/robotarm/result/grasp/rgbgrasp/log/economicgrasp_dpt_cva_cdf_distill_stage1/epoch_15_train_0.6009606198008898_val_1.1028128399874995.tar}
 WORK_ROOT=${WORK_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/ray_pairwise_selector}
 CACHE_ROOT=${CACHE_ROOT:-${WORK_ROOT}/cache_train_seenval}
+VAL_CACHE_ROOT=${VAL_CACHE_ROOT:-${WORK_ROOT}/cache_val_seen_tmp}
 TRAIN_OUT=${TRAIN_OUT:-${WORK_ROOT}/train}
 PHASES=${PHASES:-mine,train}
 
-# Cache protocol:
-#   train split     -> scenes 0000-0099, used for selector fitting
-#   test_seen split -> scenes 0100-0129, used ONLY for validation/checkpoint and
-#                      native-fallback threshold selection
-# Because test_seen is consumed as validation, it is no longer a held-out test
-# split for this protocol. Final generalization tests should focus on
-# test_similar/test_novel.
+# Canonical protocol:
+#   train split     -> scenes 0000-0099, selector fitting
+#   test_seen split -> scenes 0100-0129, validation/checkpoint/threshold selection
+# test_seen is therefore NOT an untouched test split in this protocol.
 TRAIN_MINE_SPLIT=${TRAIN_MINE_SPLIT:-train}
 VAL_MINE_SPLIT=${VAL_MINE_SPLIT:-test_seen}
 VAL_SCENE_START=${VAL_SCENE_START:-100}
@@ -59,27 +57,28 @@ export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
 export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}"
 
 has_phase() { [[ ",${PHASES}," == *",$1,"* ]]; }
-mkdir -p "${WORK_ROOT}" "${CACHE_ROOT}" "${TRAIN_OUT}" "${WORK_ROOT}/logs"
+mkdir -p "${WORK_ROOT}" "${CACHE_ROOT}" "${VAL_CACHE_ROOT}" "${TRAIN_OUT}" "${WORK_ROOT}/logs"
 
-# Launch one dataset split over all requested GPUs. Both train and validation
-# splits deliberately write scene_xxxx/ann_xxxx.npz files into the SAME cache
-# root; their GraspNet scene IDs are disjoint. The miner's generic protocol file
-# names are renamed after each wave so the second split cannot overwrite the
-# first split's metadata.
+# IMPORTANT: mine train and validation into DIFFERENT roots.
+# The miner's cheap pre-forward skip uses a split-local dataset index; if both
+# splits share a root, test_seen local scene 0..29 can be mistaken for existing
+# train scene 0..29 before the batch exposes the true global scene id 100..129.
 mine_one_split() {
   local split="$1"
+  local output_root="$2"
   local tag="${split//\//_}"
   local -a pids=()
   local i gpu failed pid src dst
 
-  echo "[PAIR-PIPE] mining split=${split} exact-action cache with ${NSHARDS} shards"
+  mkdir -p "${output_root}"
+  echo "[PAIR-PIPE] mining split=${split} output=${output_root} with ${NSHARDS} shards"
   for i in "${!GPU_ARRAY[@]}"; do
     gpu="${GPU_ARRAY[$i]}"
     args=(
       "${SCRIPT_DIR}/mine_ray_pairwise_exact_cache.py"
       --dataset_root "${DATASET_ROOT}"
       --checkpoint_path "${STAGE1_CKPT}"
-      --output_dir "${CACHE_ROOT}"
+      --output_dir "${output_root}"
       --split "${split}"
       --sample_interval "${MINE_SAMPLE_INTERVAL}"
       --max_samples "${MINE_MAX_SAMPLES}"
@@ -111,16 +110,68 @@ mine_one_split() {
     exit 1
   }
 
-  # Preserve each split's mining protocol instead of letting the next split
-  # overwrite protocol_shardXX.json in the shared cache root.
   for i in "${!GPU_ARRAY[@]}"; do
-    src="${CACHE_ROOT}/protocol_shard$(printf '%02d' "${i}").json"
-    dst="${CACHE_ROOT}/protocol_${tag}_shard$(printf '%02d' "${i}").json"
+    src="${output_root}/protocol_shard$(printf '%02d' "${i}").json"
+    dst="${output_root}/protocol_${tag}_shard$(printf '%02d' "${i}").json"
     if [[ -f "${src}" ]]; then
       mv -f "${src}" "${dst}"
     fi
   done
   echo "[PAIR-PIPE] mining split=${split} complete"
+}
+
+merge_validation_cache() {
+  local src dst base
+  local copied=0 skipped=0
+  shopt -s nullglob
+  for src in "${VAL_CACHE_ROOT}"/scene_*; do
+    [[ -d "${src}" ]] || continue
+    base="$(basename "${src}")"
+    dst="${CACHE_ROOT}/${base}"
+    if [[ -e "${dst}" ]]; then
+      if [[ "${MINE_OVERWRITE}" == "1" ]]; then
+        rm -rf "${dst}"
+      else
+        skipped=$((skipped + 1))
+        continue
+      fi
+    fi
+    # Prefer hard links (same WORK_ROOT filesystem, no duplicated cache bytes).
+    # Fall back to a normal copy if hard-linking is unavailable.
+    if cp -al "${src}" "${dst}" 2>/dev/null; then
+      :
+    else
+      cp -a "${src}" "${dst}"
+    fi
+    copied=$((copied + 1))
+  done
+  for src in "${VAL_CACHE_ROOT}"/protocol_${VAL_MINE_SPLIT}_shard*.json; do
+    [[ -f "${src}" ]] || continue
+    cp -f "${src}" "${CACHE_ROOT}/$(basename "${src}")"
+  done
+  shopt -u nullglob
+  echo "[PAIR-PIPE] validation cache merged into ${CACHE_ROOT}: scene_dirs_added=${copied}, existing=${skipped}"
+}
+
+check_combined_cache() {
+  CACHE_ROOT_ENV="${CACHE_ROOT}" VAL_START_ENV="${VAL_SCENE_START}" "${PYTHON_BIN}" - <<'PY'
+import os
+from pathlib import Path
+root = Path(os.environ["CACHE_ROOT_ENV"])
+start = int(os.environ["VAL_START_ENV"])
+paths = list(root.glob("scene_*/ann_*.npz"))
+train = []
+val = []
+for p in paths:
+    sid = int(p.parent.name.split("_")[-1])
+    (train if sid < start else val).append(p)
+print(f"[PAIR-PIPE][CACHE] train={len(train)} val={len(val)} val_scene_start={start}")
+if not train or not val:
+    raise SystemExit(
+        f"Combined cache incomplete: train={len(train)}, val={len(val)}. "
+        "Re-run PHASES=mine,train after pulling the split-root fix."
+    )
+PY
 }
 
 if has_phase mine; then
@@ -130,15 +181,17 @@ if has_phase mine; then
 
   echo "[PAIR-PIPE] validation protocol: train=${TRAIN_MINE_SPLIT}, val=${VAL_MINE_SPLIT}, VAL_SCENE_START=${VAL_SCENE_START}"
   if [[ "${TRAIN_MINE_SPLIT}" != "train" || "${VAL_MINE_SPLIT}" != "test_seen" || "${VAL_SCENE_START}" != "100" ]]; then
-    echo "[PAIR-PIPE][WARN] non-canonical split override requested. Ensure cache scene IDs satisfy train < VAL_SCENE_START and val >= VAL_SCENE_START." >&2
+    echo "[PAIR-PIPE][WARN] non-canonical split override requested." >&2
   fi
 
-  mine_one_split "${TRAIN_MINE_SPLIT}"
-  mine_one_split "${VAL_MINE_SPLIT}"
-  echo "[PAIR-PIPE] shared train+validation cache mining complete: ${CACHE_ROOT}"
+  mine_one_split "${TRAIN_MINE_SPLIT}" "${CACHE_ROOT}"
+  mine_one_split "${VAL_MINE_SPLIT}" "${VAL_CACHE_ROOT}"
+  merge_validation_cache
+  check_combined_cache
 fi
 
 if has_phase train; then
+  check_combined_cache
   args=(
     "${SCRIPT_DIR}/train_ray_pairwise_selector.py"
     --cache_root "${CACHE_ROOT}"
@@ -167,7 +220,8 @@ if has_phase train; then
 fi
 
 echo "[PAIR-PIPE] completed"
-echo "  cache: ${CACHE_ROOT}"
+echo "  combined cache: ${CACHE_ROOT}"
+echo "  validation mining cache: ${VAL_CACHE_ROOT}"
 echo "  train split: ${TRAIN_MINE_SPLIT} (expected scenes 0000-0099)"
 echo "  validation split: ${VAL_MINE_SPLIT} (expected scenes 0100-0129)"
 echo "  best selector: ${TRAIN_OUT}/checkpoint_best.tar"
