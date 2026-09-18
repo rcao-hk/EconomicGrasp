@@ -73,3 +73,14 @@ def test_selector_loss_ignores_tie_only_queries():
     losses,targets=relational_exact_action_losses(out,utility,valid,3)
     assert not bool(targets["move_target"].any())
     assert float(losses["selector"].detach())==0.0
+
+
+def test_no_valid_alternative_forces_native():
+    N,K,z=3,7,3
+    gate=torch.full((N,),10.0)
+    logits=torch.randn(N,K)
+    valid=torch.zeros(N,K,dtype=torch.bool)
+    valid[:,z]=True
+    selected,best,prob=select_relational_correction(gate,logits,valid,z,0.1)
+    assert selected.tolist()==[z,z,z]
+    assert best.tolist()==[z,z,z]
