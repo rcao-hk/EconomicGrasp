@@ -302,9 +302,13 @@ def select_relational_correction(
     if z < 0 or z >= K or not np.all(valid[:, z]):
         raise ValueError("Native center must be valid.")
 
-    alt_score = np.where(valid, logits, -np.inf)
-    alt_score[:, z] = -np.inf
+    alt_valid = valid.copy()
+    alt_valid[:, z] = False
+    has_alt = alt_valid.any(axis=1)
+    alt_score = np.where(alt_valid, logits, -np.inf)
     best_alt = np.argmax(alt_score, axis=1).astype(np.int64)
+    best_alt = np.where(has_alt, best_alt, z).astype(np.int64)
     move_prob = 1.0 / (1.0 + np.exp(-np.clip(gate, -50.0, 50.0)))
-    selected = np.where(move_prob > float(move_threshold), best_alt, z).astype(np.int64)
+    do_move = (move_prob > float(move_threshold)) & has_alt
+    selected = np.where(do_move, best_alt, z).astype(np.int64)
     return selected, best_alt, move_prob.astype(np.float32)
