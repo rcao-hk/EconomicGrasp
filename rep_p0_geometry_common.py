@@ -358,6 +358,32 @@ def describe_actions(
     return out
 
 
+def load_full_cad_scene_cloud(evaluator, scene_id: int, anno_id: int, voxel_size: float = 0.008) -> np.ndarray:
+    """Return complete CAD objects + table in the current camera frame.
+
+    This is a privileged geometry upper bound. It intentionally uses the same
+    object poses and table transform as the exact GraspNet evaluator.
+    """
+    from graspnetAPI.utils.eval_utils import transform_points
+
+    models_obj, _ = evaluator._scene_models(int(scene_id))
+    _, poses, camera_pose, align_mat = evaluator.eval.get_model_poses(
+        int(scene_id), int(anno_id)
+    )
+    models_cam = [
+        transform_points(model, poses[obj_index])
+        for obj_index, model in enumerate(models_obj)
+    ]
+    table_cam = transform_points(
+        evaluator.table,
+        np.linalg.inv(np.matmul(align_mat, camera_pose)),
+    )
+    parts = [p for p in models_cam if len(p)] + [table_cam]
+    if not parts:
+        return np.empty((0, 3), dtype=np.float32)
+    return voxel_downsample_numpy(np.concatenate(parts, axis=0), voxel_size)
+
+
 class GeometrySourceProbe(nn.Module):
     """Same lightweight six-threshold CDF probe for every geometry source."""
 
