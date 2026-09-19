@@ -61,6 +61,7 @@ from models.economicgrasp_dpt_distill import economicgrasp_dpt_student
 from rep_p0_geometry_common import (
     DescriptorConfig,
     GEOMETRY_SOURCES,
+    REP_P0_EVIDENCE_VOXEL_SIZE,
     backproject_depth_map,
     build_translation_ray_actions,
     describe_actions,
@@ -160,6 +161,13 @@ def evaluate_actions(evaluator, scene_id, anno_id, actions, valid):
 
 def main():
     sources = tuple(x.strip() for x in ARGS.sources.split(",") if x.strip())
+    if abs(float(ARGS.voxel_size) - float(REP_P0_EVIDENCE_VOXEL_SIZE)) > 1e-9:
+        print(
+            f"[REP-P0][WARN] non-canonical evidence voxel size "
+            f"{ARGS.voxel_size:.6f} m; formal Rep-P0 uses "
+            f"{REP_P0_EVIDENCE_VOXEL_SIZE:.6f} m.",
+            flush=True,
+        )
     unknown = sorted(set(sources) - set(GEOMETRY_SOURCES))
     if unknown:
         raise ValueError(f"Unknown geometry source(s): {unknown}; supported={GEOMETRY_SOURCES}")
@@ -252,6 +260,19 @@ def main():
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"ann_{anno_id:04d}.npz"
         if out_path.exists() and not ARGS.overwrite:
+            with np.load(out_path, allow_pickle=False) as old_cache:
+                if "evidence_voxel_size" not in old_cache.files:
+                    raise RuntimeError(
+                        f"Stale Rep-P0 cache without evidence_voxel_size: {out_path}. "
+                        "Regenerate with --overwrite or use a fresh WORK_ROOT."
+                    )
+                old_voxel = float(np.asarray(old_cache["evidence_voxel_size"]).reshape(-1)[0])
+            if abs(old_voxel - float(ARGS.voxel_size)) > 1e-9:
+                raise RuntimeError(
+                    f"Rep-P0 cache resolution mismatch at {out_path}: "
+                    f"cache={old_voxel:.6f} m requested={ARGS.voxel_size:.6f} m. "
+                    "Regenerate with --overwrite or use a fresh WORK_ROOT."
+                )
             continue
 
         batch["cva_export_angle_feature"] = False
@@ -327,6 +348,7 @@ def main():
             "anno_id": np.asarray(anno_id, dtype=np.int16),
             "query_ids": qidx.detach().cpu().numpy().astype(np.int16),
             "native_score": native[:, 0].astype(np.float32),
+            "evidence_voxel_size": np.asarray(ARGS.voxel_size, dtype=np.float32),
         }
         for source in sources:
             feat = describe_actions(source_points[source], actions, valid, desc_cfg)
