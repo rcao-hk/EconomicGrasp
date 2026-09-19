@@ -23,7 +23,7 @@ FC_MODE=${FC_MODE:-reuse_contacts}
 VERIFY_N=${VERIFY_N:-0}
 OVERWRITE=${OVERWRITE:-0}
 RESUME=${RESUME:-1}
-REPAIR_INVALID_CACHE=${REPAIR_INVALID_CACHE:-0}
+REPAIR_INVALID_CACHE=${REPAIR_INVALID_CACHE:-1}
 PROGRESS_EVERY=${PROGRESS_EVERY:-20}
 MEMORY_REPORT_EVERY=${MEMORY_REPORT_EVERY:-10}
 
@@ -74,9 +74,12 @@ for raw_split in "${SPLIT_ARRAY[@]}"; do
       --progress_every "${PROGRESS_EVERY}"
       --memory_report_every "${MEMORY_REPORT_EVERY}"
     )
-    [[ "${OVERWRITE}" == "1" ]] && args+=(--overwrite)
-    [[ "${RESUME}" == "1" ]] && args+=(--resume)
-    [[ "${REPAIR_INVALID_CACHE}" == "1" ]] && args+=(--repair_invalid_cache)
+    if [[ "${OVERWRITE}" == "1" ]]; then
+      args+=(--overwrite)
+    elif [[ "${RESUME}" == "1" ]]; then
+      args+=(--resume)
+      [[ "${REPAIR_INVALID_CACHE}" == "1" ]] && args+=(--repair_invalid_cache)
+    fi
     echo "  launch shard=${shard} gpu=${gpu}"
     CUDA_VISIBLE_DEVICES="${gpu}" "${PYTHON_BIN}" "${args[@]}"       >"${log_dir}/shard_$(printf '%02d' "${shard}").log" 2>&1 &
     pids+=("$!")
