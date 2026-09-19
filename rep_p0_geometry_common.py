@@ -404,12 +404,21 @@ def prepare_cad_models_for_evidence(
     scene_id: int,
     voxel_size: float = REP_P0_EVIDENCE_VOXEL_SIZE,
 ) -> list[np.ndarray]:
-    """Load one scene raw CAD objects and retain only a 5-mm object-frame copy.
+    """Prepare one-scene 5-mm CAD evidence with bounded peak memory.
 
-    GraspNetEval.get_scene_models also returns Dex-Net objects. They can be
-    large, so the temporary return tuple is discarded immediately after the
-    point sets are copied/downsampled.
+    If the evaluator exposes ``prime_scene_with_evidence`` (formal Rep-P0),
+    raw scene geometry is loaded once and split into:
+      - 8-mm label geometry retained in evaluator.scene_cache;
+      - 5-mm evidence geometry returned here;
+      - one retained Dex-Net model set.
+
+    The fallback path exists only for compatibility with older evaluators.
     """
+    if hasattr(evaluator, "prime_scene_with_evidence"):
+        return evaluator.prime_scene_with_evidence(
+            int(scene_id), float(voxel_size)
+        )
+
     pack = evaluator.eval.get_scene_models(int(scene_id), ann_id=0)
     raw_models = pack[0]
     models = [
@@ -418,7 +427,6 @@ def prepare_cad_models_for_evidence(
     ]
     del raw_models, pack
     return models
-
 
 def build_evidence_table(
     voxel_size: float = REP_P0_EVIDENCE_VOXEL_SIZE,
