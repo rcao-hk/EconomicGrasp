@@ -155,8 +155,9 @@ def main():
         pred_u=predicted_utility_from_logits(logits).cpu().numpy().astype(np.float32)
 
         mask=fr["valid"]
+        mask_t=torch.from_numpy(mask).to(device=device,dtype=torch.bool)
         y=torch.from_numpy(friction_to_cdf_targets(fr["friction"][mask])).to(device)
-        cdf_losses.append(float(F.binary_cross_entropy_with_logits(logits.cpu()[mask],y.cpu()).item()))
+        cdf_losses.append(float(F.binary_cross_entropy_with_logits(logits[mask_t],y).item()))
 
         pred_all.append(pred_u[mask])
         exact_all.append(fr["utility"][mask])
