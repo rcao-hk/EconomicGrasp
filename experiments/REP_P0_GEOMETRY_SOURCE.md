@@ -96,6 +96,54 @@ Bash launchers:
 - `scripts/run_rep_p0_test.sh`
 - `scripts/run_rep_p0.sh`
 
+## Memory-bounded mining and resume
+
+The formal miner is designed to keep host memory bounded during multi-GPU runs:
+
+- frames are sharded by scene, not round-robin by frame;
+- the exact evaluator retains only the current scene in `scene_cache`;
+- the CPU checkpoint/state dict is deleted immediately after GPU model loading;
+- `NUM_WORKERS=0` is the formal default;
+- scene transitions clear evaluator/CAD caches, run Python GC, call `malloc_trim`, and empty the CUDA allocator cache;
+- RSS, host available memory, swap, CUDA allocated/reserved memory, and evaluator-cache size are reported periodically;
+- geometry sources are materialized one at a time, so pred/sensor/rendered/CAD point clouds are never all held simultaneously.
+
+Mining also supports safe resume. The default launcher settings are:
+
+```text
+RESUME=1
+REPAIR_INVALID_CACHE=1
+OVERWRITE=0
+NUM_WORKERS=0
+MEMORY_REPORT_EVERY=10
+```
+
+Each cache is written atomically through a temporary file and `os.replace`.
+On restart, an existing cache is validated for scene/frame identity, 5-mm
+evidence resolution, ray offsets, query count/mode, action/label shapes, and
+all requested feature sources. Valid caches are skipped. Corrupt or incompatible
+files are regenerated when `REPAIR_INVALID_CACHE=1`.
+
+Caches mined immediately before this update can still be resumed if they pass
+the structural 5-mm compatibility checks, even though they do not contain the
+new cache-contract-version field.
+
+To continue an interrupted run:
+
+```bash
+WORK_ROOT=/data2/robotarm/result/grasp/rgbgrasp/rep_p0_geometry_sources_5mm \
+RESUME=1 \
+REPAIR_INVALID_CACHE=1 \
+MINE_GPUS=0,1,2,3,4,5 \
+bash scripts/run_rep_p0_mine.sh
+```
+
+To intentionally rewrite every selected cache instead:
+
+```bash
+OVERWRITE=1 RESUME=0 bash scripts/run_rep_p0_mine.sh
+```
+
 ## Unit tests
 
 ```bash
