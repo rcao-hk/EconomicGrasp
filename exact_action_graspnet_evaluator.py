@@ -96,6 +96,38 @@ class ExactGraspNetActionEvaluator:
             )
         return self.scene_cache[scene_id]
 
+    def prime_scene_with_evidence(
+        self,
+        scene_id: int,
+        evidence_voxel_size: float,
+    ) -> List[np.ndarray]:
+        """Load one raw scene once for both labels and Rep-P0 evidence.
+
+        The exact-action evaluator keeps its original 8-mm object sampling in
+        ``scene_cache``. A separate evidence copy is sampled at the requested
+        resolution (5 mm for formal Rep-P0). Dex-Net models are retained only
+        once, in ``scene_cache``.
+        """
+        scene_id = int(scene_id)
+        raw_models, dexmodels, _ = self.eval.get_scene_models(
+            scene_id, ann_id=0
+        )
+        label_models = [
+            voxel_sample_points(model, 0.008)
+            for model in raw_models
+        ]
+        evidence_models = [
+            voxel_sample_points(model, float(evidence_voxel_size))
+            for model in raw_models
+        ]
+        self.scene_cache.clear()
+        self.scene_cache[scene_id] = (label_models, dexmodels)
+        del raw_models
+        return [
+            np.asarray(model, dtype=np.float32)
+            for model in evidence_models
+        ]
+
     def _quality_with_contacts(
         self,
         grasp: Any,
