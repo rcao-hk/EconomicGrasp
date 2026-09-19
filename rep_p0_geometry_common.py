@@ -82,7 +82,7 @@ def backproject_depth_map(
     depth_m: np.ndarray,
     K: np.ndarray,
     *,
-    voxel_size: float = 0.008,
+    voxel_size: float = 0.005,
     min_depth: float = 0.05,
     max_depth: float = 2.0,
 ) -> np.ndarray:
@@ -182,7 +182,7 @@ def select_query_indices(native_actions: torch.Tensor, count: int, mode: str) ->
 
 @dataclass(frozen=True)
 class DescriptorConfig:
-    voxel_size: float = 0.008
+    voxel_size: float = 0.005
     finger_width: float = 0.01
     finger_length: float = 0.06
     approach_dist: float = 0.03
@@ -358,31 +358,53 @@ def describe_actions(
     return out
 
 
-def load_full_cad_scene_cloud(evaluator, scene_id: int, anno_id: int, voxel_size: float = 0.008) -> np.ndarray:
-    """Return complete CAD objects + table in the current camera frame.
+def load_full_cad_scene_cloud(evaluator, scene_id: int, anno_id: int, voxel_size: float = 0.005) -> np.ndarray:
+    """Return complete CAD objects + table at the Rep-P0 evidence resolution.
 
-    This is a privileged geometry upper bound. It intentionally uses the same
-    object poses and table transform as the exact GraspNet evaluator.
+    This is a privileged geometry upper bound. It does not call the
+    ExactActionGraspNetEvaluator._scene_models() helper, because that helper
+    first downsamples object CAD points to 8 mm for the official label
+    evaluator. Rep-P0 instead reads raw scene CAD points, transforms them to
+    the current camera frame, builds a table directly at voxel_size, and then
+    applies the same final voxelization used by pred/sensor/rendered evidence.
+
+    Exact-action labels are still produced by the untouched official
+    evaluator; only Rep-P0 input evidence is standardized to 5 mm.
     """
-    from graspnetAPI.utils.eval_utils import transform_points
+    from graspnetAPI.utils.eval_utils import create_table_points, transform_points
 
-    models_obj, _ = evaluator._scene_models(int(scene_id))
+    # Raw CAD geometry: avoid the evaluator cached 8-mm object sampling.
+    raw_models, _, _ = evaluator.eval.get_scene_models(int(scene_id), ann_id=0)
     _, poses, camera_pose, align_mat = evaluator.eval.get_model_poses(
         int(scene_id), int(anno_id)
     )
     models_cam = [
-        transform_points(model, poses[obj_index])
-        for obj_index, model in enumerate(models_obj)
+        transform_points(np.asarray(model, dtype=np.float32), poses[obj_index])
+        for obj_index, model in enumerate(raw_models)
     ]
+
+    # Build the table at the same spatial resolution as all Rep-P0 evidence.
+    table = create_table_points(
+        1.0,
+        1.0,
+        0.05,
+        dx=-0.5,
+        dy=-0.5,
+        dz=-0.05,
+        grid_size=float(voxel_size),
+    )
     table_cam = transform_points(
-        evaluator.table,
+        table,
         np.linalg.inv(np.matmul(align_mat, camera_pose)),
     )
+
     parts = [p for p in models_cam if len(p)] + [table_cam]
     if not parts:
         return np.empty((0, 3), dtype=np.float32)
-    return voxel_downsample_numpy(np.concatenate(parts, axis=0), voxel_size)
-
+    return voxel_downsample_numpy(
+        np.concatenate(parts, axis=0).astype(np.float32, copy=False),
+        voxel_size,
+    )
 
 class GeometrySourceProbe(nn.Module):
     """Same lightweight six-threshold CDF probe for every geometry source."""
