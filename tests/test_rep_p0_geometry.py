@@ -44,12 +44,12 @@ def test_depth_backprojection_and_descriptor_contract():
     H=W=32
     depth=np.full((H,W),0.6,dtype=np.float32)
     K=np.array([[30.0,0,15.5],[0,30.0,15.5],[0,0,1]],dtype=np.float32)
-    points=backproject_depth_map(depth,K,voxel_size=0.008)
+    points=backproject_depth_map(depth,K,voxel_size=0.005)
     assert points.ndim==2 and points.shape[1]==3 and len(points)>0
 
     native=_native_actions(q=2)
     actions,valid=build_translation_ray_actions(native,[-10,0,10])
-    cfg=DescriptorConfig(voxel_size=0.008)
+    cfg=DescriptorConfig(voxel_size=0.005)
     feat=describe_actions(points,actions,valid,cfg)
     assert feat.shape==(3,2,cfg.feature_dim)
     assert np.isfinite(feat).all()
@@ -71,3 +71,14 @@ def test_topk_uniform_query_count():
     ids=select_query_indices(g,32,"topk_uniform")
     assert ids.numel()==32
     assert torch.unique(ids).numel()==32
+
+
+def test_rep_p0_default_evidence_resolution_is_5mm():
+    cfg=DescriptorConfig()
+    assert abs(cfg.voxel_size-0.005)<1e-12
+    H=W=16
+    depth=np.full((H,W),0.6,dtype=np.float32)
+    K=np.array([[20.0,0,7.5],[0,20.0,7.5],[0,0,1]],dtype=np.float32)
+    pts_default=backproject_depth_map(depth,K)
+    pts_5mm=backproject_depth_map(depth,K,voxel_size=0.005)
+    assert np.array_equal(pts_default,pts_5mm)
