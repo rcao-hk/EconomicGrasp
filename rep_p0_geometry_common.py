@@ -26,7 +26,7 @@ from scipy.spatial import cKDTree
 
 
 FRICTION_THRESHOLDS = np.asarray([0.2, 0.4, 0.6, 0.8, 1.0, 1.2], dtype=np.float32)
-GEOMETRY_SOURCES = ("pred", "sensor", "rendered", "cad_full")
+GEOMETRY_SOURCES = ("pred", "sensor", "rendered", "cad_full")\nREP_P0_EVIDENCE_VOXEL_SIZE = 0.005
 
 
 def parse_offsets_mm(text: str) -> np.ndarray:
