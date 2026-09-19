@@ -770,6 +770,21 @@ def main():
                     "Native candidate became invalid in Rep-P0 action generation."
                 )
 
+            # For cad_full, prime exact-label (8 mm) and evidence (5 mm)
+            # geometry together from one raw scene load. Fully resumed scenes
+            # never reach this block.
+            if "cad_full" in sources and prepared_cad_models is None:
+                prepared_cad_models = prepare_cad_models_for_evidence(
+                    evaluator,
+                    scene_id,
+                    ARGS.voxel_size,
+                )
+                release_process_memory(cuda=False)
+                report_memory(
+                    f"cad_and_eval_ready_scene_{scene_id:04d}",
+                    evaluator,
+                )
+
             t_eval = time.perf_counter()
             (
                 friction,
@@ -825,20 +840,6 @@ def main():
                 .numpy()
                 .astype(np.float32)
             )
-
-            # Lazy one-scene CAD evidence cache. Fully resumed scenes never
-            # load raw CAD evidence at all.
-            if "cad_full" in sources and prepared_cad_models is None:
-                prepared_cad_models = prepare_cad_models_for_evidence(
-                    evaluator,
-                    scene_id,
-                    ARGS.voxel_size,
-                )
-                release_process_memory(cuda=False)
-                report_memory(
-                    f"cad_ready_scene_{scene_id:04d}",
-                    evaluator,
-                )
 
             # Peak-memory control: materialize exactly one geometry source,
             # extract its descriptor, then release that point cloud before the
