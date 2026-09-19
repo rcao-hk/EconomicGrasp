@@ -666,15 +666,9 @@ def main():
                 current_scene = scene_id
                 evaluator.scene_cache.clear()
 
-                if "cad_full" in sources:
-                    prepared_cad_models = prepare_cad_models_for_evidence(
-                        evaluator,
-                        scene_id,
-                        ARGS.voxel_size,
-                    )
-                    # get_scene_models also creates temporary Dex-Net objects;
-                    # trim them before the frame loop starts.
-                    release_process_memory(cuda=False)
+                # CAD evidence is loaded lazily only when the first
+                # non-resumed frame of this scene is actually processed.
+                prepared_cad_models = None
 
                 report_memory(
                     f"enter_scene_{scene_id:04d}",
@@ -831,6 +825,20 @@ def main():
                 .numpy()
                 .astype(np.float32)
             )
+
+            # Lazy one-scene CAD evidence cache. Fully resumed scenes never
+            # load raw CAD evidence at all.
+            if "cad_full" in sources and prepared_cad_models is None:
+                prepared_cad_models = prepare_cad_models_for_evidence(
+                    evaluator,
+                    scene_id,
+                    ARGS.voxel_size,
+                )
+                release_process_memory(cuda=False)
+                report_memory(
+                    f"cad_ready_scene_{scene_id:04d}",
+                    evaluator,
+                )
 
             # Peak-memory control: materialize exactly one geometry source,
             # extract its descriptor, then release that point cloud before the
