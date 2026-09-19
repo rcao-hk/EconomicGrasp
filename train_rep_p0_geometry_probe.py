@@ -26,6 +26,7 @@ from rep_p0_geometry_common import (
     FRICTION_THRESHOLDS,
     GEOMETRY_SOURCES,
     GeometrySourceProbe,
+    REP_P0_EVIDENCE_VOXEL_SIZE,
     friction_to_cdf_targets,
     friction_utility,
     predicted_utility_from_logits,
@@ -78,6 +79,19 @@ def load_frame(path: Path, source: str):
         zero = int(np.asarray(d["zero_index"]).reshape(-1)[0])
         scene_id = int(np.asarray(d["scene_id"]).reshape(-1)[0])
         anno_id = int(np.asarray(d["anno_id"]).reshape(-1)[0])
+        if "evidence_voxel_size" not in d.files:
+            raise RuntimeError(
+                f"Rep-P0 cache {path} predates the 5-mm evidence contract. "
+                "Regenerate the cache."
+            )
+        evidence_voxel_size = float(
+            np.asarray(d["evidence_voxel_size"]).reshape(-1)[0]
+        )
+    if abs(evidence_voxel_size - REP_P0_EVIDENCE_VOXEL_SIZE) > 1e-9:
+        raise RuntimeError(
+            f"Rep-P0 cache {path} uses {evidence_voxel_size:.6f} m evidence, "
+            f"expected canonical {REP_P0_EVIDENCE_VOXEL_SIZE:.6f} m."
+        )
     if feat.shape[:2] != valid.shape or friction.shape != valid.shape:
         raise RuntimeError(f"Malformed cache shapes in {path}")
     return {
