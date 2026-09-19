@@ -19,6 +19,7 @@ from scipy.stats import rankdata
 
 from rep_p0_geometry_common import (
     GeometrySourceProbe,
+    REP_P0_EVIDENCE_VOXEL_SIZE,
     friction_to_cdf_targets,
     friction_utility,
     predicted_utility_from_logits,
@@ -62,6 +63,10 @@ def load_frame(path,source):
             "scene_id":int(np.asarray(d["scene_id"]).reshape(-1)[0]),
             "anno_id":int(np.asarray(d["anno_id"]).reshape(-1)[0]),
             "native_score":d["native_score"].astype(np.float32),
+            "evidence_voxel_size":(
+                float(np.asarray(d["evidence_voxel_size"]).reshape(-1)[0])
+                if "evidence_voxel_size" in d.files else float("nan")
+            ),
         }
 
 
@@ -149,6 +154,16 @@ def main():
 
     for i,path in enumerate(paths):
         fr=load_frame(path,source)
+        if not np.isfinite(fr["evidence_voxel_size"]):
+            raise RuntimeError(
+                f"Rep-P0 cache {path} predates the 5-mm evidence contract. "
+                "Regenerate the cache."
+            )
+        if abs(fr["evidence_voxel_size"]-REP_P0_EVIDENCE_VOXEL_SIZE)>1e-9:
+            raise RuntimeError(
+                f"Rep-P0 cache {path} uses {fr['evidence_voxel_size']:.6f} m "
+                f"evidence, expected {REP_P0_EVIDENCE_VOXEL_SIZE:.6f} m."
+            )
         K,Q,Fdim=fr["feat"].shape
         x=torch.from_numpy(normalize(fr["feat"],mean,std)).to(device)
         logits=model(x.reshape(K*Q,Fdim)).reshape(K,Q,-1)
