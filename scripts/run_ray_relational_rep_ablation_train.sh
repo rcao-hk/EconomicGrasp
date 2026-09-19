@@ -9,7 +9,7 @@ VAL_CACHE_ROOT=${VAL_CACHE_ROOT:-${WORK_ROOT}/cache_val}
 OUTPUT_ROOT=${OUTPUT_ROOT:-${WORK_ROOT}/relational_rep_ablation}
 
 REPRESENTATION_MODES=${REPRESENTATION_MODES:-G0_current_full,G1_no_abs_raw,G2_residual_only,G3_residual_profile,G4_mean_profile}
-GPUS=${GPUS:-0,1,2,3,4}
+GPUS=${GPUS:-0,1,2,3,5}
 VAL_SCENE_START=${VAL_SCENE_START:-100}
 
 EPOCHS=${EPOCHS:-20}

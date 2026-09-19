@@ -7,7 +7,7 @@ ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 WORK_ROOT=${WORK_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/ray_pairwise_selector}
 SELECTOR_CKPT=${SELECTOR_CKPT:-${WORK_ROOT}/train/checkpoint_best.tar}
 OUTPUT_ROOT=${OUTPUT_ROOT:-${WORK_ROOT}/test_best_heldout}
-GPUS=${GPUS:-0,1}
+GPUS=${GPUS:-0,3}
 
 [[ -f "${SELECTOR_CKPT}" ]] || { echo "Best selector checkpoint not found: ${SELECTOR_CKPT}" >&2; exit 2; }
 
@@ -26,4 +26,4 @@ export SAVE_CANDIDATE_ROWS=${SAVE_CANDIDATE_ROWS:-0}
 printf '[BEST-HELDOUT] checkpoint=%s\n' "${SELECTOR_CKPT}"
 printf '[BEST-HELDOUT] splits=%s gpus=%s output=%s\n' "${SPLITS}" "${GPUS}" "${OUTPUT_ROOT}"
 
-exec bash "${ROOT_DIR}/run_ray_pairwise_selector_test.sh"
+exec bash "${SCRIPT_DIR}/run_ray_pairwise_selector_test.sh"

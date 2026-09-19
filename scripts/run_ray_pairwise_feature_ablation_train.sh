@@ -10,7 +10,7 @@ VAL_CACHE_ROOT=${VAL_CACHE_ROOT:-${WORK_ROOT}/cache_val}
 OUTPUT_ROOT=${OUTPUT_ROOT:-${WORK_ROOT}/feature_ablation_3layer}
 
 FEATURE_MODES=${FEATURE_MODES:-raw_offset,selected_residual,mean_residual,selected_mean,full}
-ABLATION_GPUS=${ABLATION_GPUS:-0}
+ABLATION_GPUS=${ABLATION_GPUS:-0,3,5,6}
 VAL_SCENE_START=${VAL_SCENE_START:-100}
 EPOCHS=${EPOCHS:-20}
 LR=${LR:-1e-4}

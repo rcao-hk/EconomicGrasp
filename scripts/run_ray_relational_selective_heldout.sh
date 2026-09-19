@@ -9,7 +9,7 @@ WORK_ROOT=${WORK_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/ray_pairwise_select
 SELECTOR_CKPT=${SELECTOR_CKPT:-${WORK_ROOT}/relational_selective/checkpoint_best.tar}
 OUTPUT_ROOT=${OUTPUT_ROOT:-${WORK_ROOT}/relational_selective_heldout}
 
-GPUS=${GPUS:-0,3}
+GPUS=${GPUS:-0,1}
 SPLITS=${SPLITS:-test_similar,test_novel}
 CAMERA=${CAMERA:-realsense}
 SAMPLE_INTERVAL=${SAMPLE_INTERVAL:-0.1}

@@ -11,7 +11,7 @@ MODEL_ROOT=${MODEL_ROOT:-${WORK_ROOT}/feature_ablation_3layer}
 OUTPUT_ROOT=${OUTPUT_ROOT:-${WORK_ROOT}/feature_ablation_3layer_infer}
 
 FEATURE_MODES=${FEATURE_MODES:-raw_offset,selected_residual,mean_residual,selected_mean,full}
-INFER_GPUS=${INFER_GPUS:-0}
+INFER_GPUS=${INFER_GPUS:-0,3,5,6}
 EVAL_SPLITS=${EVAL_SPLITS:-train,val}
 VAL_SCENE_START=${VAL_SCENE_START:-100}
 VAL_SCENE_END=${VAL_SCENE_END:-130}
