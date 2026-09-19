@@ -38,7 +38,7 @@ upper bound and must never be reported as an RGB-only test input.
 ## Common action-conditioned descriptor
 
 Each source is converted to a point cloud and voxelized at the same resolution
-(default 8 mm). For the same grasp action, points are transformed into the
+(default **5 mm**). For the same grasp action, points are transformed into the
 gripper frame using the convention already used by the model-free collision
 detector.
 
@@ -49,6 +49,16 @@ The descriptor contains:
 - the complete action parameters (R,t,w,h,d).
 
 The same descriptor and the same MLP are used for every source.
+
+For `cad_full`, Rep-P0 reads the raw scene CAD point sets directly from
+`GraspNetEval.get_scene_models`, transforms them to the current camera frame,
+builds the table on a 5-mm grid, and then applies the same 5-mm final
+voxelization. It deliberately bypasses `ExactActionGraspNetEvaluator._scene_models`,
+because that helper downsamples CAD objects to 8 mm for the official evaluator.
+
+The **exact-action label protocol is unchanged**: the evaluator may continue
+using its official 8-mm CAD/table sampling internally. The 5-mm standardization
+applies only to Rep-P0 geometry evidence supplied to the source probes.
 
 ## Supervision
 
@@ -115,6 +125,7 @@ TRAIN_GPUS=0,1,2,3 \
 TEST_GPUS=0,1,2,3 \
 SAMPLE_INTERVAL=0.1 \
 QUERY_EVAL_NUM=64 \
+VOXEL_SIZE=0.005 \
 PHASES=mine,train,test \
 bash scripts/run_rep_p0.sh
 ```
