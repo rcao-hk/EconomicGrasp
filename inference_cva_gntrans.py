@@ -158,10 +158,20 @@ def inference() -> None:
     ck, state = _load_checkpoint(cfgs.checkpoint_path)
     saved_pose_mode = ck.get("pose_depth_mode") if isinstance(ck, dict) else None
     pose_mode = str(getattr(cfgs, "pose_depth_mode", "none"))
+    use_top4_view_infer = bool(
+        getattr(cfgs, "use_top4_view_infer", False)
+    )
     if saved_pose_mode is not None and str(saved_pose_mode) != pose_mode:
         raise ValueError(
             f"Checkpoint pose_depth_mode={saved_pose_mode!r}, CLI={pose_mode!r}."
         )
+
+    print(
+        f"[GNTRANS-INFER] total={len(full)} selected={len(selected)} "
+        f"cdf=1 top4={use_top4_view_infer} batch={cfgs.batch_size} "
+        f"pose_depth_mode={pose_mode}",
+        flush=True,
+    )
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = economicgrasp_dpt(
@@ -196,6 +206,7 @@ def inference() -> None:
         "collision_thresh": float(cfgs.collision_thresh),
         "collision_source": G.gntrans_collision_source,
         "pose_depth_mode": pose_mode,
+        "use_top4_view_infer": use_top4_view_infer,
     }
     Path(cfgs.save_dir, "gntrans_inference_protocol.json").write_text(
         json.dumps(protocol, indent=2, sort_keys=True), encoding="utf-8"

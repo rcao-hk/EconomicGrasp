@@ -17,6 +17,21 @@ COLLISION_THRESH="${COLLISION_THRESH:-0.01}"
 COLLISION_VOXEL_SIZE="${COLLISION_VOXEL_SIZE:-0.01}"
 GNTRANS_COLLISION_SOURCE="${GNTRANS_COLLISION_SOURCE:-original_sensor}"
 REMOVE_DUMP="${REMOVE_DUMP:-0}"
+USE_TOP4_VIEW_INFER="${USE_TOP4_VIEW_INFER:-0}"
+ENABLE_INFERENCE="${ENABLE_INFERENCE:-1}"
+ENABLE_EVAL="${ENABLE_EVAL:-1}"
+
+for flag in USE_TOP4_VIEW_INFER ENABLE_INFERENCE ENABLE_EVAL; do
+  if [[ ! "${!flag}" =~ ^[01]$ ]]; then
+    echo "${flag} must be 0 or 1, got ${!flag}." >&2
+    exit 2
+  fi
+done
+
+TOP4_VIEW_ARGS=()
+if [[ "${USE_TOP4_VIEW_INFER}" == "1" ]]; then
+  TOP4_VIEW_ARGS+=(--use_top4_view_infer)
+fi
 
 IFS=',' read -r -a GPU_ARRAY <<< "${GPUS}"
 IFS=',' read -r -a SPLIT_ARRAY <<< "${SPLITS}"
@@ -60,6 +75,7 @@ run_job() {
       --collision_voxel_size "${COLLISION_VOXEL_SIZE}" \
       --multi_modal --use_cdf --kview_mode A1 \
       --pose_depth_mode "${POSE_DEPTH_MODE}" \
+      "${TOP4_VIEW_ARGS[@]}" \
       > "${out}/inference.log" 2>&1
   else
     CUDA_VISIBLE_DEVICES="${gpu}" python inference_cva_gntrans.py \
@@ -76,12 +92,14 @@ run_job() {
       --gntrans_collision_source "${GNTRANS_COLLISION_SOURCE}" \
       --multi_modal --use_cdf --kview_mode A1 \
       --pose_depth_mode "${POSE_DEPTH_MODE}" \
+      "${TOP4_VIEW_ARGS[@]}" \
       > "${out}/inference.log" 2>&1
   fi
 }
 
 njobs=${#JOB_DOMAIN[@]}
 ngpu=${#GPU_ARRAY[@]}
+if [[ "${ENABLE_INFERENCE}" == "1" ]]; then
 start=0
 while [[ ${start} -lt ${njobs} ]]; do
   pids=()
@@ -100,7 +118,11 @@ while [[ ${start} -lt ${njobs} ]]; do
   fi
   start=$((start+ngpu))
 done
+else
+  echo "[MIX-EVAL] inference disabled"
+fi
 
+if [[ "${ENABLE_EVAL}" == "1" ]]; then
 # eval.py wants a frame stride, whereas inference uses a dataset fraction.
 STRIDE=$(python - <<PY
 x=float("${SAMPLE_INTERVAL}")
@@ -128,5 +150,8 @@ for domain in original gntrans; do
       > "${out}/evaluation.log" 2>&1
   done
 done
+else
+  echo "[MIX-EVAL] evaluation disabled"
+fi
 
 echo "[MIX-EVAL] complete: ${OUTPUT_ROOT}"
