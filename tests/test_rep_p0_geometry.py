@@ -8,6 +8,7 @@ from rep_p0_geometry_common import (
     describe_actions,
     friction_to_cdf_targets,
     friction_utility,
+    scene_sharded_indices,
     select_query_indices,
 )
 
@@ -82,3 +83,40 @@ def test_rep_p0_default_evidence_resolution_is_5mm():
     pts_default=backproject_depth_map(depth,K)
     pts_5mm=backproject_depth_map(depth,K,voxel_size=0.005)
     assert np.array_equal(pts_default,pts_5mm)
+
+
+def test_scene_level_sharding_has_disjoint_scene_ownership():
+    # 6 scenes x 256 frames, sampled every 10th frame.
+    total=6*256
+    shards=[
+        scene_sharded_indices(
+            total,
+            0.1,
+            shard_id=s,
+            num_shards=3,
+            frames_per_scene=256,
+        )
+        for s in range(3)
+    ]
+    scene_sets=[{idx//256 for idx in ids} for ids in shards]
+    assert scene_sets[0]=={0,3}
+    assert scene_sets[1]=={1,4}
+    assert scene_sets[2]=={2,5}
+    assert scene_sets[0].isdisjoint(scene_sets[1])
+    assert scene_sets[0].isdisjoint(scene_sets[2])
+    assert scene_sets[1].isdisjoint(scene_sets[2])
+    # Every selected frame in a scene belongs to exactly one shard.
+    merged=[idx for ids in shards for idx in ids]
+    assert len(merged)==len(set(merged))
+
+
+def test_scene_level_sharding_max_samples():
+    ids=scene_sharded_indices(
+        4*256,
+        0.1,
+        shard_id=0,
+        num_shards=2,
+        max_samples=5,
+    )
+    assert len(ids)==5
+    assert all(idx//256==0 for idx in ids)
