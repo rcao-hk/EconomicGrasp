@@ -32,7 +32,7 @@ def parse_args():
     p.add_argument("--query_eval_mode", default="topk_uniform", choices=("all","topk","uniform","topk_uniform"))
     p.add_argument("--offsets_mm", default="-40,-20,-10,0,10,20,40")
     p.add_argument("--sources", default="pred,sensor,rendered,cad_full")
-    p.add_argument("--voxel_size", type=float, default=0.008)
+    p.add_argument("--voxel_size", type=float, default=0.005)
     p.add_argument("--min_depth", type=float, default=0.2)
     p.add_argument("--max_depth", type=float, default=1.0)
     p.add_argument("--bin_num", type=int, default=256)
