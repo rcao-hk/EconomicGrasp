@@ -17,12 +17,15 @@ QUERY_EVAL_NUM=${QUERY_EVAL_NUM:-64}
 QUERY_EVAL_MODE=${QUERY_EVAL_MODE:-topk_uniform}
 OFFSETS_MM=${OFFSETS_MM:--40,-20,-10,0,10,20,40}
 VOXEL_SIZE=${VOXEL_SIZE:-0.005}
-NUM_WORKERS=${NUM_WORKERS:-2}
+NUM_WORKERS=${NUM_WORKERS:-0}
 MAX_SAMPLES_PER_SHARD=${MAX_SAMPLES_PER_SHARD:-0}
 FC_MODE=${FC_MODE:-reuse_contacts}
 VERIFY_N=${VERIFY_N:-0}
 OVERWRITE=${OVERWRITE:-0}
+RESUME=${RESUME:-1}
+REPAIR_INVALID_CACHE=${REPAIR_INVALID_CACHE:-0}
 PROGRESS_EVERY=${PROGRESS_EVERY:-20}
+MEMORY_REPORT_EVERY=${MEMORY_REPORT_EVERY:-10}
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
@@ -41,7 +44,7 @@ NUM_SHARDS=${#GPU_ARRAY[@]}
 for raw_split in "${SPLIT_ARRAY[@]}"; do
   split="$(echo "${raw_split}" | xargs)"
   [[ -n "${split}" ]] || continue
-  echo "[REP-P0-MINE] split=${split} shards=${NUM_SHARDS}"
+  echo "[REP-P0-MINE] split=${split} shards=${NUM_SHARDS} sharding=scene-level resume=${RESUME} workers=${NUM_WORKERS}"
 
   pids=()
   names=()
@@ -69,8 +72,11 @@ for raw_split in "${SPLIT_ARRAY[@]}"; do
       --fc_mode "${FC_MODE}"
       --verify_n "${VERIFY_N}"
       --progress_every "${PROGRESS_EVERY}"
+      --memory_report_every "${MEMORY_REPORT_EVERY}"
     )
     [[ "${OVERWRITE}" == "1" ]] && args+=(--overwrite)
+    [[ "${RESUME}" == "1" ]] && args+=(--resume)
+    [[ "${REPAIR_INVALID_CACHE}" == "1" ]] && args+=(--repair_invalid_cache)
     echo "  launch shard=${shard} gpu=${gpu}"
     CUDA_VISIBLE_DEVICES="${gpu}" "${PYTHON_BIN}" "${args[@]}"       >"${log_dir}/shard_$(printf '%02d' "${shard}").log" 2>&1 &
     pids+=("$!")
