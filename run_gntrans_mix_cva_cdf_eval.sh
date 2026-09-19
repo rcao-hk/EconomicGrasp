@@ -2,8 +2,8 @@
 set -euo pipefail
 
 : "${DATASET_ROOT:?Set DATASET_ROOT to GraspNet root}"
-: "${GNTRANS_RGB_ROOT:?Set GNTRANS_RGB_ROOT to GN-Trans RGB root}"
-: "${CKPT:?Set CKPT to a trained mixed CVA-CDF checkpoint}"
+GNTRANS_RGB_ROOT="${GNTRANS_RGB_ROOT:-}"
+CKPT="${CKPT:-}"
 
 GPUS="${GPUS:-0,1,2,3,4,5}"
 SPLITS="${SPLITS:-test_seen,test_similar,test_novel}"
@@ -20,6 +20,7 @@ REMOVE_DUMP="${REMOVE_DUMP:-0}"
 USE_TOP4_VIEW_INFER="${USE_TOP4_VIEW_INFER:-0}"
 ENABLE_INFERENCE="${ENABLE_INFERENCE:-1}"
 ENABLE_EVAL="${ENABLE_EVAL:-1}"
+DATASETS="${DATASETS:-both}"
 
 for flag in USE_TOP4_VIEW_INFER ENABLE_INFERENCE ENABLE_EVAL; do
   if [[ ! "${!flag}" =~ ^[01]$ ]]; then
@@ -27,6 +28,23 @@ for flag in USE_TOP4_VIEW_INFER ENABLE_INFERENCE ENABLE_EVAL; do
     exit 2
   fi
 done
+
+case "${DATASETS}" in
+  original) DOMAIN_ARRAY=(original) ;;
+  gntrans) DOMAIN_ARRAY=(gntrans) ;;
+  both) DOMAIN_ARRAY=(original gntrans) ;;
+  *)
+    echo "DATASETS must be original, gntrans, or both; got ${DATASETS}." >&2
+    exit 2
+    ;;
+esac
+
+if [[ "${ENABLE_INFERENCE}" == "1" ]]; then
+  : "${CKPT:?Set CKPT to a trained mixed CVA-CDF checkpoint}"
+  if [[ "${DATASETS}" != "original" ]]; then
+    : "${GNTRANS_RGB_ROOT:?Set GNTRANS_RGB_ROOT to GN-Trans RGB root}"
+  fi
+fi
 
 TOP4_VIEW_ARGS=()
 if [[ "${USE_TOP4_VIEW_INFER}" == "1" ]]; then
@@ -44,10 +62,10 @@ if [[ "${COLLISION_THRESH}" == "0" || "${COLLISION_THRESH}" == "0.0" ]]; then
 fi
 mkdir -p "${OUTPUT_ROOT}"
 
-# Build six (domain, split) jobs and schedule them in GPU-sized waves.
+# Build the selected (domain, split) jobs and schedule them in GPU-sized waves.
 JOB_DOMAIN=()
 JOB_SPLIT=()
-for domain in original gntrans; do
+for domain in "${DOMAIN_ARRAY[@]}"; do
   for split in "${SPLIT_ARRAY[@]}"; do
     JOB_DOMAIN+=("${domain}")
     JOB_SPLIT+=("${split}")
@@ -133,7 +151,7 @@ PY
 )
 
 # CPU evaluator pools are intentionally serialized to avoid memory contention.
-for domain in original gntrans; do
+for domain in "${DOMAIN_ARRAY[@]}"; do
   for split in "${SPLIT_ARRAY[@]}"; do
     out="${OUTPUT_ROOT}/${domain}/${split}"
     echo "[MIX-EVAL] official evaluator ${domain}/${split}, stride=${STRIDE}"
