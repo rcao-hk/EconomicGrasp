@@ -105,7 +105,13 @@ class RepAReaderScorer(nn.Module):
         # Allocate AFTER shared modules, so common initialization is paired.
         self.rgb_reader = IndependentImageReader(self.config["channels"], dim) if VARIANTS[variant][0] else None
 
-    def encode(self, data, depth):
+    def encode_components(self, data, depth):
+        """Return trained representation components before fusion.
+
+        Depth affects only the original enhancer/grouping path. The RGB
+        component reads pre-enhancer image features and never receives depth.
+        This supports Rep-A-P1 checkpoint interventions without retraining.
+        """
         raw = data["image_feature"][None]
         K = data["K"][None]
         depth = depth[None]  # [1,1,H,W]
@@ -117,18 +123,53 @@ class RepAReaderScorer(nn.Module):
                                     image_hw=(h, w), return_maps=False)
         feat_map = F.interpolate(enhanced, size=(h, w), mode="bilinear", align_corners=False)
         seed = feat_map.flatten(2).gather(2, token_ids[:, None].expand(-1, feat_map.shape[1], -1))
-        base = self.group(seed_features=seed, token_sel_idx=token_ids,
+        depth_rep = self.group(seed_features=seed, token_sel_idx=token_ids,
                           seed_xyz=a[None, :, 13:16], top_view_rot=a[:, 4:13].reshape(1, -1, 3, 3),
                           feat_map=feat_map, depth_map=depth,
                           objectness_logits=data["objectness"][None],
                           graspness_map=data["graspness"][None], camera_K=K, end_points={})
-        base = base[0].T
+        depth_rep = depth_rep[0].T
+        action_rep = self.action_embed(a[:, 1:16])
+        rgb_rep = None
         if self.rgb_reader is not None:
-            # No depth estimate reaches this branch. Base depth path remains intact.
-            base = base + .1*self.rgb_reader(raw, a, K, (h, w))
-        return base + self.action_embed(a[:, 1:16])
+            # Preserve the exact fusion scale used during A2/A3 training.
+            rgb_rep = .1*self.rgb_reader(raw, a, K, (h, w))
+        return {"depth": depth_rep, "rgb": rgb_rep, "action": action_rep}
 
-    def forward(self, data, depth=None, return_repr=False):
-        rep = self.encode(data, data["depth"] if depth is None else depth)
+    def encode(self, data, depth, intervention="full", return_components=False):
+        comps = self.encode_components(data, depth)
+        if intervention == "full":
+            rep = comps["depth"] + comps["action"]
+            if comps["rgb"] is not None:
+                rep = rep + comps["rgb"]
+        elif intervention == "no_rgb":
+            rep = comps["depth"] + comps["action"]
+        elif intervention == "rgb_only":
+            if comps["rgb"] is None:
+                raise ValueError("rgb_only requires an A2/A3 checkpoint with the RGB reader.")
+            # Do not renormalize: keep the learned 0.1 branch scale.
+            rep = comps["rgb"] + comps["action"]
+        else:
+            raise ValueError(f"Unknown Rep-A intervention: {intervention!r}")
+        return (rep, comps) if return_components else rep
+
+    def forward(self, data, depth=None, return_repr=False, intervention="full",
+                return_components=False):
+        encoded = self.encode(
+            data,
+            data["depth"] if depth is None else depth,
+            intervention=intervention,
+            return_components=return_components,
+        )
+        if return_components:
+            rep, comps = encoded
+        else:
+            rep, comps = encoded, None
         logits = self.scorer(rep).reshape(*data["actions"].shape[:2], 6)
-        return (logits, rep) if return_repr else logits
+        if return_repr and return_components:
+            return logits, rep, comps
+        if return_repr:
+            return logits, rep
+        if return_components:
+            return logits, comps
+        return logits
