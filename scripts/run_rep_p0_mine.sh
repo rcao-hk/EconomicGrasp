@@ -10,7 +10,7 @@ WORK_ROOT=${WORK_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/rep_p0_geometry_sou
 CACHE_ROOT=${CACHE_ROOT:-${WORK_ROOT}/cache}
 
 SPLITS=${SPLITS:-train,test_seen,test_similar,test_novel}
-MINE_GPUS=${MINE_GPUS:-0,1,2,3,4,5}
+MINE_GPUS=${MINE_GPUS:-0,1,2,3,5,6}
 SOURCES=${SOURCES:-pred,sensor,rendered,cad_full}
 SAMPLE_INTERVAL=${SAMPLE_INTERVAL:-0.1}
 QUERY_EVAL_NUM=${QUERY_EVAL_NUM:-64}
