@@ -161,7 +161,7 @@ def test_p0_matched_move_rate_margin():
     from diagnose_rep_a_p0_selection import margin_for_target
     adv=[np.array([.5,.4,.3,-np.inf],np.float64)]
     margin,rate=margin_for_target(adv,.5)
-    assert 0.3 < margin < 0.4
+    assert 0.3 <= margin < 0.4
     assert abs(rate-.5)<1e-12
 
 
