@@ -155,3 +155,41 @@ def test_actual_upstream_reader_backward(variant):
     for name, part in model.named_children():
         assert sum(float(p.grad.norm()) for p in part.parameters() if p.grad is not None)>0,name
     assert torch.equal(old,data['actions'])
+
+
+def test_p0_matched_move_rate_margin():
+    from diagnose_rep_a_p0_selection import margin_for_target
+    adv=[np.array([.5,.4,.3,-np.inf],np.float64)]
+    margin,rate=margin_for_target(adv,.5)
+    assert 0.3 < margin < 0.4
+    assert abs(rate-.5)<1e-12
+
+
+@pytest.mark.skipif(not has_upstream(), reason='Run inside EconomicGrasp for upstream reader integration')
+def test_a3_intervention_full_is_exact_original_forward():
+    import dataclasses
+    from models.grasp_spatial_enhancer import GraspSpatialEnhancer
+    from models.kview_query_transformer import KViewQueryTransformerConfig,ViewConditionedAttentionGrouping
+    torch.manual_seed(7)
+    cfg=KViewQueryTransformerConfig(grouping_model_dim=32,head_model_dim=32,patch_size=4,
+                                    grouping_num_heads=4,grouping_max_queries_per_chunk=16)
+    econf={'embed_dims':8,'feature_3d_dim':8,'vis_dir':None}
+    e=GraspSpatialEnhancer(**econf)
+    g=ViewConditionedAttentionGrouping(8,8,32,cfg)
+    init={'model_config':{'channels':8,'out_dim':32,'enhancer':econf,'group_config':dataclasses.asdict(cfg)},
+          'enhancer_state':e.state_dict(),'group_state':g.state_dict()}
+    model=RepAReaderScorer(init,'A3').eval()
+    data={'actions':torch.from_numpy(actions()),'image_feature':torch.randn(8,8,8),
+          'depth':torch.ones(1,32,32)*.5,
+          'K':torch.tensor([[60.,0,15.5],[0,60.,15.5],[0,0,1.]]),
+          'objectness':torch.randn(2,32,32),'graspness':torch.rand(1,32,32),
+          'token_ids':torch.tensor([400,401,402,403])}
+    with torch.no_grad():
+        original=model(data)
+        full,rep,comps=model(data,intervention='full',return_repr=True,return_components=True)
+        _,no_rgb=model(data,intervention='no_rgb',return_repr=True)
+        _,rgb_only=model(data,intervention='rgb_only',return_repr=True)
+    assert torch.equal(original,full)
+    assert torch.allclose(rep,comps['depth']+comps['rgb']+comps['action'])
+    assert torch.allclose(no_rgb,comps['depth']+comps['action'])
+    assert torch.allclose(rgb_only,comps['rgb']+comps['action'])
