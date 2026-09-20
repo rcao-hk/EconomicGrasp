@@ -158,9 +158,12 @@ def main():
             outs0=fuse_from_components(a3,comps0,shape)
             prob0={name:lr[0].sigmoid().cpu().numpy() for name,lr in outs0.items()}
             sel0={name:metrics(prob0[name],d,a3i["margin"])[1] for name in INTERVENTIONS}
-            a1_logits0=a1(t) if a1 is not None else None
-            a1_prob0=a1_logits0.sigmoid().cpu().numpy() if a1 is not None else None
-            a1_sel0=metrics(a1_prob0,d,a1i["margin"])[1] if a1 is not None else None
+            if a1 is not None:
+                a1_logits0,a1_rep0=a1(t,return_repr=True)
+                a1_prob0=a1_logits0.sigmoid().cpu().numpy()
+                a1_sel0=metrics(a1_prob0,d,a1i["margin"])[1]
+            else:
+                a1_logits0=a1_rep0=a1_prob0=a1_sel0=None
 
             for case in cases:
                 seed=seed_for(args.seed,args.split,int(d["scene_id"]),int(d["anno_id"]),parse_case(case)[0])
@@ -198,18 +201,26 @@ def main():
                         "top_half_success08_gain":top["success08_gain"]})
 
                 if a1 is not None:
-                    logits1=a1_logits0 if case=="nominal" else a1(t,dep)
+                    if case=="nominal":
+                        logits1,rep1=a1_logits0,a1_rep0
+                    else:
+                        logits1,rep1=a1(t,dep,return_repr=True)
                     prob1=logits1.sigmoid().cpu().numpy()
                     met1,sel1=metrics(prob1,d,a1i["margin"]); top1,_=metrics(prob1[:,ids],small,a1i["margin"])
+                    cos1=(1-F.cosine_similarity(rep1.float(),a1_rep0.float(),dim=-1)).reshape(valid.shape).cpu().numpy()
+                    rel1=((rep1-a1_rep0).norm(dim=-1)/a1_rep0.norm(dim=-1).clamp_min(1e-6)).reshape(valid.shape).cpu().numpy()
+                    fcos1=(1-F.cosine_similarity(rep1.float(),full_rep.float(),dim=-1)).reshape(valid.shape).cpu().numpy()
+                    frel1=((rep1-full_rep).norm(dim=-1)/full_rep.norm(dim=-1).clamp_min(1e-6)).reshape(valid.shape).cpu().numpy()
                     rows.append({"intervention":"a1_reference","source_checkpoint":"A1","split":args.split,
                         "scene_id":int(d["scene_id"]),"anno_id":int(d["anno_id"]),
                         "action_sha":action_sha,"case":case,"margin":a1i["margin"],**met1,**err,
                         "probability_drift":float(np.abs(prob1-a1_prob0)[valid].mean()),
-                        "representation_cosine_distance":0.0,"representation_relative_l2":0.0,
+                        "representation_cosine_distance":float(cos1[valid].mean()),
+                        "representation_relative_l2":float(rel1[valid].mean()),
                         "selection_turnover":float((sel1!=a1_sel0).mean()),
-                        "full_case_probability_distance":0.0,
-                        "full_case_representation_cosine_distance":0.0,
-                        "full_case_representation_relative_l2":0.0,
+                        "full_case_probability_distance":float(np.abs(prob1-full_prob)[valid].mean()),
+                        "full_case_representation_cosine_distance":float(fcos1[valid].mean()),
+                        "full_case_representation_relative_l2":float(frel1[valid].mean()),
                         "top_half_utility_gain":top1["utility_gain"],
                         "top_half_success08_gain":top1["success08_gain"]})
 
