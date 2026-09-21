@@ -145,3 +145,22 @@ def test_pairwise_loss_prefers_correct_order():
     good = pairwise_ranking_loss(lg, utility, valid, temperature=.1)
     bad = pairwise_ranking_loss(lb, utility, valid, temperature=.1)
     assert good < bad
+
+
+def test_summary_csv_accepts_variant_specific_fields(tmp_path):
+    from summarize_rep_b import write_csv
+    rows = [
+        {"variant": "B0", "split": "test_similar", "case": "nominal",
+         "selected_utility": 0.1},
+        {"variant": "B1", "split": "test_similar", "case": "nominal",
+         "selected_utility": 0.2, "prior_norm": 1.5,
+         "prior_cosine_drift": 0.01},
+    ]
+    path = tmp_path / "comparison.csv"
+    write_csv(path, rows, preferred=("variant", "split", "case"))
+    text = path.read_text()
+    header = text.splitlines()[0].split(",")
+    assert header[:3] == ["variant", "split", "case"]
+    assert "prior_norm" in header
+    assert "prior_cosine_drift" in header
+    assert len(text.splitlines()) == 3
