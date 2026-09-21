@@ -114,6 +114,7 @@ def main():
     contract = init["contract"]
     channels = int(init["model_config"]["channels"])
     dim = int(args.dim or init["model_config"]["out_dim"])
+    del init
 
     train_paths = list_frames(args.cache_root, "train", args.max_train_frames)
     val_paths = list_frames(args.cache_root, "test_seen", args.max_val_frames)
