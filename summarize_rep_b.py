@@ -17,6 +17,26 @@ def read_rows(path):
         return list(csv.DictReader(f))
 
 
+def write_csv(path, rows, preferred=()):
+    """Write heterogeneous result rows using the union of all fields.
+
+    Rep-B variants intentionally expose different diagnostics: B0 has no
+    predicted-depth prior, while B1/B2 add prior_* fields. Using rows[0] as the
+    CSV schema therefore fails as soon as a later variant has extra columns.
+    Missing fields are written as empty cells.
+    """
+    if not rows:
+        raise ValueError(f"No rows to write: {path}")
+    all_fields = set().union(*(row.keys() for row in rows))
+    preferred = [key for key in preferred if key in all_fields]
+    remaining = sorted(all_fields - set(preferred))
+    fieldnames = preferred + remaining
+    with open(path, "w", newline="") as fobj:
+        w = csv.DictWriter(fobj, fieldnames=fieldnames, restval="")
+        w.writeheader()
+        w.writerows(rows)
+
+
 def f(row, key):
     return float(row[key])
 
@@ -139,10 +159,12 @@ def main():
 
     for name, rows in (("comparison", summaries), ("paired_effects", effects)):
         save_json(root / f"{name}.json", rows)
-        with open(root / f"{name}.csv", "w", newline="") as fobj:
-            w = csv.DictWriter(fobj, fieldnames=list(rows[0]))
-            w.writeheader()
-            w.writerows(rows)
+        preferred = (
+            ("variant", "split", "case")
+            if name == "comparison"
+            else ("split", "case", "metric", "contrast")
+        )
+        write_csv(root / f"{name}.csv", rows, preferred=preferred)
     print(f"[REP-B] wrote {root/'comparison.csv'} and {root/'paired_effects.csv'}")
 
 
