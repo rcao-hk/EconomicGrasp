@@ -181,6 +181,10 @@ def main():
                     "margin": margin,
                     **met,
                     **err,
+                    "within_ray_pair_accuracy": (
+                        float(met["pair_correct"] / met["pair_count"])
+                        if met["pair_count"] > 0 else 0.5
+                    ),
                     "probability_drift": float(np.abs(prob-p0)[d["valid"]].mean()),
                     "representation_cosine_distance": _masked_mean(rep_cos, valid),
                     "representation_relative_l2": _masked_mean(rep_rel, valid),
