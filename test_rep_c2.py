@@ -88,7 +88,10 @@ def main():
     p.add_argument("--seed",type=int,default=2026)
     p.add_argument("--max-frames",type=int,default=0)
     args=p.parse_args()
-    # load_scorer() lazily imports Rep-A/CVA modules. Those modules eventually\n    # import the legacy utils.arguments parser, so clear Rep-C2-only CLI flags\n    # first, as done by the established Rep-A scripts.\n    sys.argv=[sys.argv[0]]
+    # load_scorer() lazily imports Rep-A/CVA modules. Those modules eventually
+    # import the legacy utils.arguments parser, so clear Rep-C2-only CLI flags
+    # first, as done by the established Rep-A scripts.
+    sys.argv=[sys.argv[0]]
 
     check_runtime_sources(args.cache_root)
     device=torch.device(args.device)
