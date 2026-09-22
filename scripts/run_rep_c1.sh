@@ -22,8 +22,13 @@ EVAL_CHUNK=${EVAL_CHUNK:-128}
 FC_MODE=${FC_MODE:-reuse_contacts}
 VERIFY_N=${VERIFY_N:-0}
 MIN_HOST_FREE_GIB=${MIN_HOST_FREE_GIB:-4}
+LABEL_WORKERS=${LABEL_WORKERS:-2}
 RESUME=${RESUME:-1}
 OVERWRITE=${OVERWRITE:-0}
+
+source "$ROOT_DIR/scripts/rep_followup_jobs.sh"
+[[ "$EVAL_SHARDS" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid EVAL_SHARDS=$EVAL_SHARDS" >&2; exit 2; }
+[[ "$LABEL_WORKERS" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid LABEL_WORKERS=$LABEL_WORKERS" >&2; exit 2; }
 
 IFS=',' read -r -a STEPS <<< "$PHASES"
 IFS=',' read -r -a TESTS <<< "$SPLITS"
@@ -38,8 +43,12 @@ for phase in "${STEPS[@]}"; do
       [[ "$RESUME" == 1 ]] && extra+=(--resume)
       for split in "${TESTS[@]}"; do
         for ((s=0;s<EVAL_SHARDS;s++)); do
-          "$PYTHON_BIN" "$ROOT_DIR/evaluate_rep_fullpath.py"             --dataset-root "$DATASET_ROOT" --work-root "$SOURCE_ROOT"             --split "$split" --shard-id "$s" --num-shards "$EVAL_SHARDS"             --eval-chunk "$EVAL_CHUNK" --fc-mode "$FC_MODE" --verify-n "$VERIFY_N"             --label-scope selected --min-host-free-gib "$MIN_HOST_FREE_GIB"             "${extra[@]}"
+          launch "rep-c1/label/$split/$s" "" "$WORK_ROOT/logs/label_${split}_${s}.log"             "$ROOT_DIR/evaluate_rep_fullpath.py"             --dataset-root "$DATASET_ROOT" --work-root "$SOURCE_ROOT"             --split "$split" --shard-id "$s" --num-shards "$EVAL_SHARDS"             --eval-chunk "$EVAL_CHUNK" --fc-mode "$FC_MODE" --verify-n "$VERIFY_N"             --label-scope selected --min-host-free-gib "$MIN_HOST_FREE_GIB"             "${extra[@]}"
+          if (( ${#PIDS[@]} >= LABEL_WORKERS )); then
+            wait_wave
+          fi
         done
+        wait_wave
       done
       ;;
     analyze)
