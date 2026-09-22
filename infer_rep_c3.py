@@ -228,6 +228,8 @@ def main():
             replay_max_abs=np.array(current_noop),num_stage1_queries=np.array(len(ids_all)),
             depth_rms_mm=np.array(float(shift_stats.get("depth_rms_mm",0.))),
             depth_bias_mm=np.array(float(shift_stats.get("depth_bias_mm",0.))),
+            anchor_depth_rms_mm=np.array(float(shift_stats.get("depth_rms_mm",0.))),
+            reader_depth_rms_mm=np.array(float(shift_stats.get("depth_rms_mm",0.))),
             gt_mae_mm=np.array(float(shift_stats["gt_mae_mm"])),
             gt_rmse_mm=np.array(float(shift_stats["gt_rmse_mm"])),
             gt_bias_mm=np.array(float(shift_stats["gt_bias_mm"])),
