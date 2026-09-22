@@ -17,6 +17,11 @@ TIE_EPS=${TIE_EPS:-1e-7}
 PHASES=${PHASES:-analyze}
 FRAME_STRIDE=${FRAME_STRIDE:-10}
 OFFICIAL_WORKERS=${OFFICIAL_WORKERS:-4}
+EVAL_SHARDS=${EVAL_SHARDS:-1}
+EVAL_CHUNK=${EVAL_CHUNK:-128}
+FC_MODE=${FC_MODE:-reuse_contacts}
+VERIFY_N=${VERIFY_N:-0}
+MIN_HOST_FREE_GIB=${MIN_HOST_FREE_GIB:-4}
 RESUME=${RESUME:-1}
 OVERWRITE=${OVERWRITE:-0}
 
@@ -25,6 +30,18 @@ IFS=',' read -r -a TESTS <<< "$SPLITS"
 
 for phase in "${STEPS[@]}"; do
   case "$phase" in
+    label)
+      # Optional: create the exact native/A1-selected labels C1 needs.
+      # This operates on SOURCE_ROOT and is resumable. For a cheap first test,
+      # point SOURCE_ROOT at the QUERY_LIMIT=64 pilot instead of the full-query run.
+      extra=()
+      [[ "$RESUME" == 1 ]] && extra+=(--resume)
+      for split in "${TESTS[@]}"; do
+        for ((s=0;s<EVAL_SHARDS;s++)); do
+          "$PYTHON_BIN" "$ROOT_DIR/evaluate_rep_fullpath.py"             --dataset-root "$DATASET_ROOT" --work-root "$SOURCE_ROOT"             --split "$split" --shard-id "$s" --num-shards "$EVAL_SHARDS"             --eval-chunk "$EVAL_CHUNK" --fc-mode "$FC_MODE" --verify-n "$VERIFY_N"             --label-scope selected --min-host-free-gib "$MIN_HOST_FREE_GIB"             "${extra[@]}"
+        done
+      done
+      ;;
     analyze)
       extra=()
       [[ "$OVERWRITE" == 1 ]] && extra+=(--overwrite)
