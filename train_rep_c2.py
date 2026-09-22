@@ -12,7 +12,7 @@ are never retuned.
 """
 from __future__ import annotations
 
-import argparse, json, random
+import argparse, json, sys, random
 from pathlib import Path
 import numpy as np
 import torch
@@ -129,6 +129,7 @@ def collect_validation(a1, verifier, evidence, paths, contract, device, seed):
 
 def main():
     args=parser().parse_args()
+    # Project model modules import utils.arguments, whose legacy parser runs\n    # at import time. Hide Rep-C2 CLI flags before load_scorer() lazily imports\n    # Rep-A/CVA modules; this matches train_rep_a.py.\n    sys.argv=[sys.argv[0]]
     if args.epochs<1 or args.nominal_val_weight<=0 or args.gain_weight<0:
         raise ValueError("Invalid Rep-C2 configuration")
     check_runtime_sources(args.cache_root)
