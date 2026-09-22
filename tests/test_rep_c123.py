@@ -13,8 +13,13 @@ from infer_rep_c3 import residual_stress
 def _friction_for_utility(u):
     # Utilities represent mean success over thresholds [.2,.4,.6,.8,1.,1.2].
     table = {
-        0.0: -1.0, 1/6: 1.2, 2/6: 1.0, 3/6: .8,
-        4/6: .6, 5/6: .4, 1.0: .2,
+        round(0.0,7): -1.0,
+        round(1/6,7): 1.2,
+        round(2/6,7): 1.0,
+        round(3/6,7): .8,
+        round(4/6,7): .6,
+        round(5/6,7): .4,
+        round(1.0,7): .2,
     }
     return table[round(float(u), 7)]
 
