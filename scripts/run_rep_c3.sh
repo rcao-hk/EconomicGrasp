@@ -75,7 +75,7 @@ for phase in "${STEPS[@]}"; do
       done
       ;;
     summary)
-      "$PYTHON_BIN" "$ROOT_DIR/summarize_rep_followup.py"         --kind fullpath --root "$WORK_ROOT" --splits "$SPLITS"
+      "$PYTHON_BIN" "$ROOT_DIR/summarize_rep_c3.py"         --root "$WORK_ROOT" --splits "$SPLITS"
       ;;
     official)
       off=(); [[ "$RESUME" == 1 ]] && off+=(--resume)
