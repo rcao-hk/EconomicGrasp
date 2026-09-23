@@ -147,12 +147,14 @@ SPLITS=test_seen,test_similar,test_novel \
 CASES=nominal,bias:-20,bias:20 \
 QUERY_CHUNK=128 \
 SEEN_TRAIN_FRACTION=0.5 \
-PHASES=fit,eval \
+PHASES=fit,eval,summary \
 bash scripts/run_rep_c2v2_decision.sh
 ```
 
 `fit` uses GPU0. After calibration is complete, `eval` distributes splits
 across the listed GPUs, so with three GPUs Seen/Similar/Novel run in parallel.
+`summary` then aggregates equal-weight split/case diagnostics; use
+`heldout_macro.csv` for the first Similar+Novel comparison.
 
 No new Stage-1 inference, training-cache mining, or CAD/DexNet evaluation is
 performed.
@@ -174,6 +176,9 @@ WORK_ROOT/
       ...
     test_novel/
       ...
+  macro_by_split.csv
+  heldout_macro.csv
+  decision_summary.json
 ```
 
 Interpretation priority:
