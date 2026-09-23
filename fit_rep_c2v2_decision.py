@@ -97,8 +97,8 @@ def main():
     args=parser().parse_args(); sys.argv=[sys.argv[0]]
     if not 0<args.seen_train_fraction<1:
         raise ValueError("seen-train-fraction must be in (0,1)")
-    if args.query_chunk<1 or args.threshold_grid<3:
-        raise ValueError("Invalid chunk/grid")
+    if args.query_chunk<1 or args.threshold_grid<3 or args.ridge<=0:
+        raise ValueError("Invalid chunk/grid/ridge")
     device=torch.device(args.device)
     models,meta,contract=load_models(args.c2v2_dir,device)
     cases=tuple(x.strip() for x in args.cases.split(",") if x.strip())
@@ -146,6 +146,15 @@ def main():
             })
         if (i+1)%50==0:
             print(f"[C2-v2 DECISION FIT] Seen files {i+1}/{len(files)}",flush=True)
+
+    for subset_name,scene_set in (("train",train_set),("val",val_set)):
+        present={str(r["case"]) for r in frames[next(iter(models))][subset_name]}
+        missing=set(cases)-present
+        if missing:
+            raise RuntimeError(
+                f"Seen calibration {subset_name} lacks cases {sorted(missing)}. "
+                "Increase --max-files or use the complete formal source."
+            )
 
     out=Path(args.output_root); out.mkdir(parents=True,exist_ok=True)
     calibration={
