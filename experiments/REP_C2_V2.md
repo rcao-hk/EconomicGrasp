@@ -109,7 +109,50 @@ bias:-20
 bias:20
 ```
 
-The threshold maximizes macro mean exact utility gain across validation cases.
+Validation now scores **every A1 fixed-0 moved proposal** from the full-query
+Seen source (`query_limit=0`); proposal subsampling is forbidden for formal
+calibration. Queries on which A1 keeps native remain in the denominator.
+
+For each case, the verifier is evaluated on the same full-query utility scale
+used by C1/test:
+
+[
+G_V(\tau)=\frac{1}{Q}\sum_q
+\left[U(g_V(q;\tau))-U(g_0(q))\right].
+]
+
+The A1 fixed-0 baseline and oracle acceptance upper bound are
+
+[
+G_{A1}=\frac{1}{Q}\sum_q
+\left[U(g_{A1}(q))-U(g_0(q))\right],
+]
+
+[
+G_O=\frac{1}{Q}\sum_q
+\max\left(U(g_{A1}(q))-U(g_0(q)),0\right).
+]
+
+Threshold selection directly maximizes the verifier increment
+
+[
+\Delta_V(\tau)=G_V(\tau)-G_{A1},
+]
+
+macro-averaged over Seen nominal / -20 / +20. Accept-all therefore has
+`verifier_increment=0` rather than being rewarded by the already-positive A1
+corruption gain.
+
+Checkpoint selection uses C1 oracle-gap recovery
+
+[
+R(\tau)=\frac{G_V(\tau)-G_{A1}}{G_O-G_{A1}},
+]
+
+macro-averaged across validation cases. The primary checkpoint key is
+`macro_oracle_gap_recovery`; verifier increment, beneficial retention and
+harmful rejection are tie-breakers.
+
 Similar and Novel never tune the threshold or checkpoint.
 
 Testing runs on the same full-path source root. If that source used
@@ -145,7 +188,7 @@ MAX_TRAIN_FRAMES=8 \
 MAX_VAL_FILES=12 \
 MAX_TEST_FILES=12 \
 EPOCHS=2 \
-PHASES=mine,train,test \
+PHASES=train,test \
 bash scripts/run_rep_c2v2.sh
 ```
 
@@ -164,12 +207,13 @@ WORK_ROOT/eval/test/<split>/comparison.csv
 A cautious first formal run:
 
 ```bash
-WORK_ROOT=/data2/robotarm/result/grasp/rgbgrasp/rep_c2v2_fullpath_verifier \
+WORK_ROOT=/data2/robotarm/result/grasp/rgbgrasp/rep_c2v2_fullpath_verifier_objective_v2 \
+TRAIN_CACHE_ROOT=/data2/robotarm/result/grasp/rgbgrasp/rep_c2v2_fullpath_verifier/train_cache \
 SOURCE_ROOT=/data2/robotarm/result/grasp/rgbgrasp/rep_fullpath_formal_joint_ap \
-GPUS=0,1 \
+GPUS=0 \
 QUERY_LIMIT=64 \
 MOVE_LIMIT=16 \
-VAL_MOVE_LIMIT=32 \
+VAL_MOVE_LIMIT=0 \
 EPOCHS=12 \
 SPLITS=test_seen,test_similar,test_novel \
 CASES=nominal,bias:-20,bias:20 \
@@ -219,3 +263,31 @@ Interpretation:
   evidence is still insufficient, and more gate capacity is not justified.
 - a substantial gap to `oracle_accept_gain` is expected; Rep-C1 uses privileged
   exact geometry and is an upper bound, not a recoverable target.
+
+
+## 9. Re-running after the full-query objective change
+
+The mined training cache is unchanged and should be reused. The training
+signature now contains an explicit objective version, so old checkpoints cannot
+silently resume under the new calibration rule.
+
+Recommended rerun:
+
+```bash
+WORK_ROOT=/data2/robotarm/result/grasp/rgbgrasp/rep_c2v2_fullpath_verifier_objective_v2 \
+TRAIN_CACHE_ROOT=/data2/robotarm/result/grasp/rgbgrasp/rep_c2v2_fullpath_verifier/train_cache \
+SOURCE_ROOT=/data2/robotarm/result/grasp/rgbgrasp/rep_fullpath_formal_joint_ap \
+GPUS=0 \
+VAL_MOVE_LIMIT=0 \
+VAL_QUERY_CHUNK=128 \
+VAL_EVERY=1 \
+EPOCHS=12 \
+SPLITS=test_seen,test_similar,test_novel \
+CASES=nominal,bias:-20,bias:20 \
+PHASES=train,test \
+bash scripts/run_rep_c2v2.sh
+```
+
+No new CAD/DexNet mining is required. Validation uses the exact labels already
+produced in the formal full-path source. Full-query RGB verification is chunked
+by `VAL_QUERY_CHUNK` for GPU-memory control.
