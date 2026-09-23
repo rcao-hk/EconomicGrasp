@@ -63,7 +63,7 @@ CONTEXT_FEATURE_NAMES = QUERY_FEATURE_NAMES + FRAME_FEATURE_NAMES
 @torch.no_grad()
 def predict_verifier_outputs(model, ex, cache_frame, device, chunk=128):
     """Return [N,3] class probabilities and [N] predicted delta."""
-    n=len(ex["delta_utility"])
+    n=int(np.asarray(ex["actions"]).shape[1])
     if n==0:
         return np.empty((0,3),np.float32),np.empty(0,np.float32)
     hw=cache_frame["depth"].shape[-2:]
@@ -84,7 +84,7 @@ def predict_verifier_outputs(model, ex, cache_frame, device, chunk=128):
 
 def frame_context(ex, total_queries):
     """Inference-available frame-level A1 proposal statistics."""
-    n=len(ex["delta_utility"])
+    n=len(ex["offsets_mm"])
     q=max(1,int(total_queries))
     if n==0:
         return np.zeros(len(FRAME_FEATURE_NAMES),np.float32)
