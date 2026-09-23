@@ -7,9 +7,10 @@ REP_B_WORK_ROOT=${REP_B_WORK_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/rep_b_h
 CACHE_ROOT=${CACHE_ROOT:-$REP_A_WORK_ROOT/cache}
 WORK_ROOT=${WORK_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/rep_b0_attribution}
 BASELINE_CKPT=${BASELINE_CKPT:-$REP_B_WORK_ROOT/train/B0/checkpoint_best.pt}
+
 # Reuse existing B0. Set RETRAIN_FULL=1 to retrain all three in this launcher.
 RETRAIN_FULL=${RETRAIN_FULL:-0}
-GPUS=${GPUS:-0}
+GPUS=${GPUS:-0,1}
 PHASES=${PHASES:-train,test,summary}
 SPLITS=${SPLITS:-test_seen,test_similar,test_novel}
 EPOCHS=${EPOCHS:-20}

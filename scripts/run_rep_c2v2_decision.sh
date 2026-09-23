@@ -7,10 +7,10 @@ PYTHON_BIN=${PYTHON_BIN:-python}
 SOURCE_ROOT=${SOURCE_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/rep_fullpath_formal_joint_ap}
 REP_A_WORK_ROOT=${REP_A_WORK_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/rep_a_depth_robustness}
 CACHE_ROOT=${CACHE_ROOT:-$REP_A_WORK_ROOT/cache}
-C2V2_DIR=${C2V2_DIR:-/data2/robotarm/result/grasp/rgbgrasp/rep_c2v2_fullpath_verifier_objective_v2/train}
+C2V2_DIR=${C2V2_DIR:-/data2/robotarm/result/grasp/rgbgrasp/rep_c2v2_fullpath_verifier_v2/train}
 WORK_ROOT=${WORK_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/rep_c2v2_decision_diagnostic}
 
-GPUS=${GPUS:-0}
+GPUS=${GPUS:-0,1,2}
 PHASES=${PHASES:-fit,eval,summary}
 SPLITS=${SPLITS:-test_seen,test_similar,test_novel}
 CASES=${CASES:-nominal,bias:-20,bias:20}

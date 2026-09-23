@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Rep-A: one process/GPU; each job owns its process group. No DDP required.
 set -Eeuo pipefail
+
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN=${PYTHON_BIN:-python}
 WORK_ROOT=${WORK_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/rep_a_depth_robustness}
-P0_CACHE_ROOT=${P0_CACHE_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/rep_p0_geometry_sources_5mm/cache}
+P0_CACHE_ROOT=${P0_CACHE_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/rep_p0_geometry_sources/cache}
 CACHE_ROOT=${CACHE_ROOT:-${WORK_ROOT}/cache}
 DATASET_ROOT=${DATASET_ROOT:-/data/robotarm/dataset/graspnet}
 STAGE1_CKPT=${STAGE1_CKPT:-/data2/robotarm/result/grasp/rgbgrasp/log/economicgrasp_dpt_cva_cdf_distill_stage1/epoch_15_train_0.6009606198008898_val_1.1028128399874995.tar}
-PHASES=${PHASES:-prepare,train,test,summary}
-GPUS=${GPUS:-0}
+PHASES=${PHASES:-train,test,summary}
+GPUS=${GPUS:-0,1,2,3}
 VARIANTS=${VARIANTS:-A0,A1,A2,A3}
 PREP_SPLITS=${PREP_SPLITS:-train,test_seen,test_similar,test_novel}
 TEST_SPLITS=${TEST_SPLITS:-test_similar,test_novel}
