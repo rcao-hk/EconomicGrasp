@@ -169,7 +169,6 @@ def main():
         "decision":"accept proposal iff validation-calibrated P(beneficial) >= threshold",
         "score_policy":"matched A1 score: selected-hypothesis if accepted, zero/native-hypothesis if rejected",
         "evidence":"score baseline vs independent pre-enhancer RGB pair evidence",
-        "test_split":args.split,
     }
     root=Path(args.output_root); root.mkdir(parents=True,exist_ok=True)
     checked_manifest(root,protocol)
