@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from rep_a_common import atomic_file, cdf_targets, digest, load_torch, read_frame, save_json
+from rep_a_common import atomic_file, cdf_targets, digest, exclusive_run, load_torch, read_frame, save_json
 from rep_c2v2_common import (
     BENEFICIAL, VARIANTS, compact_from_source, frame_cache_path,
     official_dump_path, row_index, scorer_index, source_eval_path, source_files,
@@ -171,7 +171,8 @@ def main():
         "evidence":"score baseline vs independent pre-enhancer RGB pair evidence",
     }
     root=Path(args.output_root); root.mkdir(parents=True,exist_ok=True)
-    checked_manifest(root,protocol)
+    with exclusive_run(root/".protocol.lock",wait=True):
+        checked_manifest(root,protocol)
 
     files=source_files(args.source_root,args.split,"joint",cases)
     if args.max_files>0: files=files[:args.max_files]
