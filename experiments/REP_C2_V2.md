@@ -188,7 +188,7 @@ MAX_TRAIN_FRAMES=8 \
 MAX_VAL_FILES=12 \
 MAX_TEST_FILES=12 \
 EPOCHS=2 \
-PHASES=train,test \
+PHASES=mine,train,test \
 bash scripts/run_rep_c2v2.sh
 ```
 
@@ -228,7 +228,7 @@ If test metrics are positive, official AP needs no new inference or exact action
 labels:
 
 ```bash
-WORK_ROOT=/data2/robotarm/result/grasp/rgbgrasp/rep_c2v2_fullpath_verifier \
+WORK_ROOT=/data2/robotarm/result/grasp/rgbgrasp/rep_c2v2_fullpath_verifier_objective_v2 \
 SPLITS=test_seen,test_similar,test_novel \
 OFFICIAL_WORKERS=4 \
 PHASES=official \
