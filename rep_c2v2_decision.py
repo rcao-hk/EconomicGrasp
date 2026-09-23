@@ -22,6 +22,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import torch
 
 from rep_c2v2_common import full_query_gate_metrics
 
@@ -57,6 +58,28 @@ FRAME_FEATURE_NAMES = (
 )
 
 CONTEXT_FEATURE_NAMES = QUERY_FEATURE_NAMES + FRAME_FEATURE_NAMES
+
+
+@torch.no_grad()
+def predict_verifier_outputs(model, ex, cache_frame, device, chunk=128):
+    """Return [N,3] class probabilities and [N] predicted delta."""
+    n=len(ex["delta_utility"])
+    if n==0:
+        return np.empty((0,3),np.float32),np.empty(0,np.float32)
+    hw=cache_frame["depth"].shape[-2:]
+    image=torch.from_numpy(np.asarray(cache_frame["image_feature"]).copy()).to(device).float()
+    K=torch.from_numpy(np.asarray(cache_frame["K"]).copy()).to(device).float()
+    probs=[]; deltas=[]
+    for start in range(0,n,int(chunk)):
+        sl=slice(start,min(start+int(chunk),n))
+        actions=torch.from_numpy(np.asarray(ex["actions"][:,sl]).copy()).to(device).float()
+        vp=torch.from_numpy(np.asarray(ex["probabilities"][:,sl]).copy()).to(device).float()
+        offsets=torch.from_numpy(np.asarray(ex["offsets_mm"][sl]).copy()).to(device).float()
+        native=torch.from_numpy(np.asarray(ex["original_native_score"][sl]).copy()).to(device).float()
+        out=model(image,K,actions,vp,offsets,native,hw)
+        probs.append(out["class_logits"].softmax(-1).cpu().numpy())
+        deltas.append(out["delta"].cpu().numpy())
+    return np.concatenate(probs).astype(np.float32),np.concatenate(deltas).astype(np.float32)
 
 
 def frame_context(ex, total_queries):
