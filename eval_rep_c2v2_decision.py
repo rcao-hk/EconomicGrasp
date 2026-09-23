@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from rep_a_common import atomic_file, read_frame, save_json
+from rep_a_common import atomic_file, digest, read_frame, save_json
 from rep_c2v2_common import (
     compact_from_source, frame_cache_path, full_query_gate_metrics,
     source_eval_path, source_files,
@@ -108,6 +108,13 @@ def main():
     calib=load_calibration(args.calibration)
     models,meta,contract=load_models(args.c2v2_dir,device)
     cases=tuple(x.strip() for x in args.cases.split(",") if x.strip())
+    source_protocol=json.loads((Path(args.source_root)/"protocol.json").read_text())
+    if digest(source_protocol)!=calib["source_protocol_digest"]:
+        raise RuntimeError("Decision calibration/source full-path protocol mismatch")
+    if tuple(calib["cases"])!=cases:
+        raise RuntimeError(
+            f"Decision calibration cases {calib['cases']} != requested {list(cases)}"
+        )
 
     if set(calib["variants"])!=set(models):
         raise RuntimeError("Calibration/model variant mismatch")
