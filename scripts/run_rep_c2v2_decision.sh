@@ -11,7 +11,7 @@ C2V2_DIR=${C2V2_DIR:-/data2/robotarm/result/grasp/rgbgrasp/rep_c2v2_fullpath_ver
 WORK_ROOT=${WORK_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/rep_c2v2_decision_diagnostic}
 
 GPUS=${GPUS:-0}
-PHASES=${PHASES:-fit,eval}
+PHASES=${PHASES:-fit,eval,summary}
 SPLITS=${SPLITS:-test_seen,test_similar,test_novel}
 CASES=${CASES:-nominal,bias:-20,bias:20}
 QUERY_CHUNK=${QUERY_CHUNK:-128}
@@ -48,6 +48,9 @@ for phase in "${STEPS[@]}"; do
         if ((slot==${#GPU_IDS[@]})); then wait_wave; slot=0; fi
       done
       wait_wave
+      ;;
+    summary)
+      "$PYTHON_BIN" "$ROOT_DIR/summarize_rep_c2v2_decision.py"         --root "$WORK_ROOT"         --splits "$SPLITS"
       ;;
     *)
       echo "Unknown Rep-C2-v2 decision phase: $phase" >&2
