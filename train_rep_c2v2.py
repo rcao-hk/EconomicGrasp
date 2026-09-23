@@ -27,10 +27,13 @@ from rep_a_common import (
 )
 from rep_c2v2_common import (
     BENEFICIAL, CLASS_NAMES, VARIANTS, compact_from_source,
-    frame_cache_path, gate_metrics, select_move_subset, source_eval_path,
+    frame_cache_path, full_query_gate_metrics, source_eval_path,
     source_files,
 )
 from rep_c2v2_model import RepC2V2Verifier, paired_initial_state
+
+
+OBJECTIVE_VERSION="full_query_verifier_increment_oracle_gap_recovery_v1"
 
 
 def parser():
@@ -50,8 +53,10 @@ def parser():
     p.add_argument("--seed",type=int,default=2028)
     p.add_argument("--device",default="cuda:0")
     p.add_argument("--val-cases",default="nominal,bias:-20,bias:20")
-    p.add_argument("--val-move-limit",type=int,default=32,
-                   help="Per source frame; 0 evaluates every A1 move")
+    p.add_argument("--val-move-limit",type=int,default=0,
+                   help="Deprecated compatibility flag. Full-query calibration requires 0.")
+    p.add_argument("--val-query-chunk",type=int,default=128,
+                   help="Chunk moved proposals during full-query Seen validation")
     p.add_argument("--val-every",type=int,default=1)
     p.add_argument("--max-train-frames",type=int,default=0)
     p.add_argument("--max-val-files",type=int,default=0)
@@ -100,67 +105,126 @@ def forward_model(model,t,hw):
 
 
 @torch.no_grad()
-def validation(models, cache_root, source_root, contract, cases, move_limit, device, max_files=0):
-    for m in models.values(): m.eval()
+def _predict_validation(model, ex, cache_frame, device, chunk):
+    """Predict P(beneficial) for ALL A1 moved proposals, chunked for memory."""
+    n=len(ex["delta_utility"])
+    if n==0:
+        return np.empty(0,np.float32)
+    hw=cache_frame["depth"].shape[-2:]
+    out=[]
+    for start in range(0,n,chunk):
+        sl=slice(start,min(start+chunk,n))
+        sub={
+            "actions":ex["actions"][:,sl],
+            "probabilities":ex["probabilities"][:,sl],
+            "offsets_mm":ex["offsets_mm"][sl],
+            "original_native_score":ex["original_native_score"][sl],
+        }
+        t=tensor_frame(sub,cache_frame,device)
+        pred=forward_model(model,t,hw)
+        out.append(pred["class_logits"].softmax(-1)[:,BENEFICIAL].cpu().numpy())
+    return np.concatenate(out)
+
+
+@torch.no_grad()
+def validation(models, cache_root, source_root, contract, cases, query_chunk, device, max_files=0):
+    """Calibrate threshold on full-query Seen utility, not sampled proposals.
+
+    Every A1 fixed-0 moved proposal in the source is scored. Queries where A1
+    stays native remain in the denominator and contribute zero relative gain.
+    Threshold selection directly maximizes verifier increment over A1 fixed-0.
+    """
+    for m in models.values():
+        m.eval()
     files=source_files(source_root,"test_seen","joint",cases)
-    if max_files>0: files=files[:max_files]
+    if max_files>0:
+        files=files[:max_files]
     records={v:[] for v in VARIANTS}
     for path in files:
-        with np.load(path,allow_pickle=False) as z: payload={k:z[k] for k in z.files}
+        with np.load(path,allow_pickle=False) as z:
+            payload={k:z[k] for k in z.files}
         ev=source_eval_path(source_root,path,"test_seen")
-        if not ev.is_file(): raise FileNotFoundError(ev)
-        with np.load(ev,allow_pickle=False) as z: labels={k:z[k] for k in z.files}
+        if not ev.is_file():
+            raise FileNotFoundError(ev)
+        with np.load(ev,allow_pickle=False) as z:
+            labels={k:z[k] for k in z.files}
         ex=compact_from_source(payload,labels)
-        if len(ex["delta_utility"])==0: continue
-        margin=ex["probabilities"][1].mean(-1)-ex["probabilities"][0].mean(-1)
-        keep=select_move_subset(margin,move_limit)
-        ex={k:(v[:,keep] if k in ("actions","probabilities") else v[keep])
-            for k,v in ex.items() if k not in ("proposal_k","query_pos")}
         sid=int(np.asarray(payload["scene_id"]).reshape(()))
         aid=int(np.asarray(payload["anno_id"]).reshape(()))
         cf=read_frame(frame_cache_path(cache_root,"test_seen",sid,aid),contract)
-        t=tensor_frame(ex,cf,device); hw=cf["depth"].shape[-2:]
         case=str(payload["case"])
         delta=np.asarray(ex["delta_utility"],np.float32)
+        q_total=int(payload["actions"].shape[1])
         for v,m in models.items():
-            out=forward_model(m,t,hw)
-            p=out["class_logits"].softmax(-1)[:,BENEFICIAL].cpu().numpy()
-            records[v].append((case,p,delta))
+            p=_predict_validation(m,ex,cf,device,query_chunk)
+            records[v].append((case,p,delta,q_total))
+
     result={}
     for v,rr in records.items():
-        if not rr: raise RuntimeError(f"No validation records for {v}")
+        if not rr:
+            raise RuntimeError(f"No validation records for {v}")
         thresholds=[]
-        all_cases=sorted(set(c for c,_,_ in rr))
+        all_cases=sorted(set(c for c,_,_,_ in rr))
         for thr in np.linspace(0,1,101):
             by_case={}
             for case in all_cases:
-                pp=np.concatenate([p for c,p,d in rr if c==case])
-                dd=np.concatenate([d for c,p,d in rr if c==case])
-                by_case[case]=gate_metrics(pp,dd,thr)
-            macro_gain=float(np.mean([m.mean_gain for m in by_case.values()]))
+                parts=[x for x in rr if x[0]==case]
+                pp=np.concatenate([p for _,p,_,_ in parts]) if parts else np.empty(0,np.float32)
+                dd=np.concatenate([d for _,_,d,_ in parts]) if parts else np.empty(0,np.float32)
+                total_q=sum(q for *_,q in parts)
+                by_case[case]=full_query_gate_metrics(pp,dd,thr,total_q)
+
+            recoveries=[
+                m.oracle_gap_recovery for m in by_case.values()
+                if m.oracle_gap_recovery is not None
+            ]
+            macro_verified=float(np.mean([m.verified_gain for m in by_case.values()]))
+            macro_a1=float(np.mean([m.a1_fixed0_gain for m in by_case.values()]))
+            macro_oracle=float(np.mean([m.oracle_accept_gain for m in by_case.values()]))
+            macro_increment=float(np.mean([m.verifier_increment for m in by_case.values()]))
+            macro_gap=float(np.mean([m.oracle_gap for m in by_case.values()]))
+            macro_recovery=float(np.mean(recoveries)) if recoveries else 0.
             macro_ret=float(np.mean([m.beneficial_retention for m in by_case.values()]))
             macro_rej=float(np.mean([m.harmful_rejection for m in by_case.values()]))
             macro_prec=float(np.mean([m.accept_precision for m in by_case.values()]))
+
             thresholds.append({
-                "threshold":float(thr),"macro_mean_gain":macro_gain,
+                "threshold":float(thr),
+                "macro_full_query_utility_gain":macro_verified,
+                "macro_a1_fixed0_gain":macro_a1,
+                "macro_oracle_accept_gain":macro_oracle,
+                "macro_verifier_increment":macro_increment,
+                "macro_oracle_gap":macro_gap,
+                "macro_oracle_gap_recovery":macro_recovery,
                 "macro_beneficial_retention":macro_ret,
                 "macro_harmful_rejection":macro_rej,
                 "macro_accept_precision":macro_prec,
                 "cases":{c:vars(m) for c,m in by_case.items()},
             })
+
+        # Threshold objective: improve over A1 fixed-0 directly. Because the A1
+        # baseline is threshold-independent, this is equivalent to maximizing
+        # verified full-query utility, but makes the causal objective explicit.
         best=max(thresholds,key=lambda x:(
-            x["macro_mean_gain"],x["macro_beneficial_retention"],
-            x["macro_harmful_rejection"],x["macro_accept_precision"],
+            x["macro_verifier_increment"],
+            x["macro_beneficial_retention"],
+            x["macro_harmful_rejection"],
+            x["macro_accept_precision"],
         ))
         result[v]=(best,thresholds)
     return result
-
 
 def main():
     args=parser().parse_args(); sys.argv=[sys.argv[0]]
     if args.epochs<1 or args.val_every<1 or args.reg_weight<0 or args.gain_weight<0:
         raise ValueError("Invalid Rep-C2-v2 training configuration")
-    if args.val_move_limit<0: raise ValueError("val-move-limit must be >=0")
+    if args.val_move_limit!=0:
+        raise ValueError(
+            "Rep-C2-v2 full-query threshold calibration requires --val-move-limit 0. "
+            "Proposal subsampling changes the validation distribution."
+        )
+    if args.val_query_chunk<1:
+        raise ValueError("val-query-chunk must be positive")
     device=torch.device(args.device)
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     if torch.cuda.is_available(): torch.cuda.manual_seed_all(args.seed)
@@ -185,12 +249,18 @@ def main():
     source_protocol=json.loads((Path(args.validation_source_root)/"protocol.json").read_text())
     if source_protocol.get("query_limit",None) is None:
         raise RuntimeError("Unrecognized full-path validation source")
+    if int(source_protocol["query_limit"])!=0:
+        raise RuntimeError(
+            "Rep-C2-v2 full-query threshold objective requires a validation source "
+            "with query_limit=0. Use the formal full-path root."
+        )
     config={k:v for k,v in vars(args).items() if k not in (
         "device","output_dir","resume","progress_every","cache_root",
         "train_cache_root","validation_source_root"
     )}
     signature=digest({
-        "experiment":"Rep-C2-v2","config":config,"contract":contract,
+        "experiment":"Rep-C2-v2","objective_version":OBJECTIVE_VERSION,
+        "config":config,"contract":contract,
         "train_protocol":train_protocol,
         "validation_source_protocol":source_protocol,
         "train_files":[(str(p.relative_to(args.train_cache_root)),p.stat().st_size,p.stat().st_mtime_ns) for p in train_files],
@@ -207,7 +277,8 @@ def main():
 
     out=Path(args.output_dir); out.mkdir(parents=True,exist_ok=True)
     latest=out/"checkpoint_latest.pt"
-    start=0; history=[]; best={v:(-float("inf"),-float("inf")) for v in VARIANTS}
+    start=0; history=[]
+    best={v:(-float("inf"),-float("inf"),-float("inf"),-float("inf")) for v in VARIANTS}
     if latest.exists():
         if not args.resume: raise FileExistsError(f"{latest}; use --resume")
         ck=load_torch(latest)
@@ -218,11 +289,14 @@ def main():
         del ck
 
     save_json(out/"protocol.json",{
-        "experiment":"Rep-C2-v2","signature":signature,"cache_contract":contract,
+        "experiment":"Rep-C2-v2","signature":signature,
+        "objective_version":OBJECTIVE_VERSION,"cache_contract":contract,
         "train_cache_protocol":train_protocol,
         "validation_source_root":str(Path(args.validation_source_root).resolve()),
         "validation_cases":list(val_cases),
         "validation_role":"test_seen / validation_seen only; Similar/Novel never tune threshold/checkpoint",
+        "threshold_objective":"maximize macro verifier increment over A1 fixed-0 using ALL Stage-1 queries",
+        "checkpoint_objective":"maximize macro oracle-gap recovery, then verifier increment",
         "variants":list(VARIANTS),
         "variant_semantics":{
             "score":"A1 native/proposal score profile only",
@@ -278,12 +352,20 @@ def main():
             if do_val:
                 vr=validation(
                     models,args.cache_root,args.validation_source_root,contract,
-                    val_cases,args.val_move_limit,device,args.max_val_files
+                    val_cases,args.val_query_chunk,device,args.max_val_files
                 )
                 row["val"]={}
                 for v,(bv,sweep) in vr.items():
                     row["val"][v]=bv
-                    key=(bv["macro_mean_gain"],bv["macro_beneficial_retention"])
+                    # Checkpoint objective: close the largest fraction of the
+                    # C1 oracle accept/reject headroom. This normalizes across
+                    # nominal/corruption cases with different raw A1 gains.
+                    key=(
+                        bv["macro_oracle_gap_recovery"],
+                        bv["macro_verifier_increment"],
+                        bv["macro_beneficial_retention"],
+                        bv["macro_harmful_rejection"],
+                    )
                     if key>best[v]:
                         best[v]=key
                         save_torch(out/f"checkpoint_{v}.pt",{
