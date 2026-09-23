@@ -6,6 +6,10 @@ from rep_c2v2_common import (
     compact_from_source, full_query_gate_metrics, select_move_subset,
 )
 from rep_c2v2_model import RepC2V2Verifier
+from rep_c2v2_decision import (
+    CONTEXT_FEATURE_NAMES, QUERY_FEATURE_NAMES, context_features, fit_ridge,
+    frame_context, query_features, raw_rule_scores, select_global_threshold,
+)
 
 
 def _payload_and_labels():
@@ -149,3 +153,74 @@ def test_full_query_metrics_reject_all_is_not_confused_with_zero_proposal_denomi
     assert np.isclose(m.oracle_gap_recovery,.5)
     assert np.isclose(m.accept_rate,0.)
     assert np.isclose(m.proposal_rate,.1)
+
+
+
+def _decision_ex():
+    q=4
+    return {
+        "actions":np.zeros((2,q,17),np.float32),
+        "probabilities":np.stack([
+            np.full((q,6),.4,np.float32),
+            np.asarray([
+                [.8]*6,[.6]*6,[.3]*6,[.5]*6
+            ],np.float32),
+        ],0),
+        "offsets_mm":np.array([20.,-20.,10.,-10.],np.float32),
+        "original_native_score":np.linspace(.2,.5,q,dtype=np.float32),
+        "delta_utility":np.array([.2,-.1,0.,.1],np.float32),
+    }
+
+
+def test_decision_features_do_not_require_error_case_or_depth():
+    ex=_decision_ex()
+    cp=np.asarray([
+        [.1,.1,.8],
+        [.7,.1,.2],
+        [.2,.6,.2],
+        [.2,.2,.6],
+    ],np.float32)
+    pd=np.array([.15,-.08,.01,.06],np.float32)
+    raw=raw_rule_scores(cp,pd)
+    assert set(raw)=={"p_beneficial","pred_delta","class_margin","fused_delta"}
+    assert all(v.shape==(4,) for v in raw.values())
+    qf=query_features(ex,cp,pd)
+    xf=context_features(ex,cp,pd,total_queries=10)
+    assert qf.shape==(4,len(QUERY_FEATURE_NAMES))
+    assert xf.shape==(4,len(CONTEXT_FEATURE_NAMES))
+    fc=frame_context(ex,10)
+    assert np.isclose(fc[0],.4)  # proposal rate
+    assert np.isfinite(qf).all() and np.isfinite(xf).all()
+
+
+def test_ridge_calibrator_recovers_simple_delta_relation():
+    rng=np.random.default_rng(3)
+    x=rng.normal(size=(200,3)).astype(np.float32)
+    y=(.3*x[:,0]-.2*x[:,1]+.05).astype(np.float32)
+    cal=fit_ridge(x,y,("a","b","c"),ridge=1e-6,gain_weight=0.)
+    pred=cal.predict(x)
+    assert np.mean(np.abs(pred-y))<1e-3
+
+
+def test_global_threshold_optimizes_full_query_verifier_increment():
+    # Two synthetic cases, each with 10 total queries and four A1 moves.
+    # High scores mark beneficial moves; a selective threshold should beat
+    # accept-all (whose verifier increment is exactly zero).
+    records=[
+        {
+            "case":"nominal",
+            "score":np.array([.9,.8,.2,.1]),
+            "delta":np.array([.2,.1,-.2,-.1]),
+            "total_queries":10,
+        },
+        {
+            "case":"bias:20",
+            "score":np.array([.95,.7,.3,.05]),
+            "delta":np.array([.2,.1,-.1,-.1]),
+            "total_queries":10,
+        },
+    ]
+    best,_=select_global_threshold(records,n_grid=31)
+    assert best["macro_verifier_increment"]>0
+    assert 0<best["macro_oracle_gap_recovery"]<=1
+    assert best["threshold"]>0.3
