@@ -194,6 +194,84 @@ def gate_metrics(prob_beneficial, delta, threshold):
     )
 
 
+@dataclass
+class FullQueryGateMetrics:
+    """Verifier metrics normalized by ALL Stage-1 queries, not proposal count."""
+    threshold: float
+    total_queries: int
+    proposal_count: int
+    verified_gain: float
+    a1_fixed0_gain: float
+    oracle_accept_gain: float
+    verifier_increment: float
+    oracle_gap: float
+    oracle_gap_recovery: float | None
+    accept_rate: float
+    proposal_rate: float
+    beneficial_retention: float
+    harmful_rejection: float
+    accept_precision: float
+    beneficial_count: int
+    harmful_count: int
+    equivalent_count: int
+
+
+def full_query_gate_metrics(prob_beneficial, delta, threshold, total_queries, eps=1e-12):
+    """Evaluate a verifier on the same denominator as downstream full-query utility.
+
+    A1 fixed-0 proposes only on `len(delta)` moved queries. Queries without an
+    A1 move contribute zero relative utility. Therefore all policy gains are
+    normalized by `total_queries`, matching C1/test_rep_c2v2 semantics.
+
+    `verifier_increment` is the direct objective:
+        verified_gain - a1_fixed0_gain
+
+    `oracle_gap_recovery` measures how much of C1's accept/reject headroom is
+    closed:
+        (verified_gain - a1_fixed0_gain)
+        / (oracle_accept_gain - a1_fixed0_gain)
+    """
+    p=np.asarray(prob_beneficial,np.float64)
+    d=np.asarray(delta,np.float64)
+    q=int(total_queries)
+    if p.shape!=d.shape:
+        raise ValueError("gate score/delta shape mismatch")
+    if q < len(d) or q <= 0:
+        raise ValueError(f"total_queries={q} must be >= proposal_count={len(d)}")
+    accept=p>=float(threshold)
+    benefit=d>1e-7
+    harm=d<-1e-7
+    equiv=~(benefit|harm)
+
+    verified=float(np.where(accept,d,0.).sum()/q)
+    a1=float(d.sum()/q)
+    oracle=float(np.maximum(d,0.).sum()/q)
+    increment=verified-a1
+    gap=oracle-a1
+    recovery=(increment/gap) if gap>eps else None
+
+    accepted=int(accept.sum())
+    return FullQueryGateMetrics(
+        threshold=float(threshold),
+        total_queries=q,
+        proposal_count=int(len(d)),
+        verified_gain=verified,
+        a1_fixed0_gain=a1,
+        oracle_accept_gain=oracle,
+        verifier_increment=increment,
+        oracle_gap=gap,
+        oracle_gap_recovery=None if recovery is None else float(recovery),
+        accept_rate=float(accepted/q),
+        proposal_rate=float(len(d)/q),
+        beneficial_retention=float((accept&benefit).sum()/max(1,benefit.sum())),
+        harmful_rejection=float(1-(accept&harm).sum()/max(1,harm.sum())),
+        accept_precision=float((accept&benefit).sum()/max(1,accepted)),
+        beneficial_count=int(benefit.sum()),
+        harmful_count=int(harm.sum()),
+        equivalent_count=int(equiv.sum()),
+    )
+
+
 def tune_threshold(prob_beneficial, delta):
     rows = [gate_metrics(prob_beneficial, delta, t) for t in np.linspace(0,1,101)]
     # Primary target is actual relative utility on full-path proposals.
