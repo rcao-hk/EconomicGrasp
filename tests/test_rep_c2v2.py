@@ -3,7 +3,7 @@ import torch
 
 from rep_c2v2_common import (
     BENEFICIAL, EQUIVALENT, HARMFUL, class_from_delta,
-    compact_from_source, select_move_subset,
+    compact_from_source, full_query_gate_metrics, select_move_subset,
 )
 from rep_c2v2_model import RepC2V2Verifier
 
@@ -109,3 +109,43 @@ def test_c2v2_variants_have_same_parameters_and_valid_outputs():
         assert out["delta"].shape==(q,)
         assert torch.isfinite(out["class_logits"]).all()
         assert torch.isfinite(out["delta"]).all()
+
+
+
+def test_full_query_metrics_use_all_queries_and_define_verifier_increment():
+    # Four moved proposals embedded in ten total Stage-1 queries.
+    delta=np.array([.2,-.1,0.,.3],np.float32)
+    p=np.array([.9,.8,.7,.6],np.float32)
+
+    # Accept all: verifier is exactly A1 fixed-0, so increment/recovery are zero.
+    all_on=full_query_gate_metrics(p,delta,0.,total_queries=10)
+    assert np.isclose(all_on.a1_fixed0_gain,.04)
+    assert np.isclose(all_on.verified_gain,.04)
+    assert np.isclose(all_on.oracle_accept_gain,.05)
+    assert np.isclose(all_on.verifier_increment,0.)
+    assert np.isclose(all_on.oracle_gap,.01)
+    assert np.isclose(all_on.oracle_gap_recovery,0.)
+
+    # A perfect accept/reject policy accepts only positive-delta proposals.
+    perfect=full_query_gate_metrics(
+        np.array([.9,.1,.1,.9]),delta,.5,total_queries=10
+    )
+    assert np.isclose(perfect.verified_gain,.05)
+    assert np.isclose(perfect.verifier_increment,.01)
+    assert np.isclose(perfect.oracle_gap_recovery,1.)
+    assert np.isclose(perfect.beneficial_retention,1.)
+    assert np.isclose(perfect.harmful_rejection,1.)
+
+
+def test_full_query_metrics_reject_all_is_not_confused_with_zero_proposal_denominator():
+    delta=np.array([.2,-.4],np.float32)
+    p=np.zeros(2,np.float32)
+    m=full_query_gate_metrics(p,delta,1.,total_queries=20)
+    assert np.isclose(m.verified_gain,0.)
+    assert np.isclose(m.a1_fixed0_gain,-.01)
+    assert np.isclose(m.oracle_accept_gain,.01)
+    assert np.isclose(m.verifier_increment,.01)
+    assert np.isclose(m.oracle_gap,.02)
+    assert np.isclose(m.oracle_gap_recovery,.5)
+    assert np.isclose(m.accept_rate,0.)
+    assert np.isclose(m.proposal_rate,.1)
