@@ -172,11 +172,12 @@ def main():
         raise RuntimeError("Rep-A cache and C2-v2 training cache contracts differ")
     train_files=load_train_examples(args.train_cache_root,args.max_train_frames)
     counts,cw_np,num_examples=class_weights(train_files)
-    sample=read_frame(train_files[0].parents[2].parent if False else frame_cache_path(
-        args.cache_root,"train",
-        int(train_files[0].parent.name.split("_")[-1]),
-        int(train_files[0].stem.split("_")[-1])
-    ),contract)
+    first_sid=int(train_files[0].parent.name.split("_")[-1])
+    first_aid=int(train_files[0].stem.split("_")[-1])
+    sample=read_frame(
+        frame_cache_path(args.cache_root,"train",first_sid,first_aid),
+        contract,
+    )
     image_channels=int(sample["image_feature"].shape[0])
     del sample,reader_init
 
