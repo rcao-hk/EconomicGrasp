@@ -160,8 +160,14 @@ Specify `DATASET_ROOT` in every invocation when it differs from the default.
 E1/E2 training uses one GPU per variant, not DDP; `GRAD_ACCUM_STEPS` is the
 effective frame-batch size (one online RGB frame per forward). Preparation and
 inference shard scenes across all listed GPUs, including within a single split.
-Preparation owns one CAD/DexNet evaluator per GPU worker; start with 1--2 workers
-and check RAM before increasing concurrency. No GPU-holder is needed.
+Official evaluation now uses the same GPU list as **split-level concurrency
+slots**: with `GPUS=0,1,2`, Seen/Similar/Novel for one variant run
+concurrently; with two GPUs they run in waves of two. GraspNetEval itself is
+CPU-heavy rather than GPU-accelerated, so the approximate CPU evaluator
+parallelism per wave is `num_active_splits * OFFICIAL_WORKERS`. Avoid setting
+both values too high for host RAM/CPU. Preparation owns one CAD/DexNet evaluator
+per GPU worker; start with 1--2 workers and check RAM before increasing
+concurrency. No GPU-holder is needed.
 
 ## Same-budget no-error-training control
 
