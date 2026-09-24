@@ -139,13 +139,23 @@ for phase in "${STEPS[@]}"; do
     eval|official)
       methods=native,model
       for v in "${MODES[@]}"; do
+        # Parallelize official evaluation by split using GPUS as concurrency
+        # slots, matching inference/test scheduling. GraspNetEval itself is
+        # CPU-heavy; CUDA_VISIBLE_DEVICES only assigns a stable slot and the
+        # number of simultaneous split evaluators is capped by |GPUS|.
+        slot=0
         for split in "${TESTS[@]}"; do
-          launch "official/$v/$split" "" "$WORK_ROOT/logs/official_${v}_${split}.log" \
+          launch "official/$v/$split" "${GPU_IDS[$slot]}" "$WORK_ROOT/logs/official_${v}_${split}.log" \
             "$ROOT_DIR/eval_e1e2_cva.py" --dataset-root "$DATASET_ROOT" \
             --inference-root "$WORK_ROOT/test/$v" --split "$split" \
             --methods "$methods" --workers "$OFFICIAL_WORKERS" "${resume[@]}"
-          wait_wave
+          slot=$((slot+1))
+          if ((slot==${#GPU_IDS[@]})); then
+            wait_wave
+            slot=0
+          fi
         done
+        wait_wave
         # Native generator is shared. Avoid repeating its expensive official AP.
         methods=model
       done
