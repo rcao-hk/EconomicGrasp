@@ -218,3 +218,43 @@ translation/insertion-depth separation, native tie handling, online gradient
 flow and immutable reference parameters with explicit lightweight module mocks.
 No claim is made that real Stage-1 checkpoints, CUDA kernels or GraspNet CAD data
 were executed in the development container. Run the server smoke above first.
+
+
+## E1 mechanism follow-ups: E1-1 ... E1-4
+
+These wrappers keep the E1 architecture fixed and isolate four questions.
+
+| Experiment | Definition | Main question |
+|---|---|---|
+| E1-1 | Full E1: structured depth-error training + model CDF ranking | Reference result |
+| E1-2 | Same architecture/cache, nominal-only training | Does robustness require structured error training rather than candidate expansion alone? |
+| E1-3 | Reuse E1-1 center selection but emit immutable Stage-1 query score | How much official-AP gain comes from physical action correction versus E1 score recalibration? |
+| E1-4 | Reuse E1-1 checkpoint on off-grid/out-of-support/scale/smooth corruptions | Does correction generalize beyond the exact +/-20-mm condition? |
+
+Run them with:
+
+```bash
+GPUS=0,1,2 OFFICIAL_WORKERS=2 bash scripts/run_e1_1_full.sh
+GPUS=0,1,2 OFFICIAL_WORKERS=2 bash scripts/run_e1_2_no_error.sh
+GPUS=0,1,2 OFFICIAL_WORKERS=2 bash scripts/run_e1_3_action_only.sh
+GPUS=0,1,2 OFFICIAL_WORKERS=2 bash scripts/run_e1_4_corruption_suite.sh
+```
+
+E1-2 reuses `E1_BASE_ROOT/action_cache`; E1-3/E1-4 reuse
+`E1_BASE_ROOT/train/E1/checkpoint_best.pt`. The generic launcher now accepts
+`TRAIN_ROOT` independently from `WORK_ROOT`, so control inference writes into
+separate roots without copying or retraining E1-1.
+
+E1-4 defaults to:
+
+```text
+nominal
+bias:-15, bias:+15
+bias:-25, bias:+25
+scale:-0.03, scale:+0.03
+smooth:5, smooth:10
+```
+
+Override this with `E1_4_CASES=...` or `TEST_CASES=...`. +/-15 mm is off the
+center-error test grid, +/-25 mm is outside the +/-20-mm global-bias training
+support, and scale/smooth test error families beyond a constant global offset.
