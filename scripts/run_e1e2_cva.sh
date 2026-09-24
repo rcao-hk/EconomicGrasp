@@ -4,6 +4,7 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN=${PYTHON_BIN:-python}
 WORK_ROOT=${WORK_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/e1e2_cva_10pct}
 CACHE_ROOT=${CACHE_ROOT:-$WORK_ROOT/action_cache}
+TRAIN_ROOT=${TRAIN_ROOT:-$WORK_ROOT/train}
 DATASET_ROOT=${DATASET_ROOT:-/data/robotarm/dataset/graspnet}
 STAGE1_CKPT=${STAGE1_CKPT:-/data2/robotarm/result/grasp/rgbgrasp/log/economicgrasp_dpt_cva_cdf_distill_stage1/epoch_15_train_0.6009606198008898_val_1.1028128399874995.tar}
 GPUS=${GPUS:-0}
@@ -109,7 +110,7 @@ for phase in "${STEPS[@]}"; do
         launch "train/$v" "${GPU_IDS[$slot]}" "$WORK_ROOT/logs/train_${v}.log" \
           "$ROOT_DIR/train_e1e2_cva.py" \
           --dataset-root "$DATASET_ROOT" --stage1-checkpoint "$STAGE1_CKPT" \
-          --cache-root "$CACHE_ROOT" --output-root "$WORK_ROOT/train/$v" --variant "$v" \
+          --cache-root "$CACHE_ROOT" --output-root "$TRAIN_ROOT/$v" --variant "$v" \
           --epochs "$EPOCHS" --lr "$LR" --weight-decay "$WEIGHT_DECAY" \
           --grad-accum "$GRAD_ACCUM_STEPS" --relative-weight "$RELATIVE_WEIGHT" --relative-beta "$RELATIVE_BETA" \
           --query-chunk "$QUERY_CHUNK" --group-chunk "$GROUP_CHUNK" --val-every "$VAL_EVERY" \
@@ -127,7 +128,7 @@ for phase in "${STEPS[@]}"; do
             launch "infer/$v/$split/$s" "${GPU_IDS[$s]}" "$WORK_ROOT/logs/infer_${v}_${split}_${s}.log" \
               "$ROOT_DIR/inference_e1e2_cva.py" \
               --dataset-root "$DATASET_ROOT" --stage1-checkpoint "$STAGE1_CKPT" \
-              --checkpoint "$WORK_ROOT/train/$v/checkpoint_best.pt" --output-root "$WORK_ROOT/test/$v" \
+              --checkpoint "$TRAIN_ROOT/$v/checkpoint_best.pt" --output-root "$WORK_ROOT/test/$v" \
               --split "$split" --cases "$TEST_CASES" --sample-interval "$SAMPLE_INTERVAL" \
               --query-limit "$INFER_QUERIES" --score-source "$SCORE_SOURCE" --max-frames "$INFER_MAX_FRAMES" \
               --shard-id "$s" --num-shards "${#GPU_IDS[@]}" "${resume[@]}"
