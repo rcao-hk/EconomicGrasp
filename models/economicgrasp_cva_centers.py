@@ -168,7 +168,7 @@ class CenterHypothesisCVA(nn.Module):
         feature = F.interpolate(enhanced, size=(h, w), mode='bilinear', align_corners=False)
         return feature, proposal_logits
 
-    def score_bundle(self, feature, proposal_logits, batch, active_depth, bundle):
+    def score_bundle(self, feature, proposal_logits, batch, active_depth, bundle, return_features=False):
         from utils.label_generation import batch_viewpoint_params_to_matrix
         actions, valid = bundle['actions'], bundle['valid']
         c, q = valid.shape
@@ -196,9 +196,15 @@ class CenterHypothesisCVA(nn.Module):
         ai = bundle['angle_ids'].repeat(c)
         di = bundle['depth_ids'].repeat(c)
         # Fixed R/w/insertion depth. Other A,D outputs are not given stale labels.
-        return grid[qi, ai, di].reshape(c, q, 6)
+        logits = grid[qi, ai, di].reshape(c, q, 6)
+        if return_features:
+            # Latent for this exact native angle and translated center. No
+            # change to old logits, grouping, decoder state or action labels.
+            latent = grouped[0].T.reshape(c*q, a, -1)[qi, ai].reshape(c, q, -1)
+            return logits, latent
+        return logits
 
-    def forward(self, batch, bundle=None, case='nominal', case_seed=0, query_limit=0, query_chunk=64, depth_pack=None):
+    def forward(self, batch, bundle=None, case='nominal', case_seed=0, query_limit=0, query_chunk=64, depth_pack=None, return_features=False):
         if batch['img'].shape[0] != 1:
             raise ValueError('Use one frame per call; gradient accumulation controls effective batch size')
         if query_chunk < 1:
@@ -210,11 +216,17 @@ class CenterHypothesisCVA(nn.Module):
                                                   self.offsets_mm.cpu().numpy(), query_limit)
         feature, proposal_logits = self.encode_image(batch, pack, active)
         n = bundle['actions'].shape[1]
-        outputs = []
+        outputs, latents = [], []
         for start in range(0, n, query_chunk):
             end = min(n, start+query_chunk)
             sub = {k: (v[:, start:end] if k in ('actions', 'valid') else
                        v[start:end] if k in ('token_ids', 'view_xyz', 'angle_ids', 'depth_ids') else v)
                    for k, v in bundle.items()}
-            outputs.append(self.score_bundle(feature, proposal_logits, batch, active, sub))
-        return torch.cat(outputs, 1), bundle, pack[0]
+            result = self.score_bundle(feature, proposal_logits, batch, active, sub, return_features)
+            if return_features:
+                logits, latent = result
+                outputs.append(logits); latents.append(latent)
+            else:
+                outputs.append(result)
+        result = (torch.cat(outputs, 1), bundle, pack[0])
+        return (*result, torch.cat(latents, 1)) if return_features else result
