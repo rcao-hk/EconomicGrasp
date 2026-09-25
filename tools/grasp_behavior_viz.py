@@ -841,11 +841,26 @@ def write_csv(path: str | Path, rows: Sequence[Mapping[str, Any]]) -> None:
         w.writerows(rows)
 
 
+def _json_default(value: Any):
+    if torch.is_tensor(value):
+        x = value.detach().cpu()
+        return x.item() if x.ndim == 0 else x.tolist()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Path):
+        return str(value)
+    raise TypeError(f"Not JSON serializable: {type(value)!r}")
+
+
 def write_json(path: str | Path, obj: Any) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, indent=2, sort_keys=True, allow_nan=True),
-                    encoding="utf-8")
+    path.write_text(
+        json.dumps(obj, indent=2, sort_keys=True, allow_nan=True,
+                   default=_json_default),
+        encoding="utf-8")
 
 
 def make_contact_sheet(path: str | Path, images: Sequence[Tuple[str, Path]],
