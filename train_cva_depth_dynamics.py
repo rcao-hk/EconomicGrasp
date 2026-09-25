@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import copy
 import contextlib
+import csv
 import hashlib
 import inspect
 import json
@@ -17,6 +18,7 @@ import math
 import os
 from pathlib import Path
 import random
+import re
 import subprocess
 import sys
 import time
@@ -33,6 +35,7 @@ WEIGHT_KEYS = {
     "cdf": "score_loss_weight", "width": "width_loss_weight",
 }
 FORMAT_VERSION = 1
+EVENT_STATE_VERSION = 2
 
 
 def parse_args(argv=None):
@@ -123,6 +126,202 @@ def git_info():
 
 def stable_seed(*parts):
     return int.from_bytes(hashlib.sha256("/".join(map(str, parts)).encode()).digest()[:4], "little")
+
+
+def advance_flat_event_state(previous, *, step, fraction_flat):
+    """Advance fixed-probe events without calling initial flatness a collapse.
+
+    Initially nonflat runs are immediately eligible. Initially flat runs need
+    three consecutive nonflat probes before a subsequent flat event is eligible.
+    "Nonflat" describes the existing std-ratio criterion, not depth accuracy.
+    Legacy warm checkpoints lack a recorded reference fraction: their first
+    eligible resumed probe establishes a prospective baseline. Mild changes
+    before that observation cannot be dated; existing event timestamps survive.
+    """
+    if isinstance(step, bool) or int(step) != step or step < 0:
+        raise ValueError("Event step must be a nonnegative integer")
+    step = int(step)
+    if fraction_flat is not None:
+        fraction_flat = float(fraction_flat)
+        if not math.isfinite(fraction_flat) or not 0. <= fraction_flat <= 1.:
+            raise ValueError("Flat-image fraction must be finite in [0,1], or None")
+    state = dict(previous or {})
+    legacy = state.get("event_state_version") is None and state.get("initial_flat") is not None
+    defaults = {"initial_flat": None, "first_anomaly": None, "first_threshold": None,
+                "confirmed_event": None, "consecutive_thresholds": 0,
+                "initial_observation_step": None, "nonflat_established": False,
+                "first_nonflat_step": None, "nonflat_confirmed_step": None,
+                "nonflat_candidate_step": None, "consecutive_nonflat": 0,
+                "reference_flat_fraction": None, "event_origin": None,
+                "migration_reference_unknown": False,
+                "migration_observation_baseline_step": None,
+                "migration_observation_baseline_fraction": None,
+                "last_observation_step": None, "last_fraction_flat": None}
+    for key, value in defaults.items():
+        state.setdefault(key, value)
+    if legacy:
+        # Old warm runs were eligible from initialization. Old flat runs did
+        # not record whether they later gained structure; do not invent history.
+        state["nonflat_established"] = state["initial_flat"] is False or state["first_threshold"] is not None
+        state["migration_reference_unknown"] = state["nonflat_established"] and state["reference_flat_fraction"] is None
+        state["migration_note"] = (
+            "legacy event timestamps retained; unknown nonflat timestamps are not inferred; "
+            "an unknown warm reference is observed at the first eligible resumed probe, "
+            "so earlier mild changes cannot be dated; flat-start emergence is observed prospectively")
+    state["event_state_version"] = EVENT_STATE_VERSION
+    last_step = state["last_observation_step"]
+    if last_step is not None and step <= last_step:
+        if step == last_step and fraction_flat == state["last_fraction_flat"]:
+            return state  # Repeated diagnostics at one update are not new evidence.
+        raise ValueError("Event observations must advance optimizer steps; conflicting/reordered probe")
+    state["last_observation_step"], state["last_fraction_flat"] = step, fraction_flat
+    if fraction_flat is None:
+        state["consecutive_thresholds"] = 0
+        state["consecutive_nonflat"] = 0
+        state["nonflat_candidate_step"] = None
+        state["observation_status"] = "no_eligible_images"
+        return state
+    flat = fraction_flat >= .8
+    state["observation_status"] = "flat_threshold" if flat else "nonflat_threshold"
+    if state["initial_flat"] is None:
+        state["initial_flat"] = flat
+        state["initial_observation_step"] = step
+        if not flat:
+            state.update(nonflat_established=True, first_nonflat_step=step,
+                         nonflat_confirmed_step=step, reference_flat_fraction=fraction_flat)
+        return state
+    if not state["nonflat_established"]:
+        if flat:
+            state["consecutive_nonflat"] = 0
+            state["nonflat_candidate_step"] = None
+        else:
+            if state["first_nonflat_step"] is None:
+                state["first_nonflat_step"] = step
+            if state["consecutive_nonflat"] == 0:
+                state["nonflat_candidate_step"] = step
+            state["consecutive_nonflat"] += 1
+            if state["consecutive_nonflat"] >= 3:
+                state.update(nonflat_established=True, nonflat_confirmed_step=step,
+                             reference_flat_fraction=fraction_flat)
+        state["consecutive_thresholds"] = 0
+        return state
+    if state["migration_reference_unknown"] and state["migration_observation_baseline_step"] is None:
+        state["migration_observation_baseline_step"] = step
+        state["migration_observation_baseline_fraction"] = fraction_flat
+        state["reference_flat_fraction"] = fraction_flat
+    reference = state["reference_flat_fraction"]
+    if state["first_anomaly"] is None and (flat or (reference is not None and fraction_flat > reference)):
+        state["first_anomaly"] = step
+    if not flat and (reference is None or fraction_flat < reference):
+        state["reference_flat_fraction"] = fraction_flat
+    if flat and state["first_threshold"] is None:
+        state["first_threshold"] = step
+        state["event_origin"] = "lost_after_nonflat_emergence" if state["initial_flat"] else "loss_of_initial_nonflat_structure"
+    state["consecutive_thresholds"] = state["consecutive_thresholds"] + 1 if flat else 0
+    if state["consecutive_thresholds"] >= 3 and state["confirmed_event"] is None:
+        state["confirmed_event"] = step
+    return state
+
+
+def assert_resume_outputs_not_newer(output, diagnostics, checkpoint_step):
+    """Read-only guard against appending a branched history to an existing run."""
+    try:
+        integer_step = int(checkpoint_step)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("Resume checkpoint step must be a nonnegative integer") from error
+    if isinstance(checkpoint_step, bool) or integer_step != checkpoint_step or integer_step < 0:
+        raise ValueError("Resume checkpoint step must be a nonnegative integer")
+    checkpoint_step = integer_step
+    folders = {Path(output).resolve(), Path(diagnostics).resolve()}
+    checked = {}
+    newer = []
+
+    def observe(path, value, location):
+        if isinstance(value, bool):
+            raise ValueError(f"Malformed optimizer step in {path}:{location}")
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Malformed optimizer step in {path}:{location}") from error
+        if not math.isfinite(number) or number < 0 or int(number) != number:
+            raise ValueError(f"Malformed optimizer step in {path}:{location}")
+        number = int(number)
+        checked[str(path)] = max(number, checked.get(str(path), -1))
+        if number > checkpoint_step:
+            newer.append({"path": str(path), "location": location, "step": number})
+
+    paths = {path for folder in folders if folder.exists() for pattern in ("*.jsonl", "*.csv")
+             for path in folder.glob(pattern)}
+    for path in sorted(paths):
+        try:
+            if path.suffix == ".jsonl":
+                with path.open(encoding="utf-8") as handle:
+                    for line_number, line in enumerate(handle, 1):
+                        if not line.strip():
+                            continue
+                        row = json.loads(line)
+                        if not isinstance(row, dict):
+                            raise ValueError(f"Non-object JSONL record in {path}:{line_number}")
+                        if "step" in row:
+                            observe(path, row["step"], f"line {line_number}")
+            else:
+                with path.open(newline="", encoding="utf-8") as handle:
+                    reader = csv.DictReader(handle, strict=True)
+                    fields = reader.fieldnames
+                    if fields is None:
+                        continue
+                    if any(not field for field in fields) or len(set(fields)) != len(fields):
+                        raise csv.Error("Missing or duplicate CSV column name")
+                    for row in reader:
+                        if None in row or any(value is None for value in row.values()):
+                            raise csv.Error(f"Missing or extra CSV columns at line {reader.line_num}")
+                        if "step" in fields:
+                            observe(path, row["step"], f"line {reader.line_num}")
+        except (json.JSONDecodeError, csv.Error) as error:
+            raise ValueError(f"Cannot safely resume: malformed log {path}; use a new run directory") from error
+    for folder in folders:
+        for filename in ("latest_checkpoint.json", "checkpoints_manifest.json", "contract.json", "failure.json"):
+            path = folder / filename
+            if not path.exists():
+                continue
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as error:
+                raise ValueError(f"Cannot safely resume: malformed metadata {path}") from error
+            if filename == "checkpoints_manifest.json":
+                if not isinstance(value, list):
+                    raise ValueError(f"Malformed checkpoint manifest {path}")
+                for index, entry in enumerate(value):
+                    if not isinstance(entry, dict):
+                        raise ValueError(f"Malformed checkpoint manifest entry in {path}:{index}")
+                    observe(path, entry.get("step"), f"entry {index}")
+            elif filename == "contract.json":
+                if not isinstance(value, dict):
+                    raise ValueError(f"Malformed contract {path}")
+                for field in ("completion", "resume", "audit"):
+                    if isinstance(value.get(field), dict) and "step" in value[field]:
+                        observe(path, value[field]["step"], field)
+            else:
+                if not isinstance(value, dict):
+                    raise ValueError(f"Malformed metadata {path}")
+                if "step" in value:
+                    observe(path, value["step"], filename)
+        if folder.exists():
+            for path in folder.glob("fixed_frame_*.pt"):
+                match = re.fullmatch(r"fixed_frame_(\d+)\.pt", path.name)
+                if match:
+                    observe(path, match.group(1), "filename")
+    checkpoint_dir = Path(output) / "checkpoints"
+    if checkpoint_dir.exists():
+        for path in checkpoint_dir.glob("step_*.*"):
+            match = re.fullmatch(r"step_(\d+)\.(pt|partial)", path.name)
+            if match:
+                observe(path, match.group(1), "filename")
+    if newer:
+        evidence = "; ".join(f"{entry['path']} ({entry['location']}, step {entry['step']})" for entry in newer[:5])
+        raise ValueError(f"Cannot resume checkpoint step {checkpoint_step} into outputs containing newer history: {evidence}. "
+                         "Use a new output and diagnostics directory; existing logs are never truncated automatically.")
+    return {"checkpoint_step": checkpoint_step, "max_step_by_file": checked, "status": "no_newer_history"}
 
 
 def compare_state(left, right, *, atol=0.0, rtol=0.0, path="state"):
@@ -225,6 +424,15 @@ class Experiment:
         self.diag = Path(args.diagnostics_dir).resolve() if args.diagnostics_dir else self.output / "diagnostics"
         if not args.resume_checkpoint and self.output.exists() and any(self.output.iterdir()):
             raise FileExistsError(f"Refusing to overwrite existing run: {self.output}")
+        resume_state = None
+        self.resume_output_check = None
+        if args.resume_checkpoint:
+            # Run this before Trainer opens text/TensorBoard logs or we overwrite
+            # any manifests. A failed guard must leave the existing run intact.
+            resume_state = torch.load(args.resume_checkpoint, map_location="cpu", weights_only=False)
+            if resume_state.get("format_version") != FORMAT_VERSION or "step" not in resume_state:
+                raise ValueError("Resume requires a full dynamics checkpoint")
+            self.resume_output_check = assert_resume_outputs_not_newer(self.output, self.diag, resume_state["step"])
         self.output.mkdir(parents=True, exist_ok=True)
         self.diag.mkdir(parents=True, exist_ok=True)
         self.checkpoint_dir = self.output / "checkpoints"
@@ -284,7 +492,8 @@ class Experiment:
         self.step, self.seen_images = 0, 0
         self.initial_epoch = int(self.source.get("epoch", 0))
         self.events = {"initial_flat": None, "first_anomaly": None, "first_threshold": None,
-                       "confirmed_event": None, "consecutive_thresholds": 0}
+                       "confirmed_event": None, "consecutive_thresholds": 0,
+                       "event_state_version": EVENT_STATE_VERSION}
         self.manifest = []
         self.locked_steps = set()
         self.probe_previous = {}
@@ -332,7 +541,10 @@ class Experiment:
                              "schedule": args.lr_schedule, "scheduler_state": "derived source_epoch + stream.epoch",
                              "source_epoch": self.initial_epoch, "scaler": None},
             "events": {"std_ratio_threshold": 0.1, "eligible_gt_std_min_m": 0.005,
-                       "fraction_images": 0.8, "confirmations": 3, "locked_before_training": True},
+                       "fraction_images": 0.8, "confirmations": 3, "locked_before_training": True,
+                       "state_version": EVENT_STATE_VERSION, "initially_flat_nonflat_confirmations": 3,
+                       "nonflat_means": "fraction_flat < 0.8; this does not assert accurate depth",
+                       "event_split": "fixed train frames, eval mode", "missing_eligible_images": "unclassified; streaks reset"},
             "probe_policy": {"frames": self.probe_specs, "modes": ["train", "eval"],
                              "depth_masks_pairs": "fixed GT and same-instance pixel pairs",
                              "task_loss": "native selection/assignment under fixed frame and RNG; not frozen physical-query loss",
@@ -360,7 +572,7 @@ class Experiment:
                                            for item in self.probe_cache]
         self.init_rng = dd.capture_rng_state()
         if args.resume_checkpoint:
-            self.resume(args.resume_checkpoint)
+            self.resume(args.resume_checkpoint, state=resume_state)
         self.write_contract()
         # Do not keep a second model-sized copy alive in CPU memory.
         self.source = {k: v for k, v in self.source.items() if k not in ("model_state_dict", "optimizer_state_dict")}
@@ -748,17 +960,10 @@ class Experiment:
                 and entry["regions"]["foreground"]["gt_std"] > 0.005
                 and entry["regions"]["foreground"]["std_ratio"] is not None]
         fraction = sum(value < .1 for value in data) / len(data) if data else None
-        if self.events["initial_flat"] is None:
-            self.events["initial_flat"] = bool(fraction is not None and fraction >= .8)
-        threshold = bool(fraction is not None and fraction >= .8 and not self.events["initial_flat"])
-        if fraction is not None and fraction > 0 and self.step > 0 and self.events["first_anomaly"] is None:
-            self.events["first_anomaly"] = self.step
+        previous_anomaly = self.events.get("first_anomaly")
+        self.events = advance_flat_event_state(self.events, step=self.step, fraction_flat=fraction)
+        if previous_anomaly is None and self.events["first_anomaly"] is not None:
             self.locked_steps.update(row["step"] for row in self.manifest[-6:])
-        if threshold and self.events["first_threshold"] is None:
-            self.events["first_threshold"] = self.step
-        self.events["consecutive_thresholds"] = self.events["consecutive_thresholds"] + 1 if threshold else 0
-        if self.events["consecutive_thresholds"] >= 3 and self.events["confirmed_event"] is None:
-            self.events["confirmed_event"] = self.step
         dd.append_jsonl(self.diag / "events.jsonl", {"step": self.step, "eligible_frames": len(data),
             "fraction_flat": fraction, "per_image_std_ratios": data, **self.events})
 
@@ -800,10 +1005,11 @@ class Experiment:
         print(f"[checkpoint] step={self.step} path={destination}", flush=True)
         return destination
 
-    def resume(self, path):
-        state = torch.load(path, map_location="cpu", weights_only=False)
+    def resume(self, path, state=None):
+        state = torch.load(path, map_location="cpu", weights_only=False) if state is None else state
         if state.get("format_version") != FORMAT_VERSION:
             raise ValueError("Resume requires a full dynamics checkpoint")
+        self.resume_output_check = assert_resume_outputs_not_newer(self.output, self.diag, state["step"])
         for key, current in (("init_sha256", self.init_sha), ("routes", self.model.get_depth_grad_routes()),
                              ("train_manifest_sha256", self.contract["data"]["train_manifest_sha256"])):
             if state[key] != current:
@@ -834,9 +1040,8 @@ class Experiment:
         manifest_path = self.diag / "checkpoints_manifest.json"
         if manifest_path.exists():
             self.manifest = json.loads(manifest_path.read_text())
-        if any(entry["step"] > self.step and not entry.get("deleted_after_retention") for entry in self.manifest):
-            raise ValueError("Resume from an older snapshot into a new output directory to avoid forking an existing trajectory")
-        self.contract["resume"] = {"path": str(Path(path).resolve()), "sha256": dd.sha256_file(path), "step": self.step}
+        self.contract["resume"] = {"path": str(Path(path).resolve()), "sha256": dd.sha256_file(path), "step": self.step,
+                                   "output_history_check": self.resume_output_check}
 
     def verify_diagnostic_step(self):
         """Two no-audit controls plus audit replay, retaining strict results.
