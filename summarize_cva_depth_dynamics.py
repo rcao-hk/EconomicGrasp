@@ -415,12 +415,33 @@ def render_gradient_maps(files, output):
         maxima = [value for value in maxima if finite(value)]
         observed = max(maxima) if maxima else None
         bound = observed if observed is not None and observed > 0 else 1.0
-        threshold = max(bound * 1e-3, 1e-300)
+        # Pool every finite nonzero pixel before choosing a SINGLE endpoint
+        # threshold. A sparse large task derivative must not wash out the dense
+        # depth-loss maps; the signed maximum remains exact and unclipped.
+        nonzero_chunks = []
+        for item in loaded:
+            for objective in objectives:
+                value = item["maps"][objective + "_wrt_" + endpoint]
+                if value is not None:
+                    magnitudes = np.abs(value[np.isfinite(value) & (value != 0)])
+                    if magnitudes.size:
+                        nonzero_chunks.append(magnitudes)
+        pooled_count = sum(int(chunk.size) for chunk in nonzero_chunks)
+        pooled_median = (float(np.median(np.concatenate(nonzero_chunks).astype(np.float64)))
+                         if nonzero_chunks else None)
+        maximum_based_threshold = bound * 1e-3
+        threshold = max(min(maximum_based_threshold, pooled_median)
+                        if pooled_median is not None else maximum_based_threshold, 1e-300)
         norms[endpoint] = SymLogNorm(linthresh=threshold, linscale=1.0, vmin=-bound, vmax=bound, base=10)
         metadata["scales"][endpoint] = {
             "normalization": "SymLogNorm", "colormap": "RdBu_r", "base": 10,
             "observed_global_max_abs_finite": observed, "vmin": -bound, "vmax": bound,
-            "linthresh": threshold, "linthresh_fraction_of_global_display_max": 1e-3, "linscale": 1.0,
+            "linthresh": threshold, "linthresh_fraction_of_global_display_max": threshold / bound,
+            "linthresh_formula": "max(min(global_display_max_abs * 1e-3, pooled_nonzero_abs_median), 1e-300); without nonzero pixels use global_display_max_abs * 1e-3",
+            "linthresh_maximum_based_candidate": maximum_based_threshold,
+            "pooled_nonzero_abs_median": pooled_median, "pooled_nonzero_finite_count": pooled_count,
+            "pooled_median_scope": "all finite nonzero pixels, equally weighted, across every loaded route, objective and bundle for this endpoint",
+            "linscale": 1.0,
             "zero_or_no_finite_data_display_fallback": observed is None or observed == 0,
             "locked_before_rendering": True,
         }
