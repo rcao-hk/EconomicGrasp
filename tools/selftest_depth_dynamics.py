@@ -176,6 +176,32 @@ def test_fixed_metrics_and_rng():
     assert row["regions"]["valid"]["finite_count"] == 15
 
 
+def test_repeated_adam_snapshot_replay():
+    torch.manual_seed(19)
+    model = nn.Linear(3, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=.02, weight_decay=.1)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=.9)
+    x, target = torch.randn(5, 3), torch.randn(5, 2)
+
+    def step():
+        optimizer.zero_grad(set_to_none=True)
+        (model(x)-target).square().mean().backward()
+        optimizer.step()
+        scheduler.step()
+
+    step()  # Populate moments and Adam's mutable CPU step tensors.
+    reference = snapshot_state(model, optimizer, scheduler, step=1)
+    pristine_reference = copy.deepcopy(reference)
+    outcomes = []
+    for _ in range(3):
+        restore_snapshot(reference, model, optimizer, scheduler)
+        step()
+        outcomes.append(snapshot_state(model, optimizer, scheduler, step=2))
+        assert_tree_equal(reference, pristine_reference)
+    for outcome in outcomes[1:]:
+        assert_tree_equal(outcome, outcomes[0])
+
+
 def test_directional_derivative():
     pred = torch.tensor([[[.3, .4], [.6, .8]]], dtype=torch.float64, requires_grad=True)
     gt = torch.tensor([[[.4, .5], [.7, .9]]], dtype=torch.float64)
@@ -210,7 +236,8 @@ def test_serialization():
 
 if __name__ == "__main__":
     tests = [test_gradient_states_and_weights, test_state_guard_and_trajectory,
-             test_fixed_metrics_and_rng, test_directional_derivative, test_serialization]
+             test_fixed_metrics_and_rng, test_repeated_adam_snapshot_replay,
+             test_directional_derivative, test_serialization]
     for test in tests:
         test()
         print("PASS", test.__name__)

@@ -121,6 +121,27 @@ def stable_seed(*parts):
     return int.from_bytes(hashlib.sha256("/".join(map(str, parts)).encode()).digest()[:4], "little")
 
 
+def compare_state(left, right, *, atol=0.0, rtol=0.0, path="state"):
+    """Compare nested optimizer/RNG state without conflating None and zeros."""
+    if torch.is_tensor(left) or torch.is_tensor(right):
+        if not (torch.is_tensor(left) and torch.is_tensor(right)) or left.shape != right.shape:
+            return [path + ": tensor shape/type"]
+        a, b = left.detach().cpu(), right.detach().cpu()
+        equal = torch.allclose(a, b, atol=atol, rtol=rtol) if a.is_floating_point() else torch.equal(a, b)
+        return [] if equal else [path + ": tensor values"]
+    if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
+        return [] if isinstance(left, np.ndarray) and isinstance(right, np.ndarray) and np.array_equal(left, right) else [path + ": numpy values"]
+    if isinstance(left, dict) and isinstance(right, dict):
+        if left.keys() != right.keys():
+            return [path + ": keys"]
+        return [error for key in left for error in compare_state(left[key], right[key], atol=atol, rtol=rtol, path=f"{path}.{key}")]
+    if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+        if len(left) != len(right):
+            return [path + ": length"]
+        return [error for i, (a, b) in enumerate(zip(left, right)) for error in compare_state(a, b, atol=atol, rtol=rtol, path=f"{path}.{i}")]
+    return [] if left == right else [path + ": values"]
+
+
 class DeterministicStream:
     """Real shuffled epochs, no worker prefetch and an exactly serializable cursor."""
     def __init__(self, dataset, batch_size, seed, collate, capture_rng, restore_rng):
@@ -215,6 +236,11 @@ class Experiment:
             "pose_depth_mode", "camera_pose_key", "camera_gravity_key", "pose_hidden_dim",
             "ray_gravity_hidden_dim", "ray_gravity_mid_dim") if key in self.source}
         for key, value in inherited.items():
+            # The source checkpoint records constructor-only metadata that is
+            # intentionally absent from utils.arguments. Validate those actual
+            # model values after construction; never forward nonexistent flags.
+            if key != "pose_depth_mode":
+                continue
             token = "--" + key
             explicit = None
             for i, item in enumerate(remaining):
@@ -239,6 +265,10 @@ class Experiment:
         self.original, self.cfg = original, original.cfgs
         self.trainer = original.Trainer()
         self.model, self.optimizer = self.trainer.unwrap_model(), self.trainer.optimizer
+        for key, expected in inherited.items():
+            if getattr(self.model, key, None) != expected:
+                raise ValueError(f"Checkpoint model contract mismatch: {key}={expected!r}, "
+                                 f"actual={getattr(self.model, key, None)!r}")
         if not hasattr(self.model, "set_depth_grad_routes"):
             raise RuntimeError("Model lacks the E/Q/C gradient route controls")
         result = self.model.load_state_dict(self.source["model_state_dict"], strict=True)
@@ -458,6 +488,8 @@ class Experiment:
                     rows = dd.audit_gradients(self.losses(endpoints), self.groups,
                                               weights=self.weights, observations=observations)
                     for row in rows:
+                        if row["state"] == "nonfinite":
+                            connectivity_pass = False
                         row.update(step=self.step, arm=self.args.arm, batch=batch_id, route=route,
                                    indices=indices, split=split)
                         dd.append_jsonl(self.diag / "gradient_audit.jsonl", json_safe(row))
@@ -467,7 +499,10 @@ class Experiment:
                         target = endpoints["depth_net_pred"]
                         grad = torch.autograd.grad(term_loss, target, retain_graph=True, allow_unused=True,
                                                    materialize_grads=False)[0] if term_loss.requires_grad and target.requires_grad else None
-                        status = "unused" if grad is None else ("connected_nonzero" if bool(grad.ne(0).any()) else "connected_zero")
+                        status = "unused" if grad is None else ("nonfinite" if not bool(torch.isfinite(grad).all())
+                            else ("connected_nonzero" if bool(grad.ne(0).any()) else "connected_zero"))
+                        if status == "nonfinite":
+                            connectivity_pass = False
                         dd.append_jsonl(self.diag / "output_connectivity.jsonl", {"step": self.step, "batch": batch_id,
                             "route": route, "loss": term, "status": status,
                             "norm": float(grad.norm()) if grad is not None else None})
@@ -478,7 +513,10 @@ class Experiment:
                         if route in route_nonzero and term != "depth" and status == "connected_nonzero":
                             route_nonzero[route] = True
                     self.directional_probe(endpoints, route, batch_id)
-                    del endpoints, loss, rows
+                    # Route aliases and the final scalar loss also retain the
+                    # graph. Release them before constructing the next route's
+                    # forward, otherwise a one-batch audit can peak at 2 graphs.
+                    del endpoints, loss, rows, observations, term_loss, target, grad, value
             print(f"[audit] batch={batch_id + 1}/{count} forward_equal={all_pass} baseline_contract={connectivity_pass}", flush=True)
             if batch_id < self.args.directional_batches and len(routes) > 1:
                 from depth_dynamics_directional import run_directional_probe
@@ -495,11 +533,12 @@ class Experiment:
                                                        "status": "executed; see per-row flags and convergence"}
         enabled = [key for key, value in prior_routes.items() if value]
         self.model.set_depth_grad_routes(",".join(enabled) if enabled else "none")
-        self.contract["audit"] = {"step": self.step, "batches": count, "routes": routes,
-                                  "forward_equality": all_pass, "baseline_output_connectivity": connectivity_pass,
-                                  "opened_route_nonzero": "see measured route_connectivity.csv; connected-zero is not proof of absent path"}
         full_gate = {"none", "all", "gse", "seed_xyz", "support"}.issubset(routes)
+        audit_record = {"step": self.step, "batches": count, "routes": routes,
+                        "forward_equality": all_pass, "baseline_output_connectivity": connectivity_pass,
+                        "opened_route_nonzero": route_nonzero if full_gate else "partial replay; see CSV"}
         if full_gate:
+            self.contract["audit"] = audit_record
             self.contract["p0_passed"] = bool(all_pass and connectivity_pass and all(route_nonzero.values()))
             config = {key: value for key, value in vars(self.cfg).items() if key not in ("log_dir",)}
             gate = {"passed": False, "route_checks_passed": self.contract["p0_passed"],
@@ -512,6 +551,8 @@ class Experiment:
                     "P1": "raw+weighted audits on fixed train/user-designated validation batches; directional CSV records scope",
                     "P1_complete_mechanism": False}
             dd.write_json(self.diag / "p0_gate.json", gate)
+        else:
+            self.contract.setdefault("replay_audits", []).append(audit_record)
         self.write_contract()
         if not all_pass or not connectivity_pass or (full_gate and not all(route_nonzero.values())):
             raise RuntimeError("P0 failed; inspect forward_equality.jsonl and output_connectivity.jsonl")
@@ -681,10 +722,15 @@ class Experiment:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_norm, error_if_nonfinite=True)
             self.optimizer.step()
-            outcomes.append({key: value.detach().cpu().clone() for key, value in self.model.state_dict().items()})
-        errors = {key: float((outcomes[0][key].float() - value.float()).abs().max())
-                  for key, value in outcomes[1].items() if value.numel() and not torch.allclose(
-                      outcomes[0][key], value, atol=self.args.forward_atol, rtol=self.args.forward_rtol)}
+            outcomes.append(dd.snapshot_state(self.model, self.optimizer, loader=self.stream.state_dict()))
+        errors = compare_state(outcomes[0]["model_state_dict"], outcomes[1]["model_state_dict"],
+                               atol=self.args.forward_atol, rtol=self.args.forward_rtol, path="model_and_buffers")
+        errors += compare_state(outcomes[0]["optimizer_state_dict"], outcomes[1]["optimizer_state_dict"],
+                                atol=self.args.forward_atol, rtol=self.args.forward_rtol, path="optimizer")
+        errors += compare_state(outcomes[0]["rng_state"], outcomes[1]["rng_state"], path="RNG")
+        errors += compare_state(outcomes[0]["module_modes"], outcomes[1]["module_modes"], path="module_modes")
+        errors += compare_state(outcomes[0]["module_flags"], outcomes[1]["module_flags"], path="module_flags")
+        errors += compare_state(outcomes[0]["metadata"], outcomes[1]["metadata"], path="loader")
         self.model.load_state_dict(initial["model_state_dict"])
         self.optimizer.load_state_dict(copy.deepcopy(initial["optimizer_state_dict"]))
         self.stream.load_state_dict(initial["loader"])
@@ -698,7 +744,7 @@ class Experiment:
                 setattr(module, key, value)
         dd.write_json(self.diag / "diagnostic_noninterference.json", {"passed": not errors,
                       "errors": errors, "atol": self.args.forward_atol, "rtol": self.args.forward_rtol,
-                      "scope": "one real update with/without actual audit; model parameters and buffers"})
+                      "scope": "one real update with/without actual audit; parameters/buffers/optimizer tolerance, exact RNG/loader/modes/flags"})
         gate_path = self.diag / "p0_gate.json"
         if gate_path.exists():
             gate = json.loads(gate_path.read_text())

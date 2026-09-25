@@ -117,7 +117,10 @@ def restore_snapshot(state, model, optimizer=None, scheduler=None, scaler=None):
     model.load_state_dict(state["model_state_dict"], strict=True)
     for name, obj in (("optimizer", optimizer), ("scheduler", scheduler), ("scaler", scaler)):
         if obj is not None and state.get(name + "_state_dict") is not None:
-            obj.load_state_dict(state[name + "_state_dict"])
+            # Optimizer.load_state_dict may retain CPU tensors by reference
+            # (notably Adam's step counter, even for CUDA parameters). An
+            # ensuing counterfactual step must never mutate its source snapshot.
+            obj.load_state_dict(copy.deepcopy(state[name + "_state_dict"]))
     for name, module in model.named_modules():
         if name in state.get("module_modes", {}):
             module.training = state["module_modes"][name]
