@@ -70,6 +70,18 @@ The rotation convention follows `utils/collision_detector.py`:
 `local = (point - translation) @ R`. Therefore evidence is never read at one
 center and executed at another.
 
+## Pre-flight checks
+
+Run the CPU contract tests before the server smoke:
+
+```bash
+pytest -q tests/test_dcr_air.py tests/test_dcr_cva.py tests/test_e1e2_cva.py
+```
+
+The formal trainer also verifies the zero-initialized AIR reader exactly
+reproduces frozen DCR center selection on the real Seen validation path before
+the first optimization step.
+
 ## Training
 
 AIR reuses the existing E1 exact-action cache; there is no CAD/DexNet call in
