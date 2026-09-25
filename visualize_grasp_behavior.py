@@ -31,7 +31,7 @@ from tools.grasp_behavior_viz import (
     parse_items, save_center_cdf_panels, save_center_selection_motion,
     save_corruption_motion, save_depth_bundle, save_feature_bundle, save_grasp_overlay,
     save_grasp_scene_ply, save_local_patch_overlay, save_proposal_bundle,
-    save_query_response, save_query_scalar_overlay, save_rgb, save_spatial_bundle,
+    save_query_response, save_query_scalar_overlay, save_rgb, save_heatmap, save_spatial_bundle,
     save_stage1_angle_depth, save_view_response, write_csv, write_html_index,
     write_json,
 )
@@ -336,10 +336,35 @@ def main():
             if args.resume and done.is_file():
                 continue
 
-            raw_item = _subset_raw_item(ds, lookup, sid, aid)
+            sample_index = lookup[(sid, aid)]
+            raw_item = ds[sample_index]
             batch = _batch_from_raw_item(raw_item, device)
             rgb = imagenet_rgb(batch["img"])
             K = batch["K"]
+
+            frame_context_images: List[Tuple[str, Path]] = []
+            if "rgb" in items:
+                try:
+                    from PIL import Image
+                    full_rgb = (
+                        np.asarray(Image.open(ds.colorpath[sample_index]).convert("RGB"),
+                                   dtype=np.float32) / 255.0)
+                    p = frame_root / "rgb_full_scene.png"
+                    save_rgb(p, full_rgb, "Full RealSense RGB frame")
+                    frame_context_images.append(("Full RGB scene", p))
+                    labels = np.asarray(Image.open(ds.labelpath[sample_index]))
+                    p = frame_root / "gt_instance_labels_reference.png"
+                    save_heatmap(
+                        p, labels.astype(np.float32),
+                        "GT instance labels (diagnostic reference only)",
+                        cmap="tab20", colorbar=False,
+                        vmin=float(labels.min()), vmax=float(max(int(labels.max()), 1)))
+                    frame_context_images.append(("GT instance reference", p))
+                except Exception as exc:
+                    write_json(
+                        frame_root / "context_warning.json",
+                        {"warning": "Failed to load full-scene RGB/label reference",
+                         "error": repr(exc)})
 
             from models.economicgrasp_cva_centers import extract_depth_features
             pack = extract_depth_features(dcr.reference, batch)
@@ -364,7 +389,7 @@ def main():
                         snapshot["top_query_indices"].cpu().tolist(),
                         selected=snapshot["selected"])
 
-                images: List[Tuple[str, Path]] = []
+                images: List[Tuple[str, Path]] = list(frame_context_images)
                 files: List[Tuple[str, Path]] = []
 
                 if "rgb" in items:
