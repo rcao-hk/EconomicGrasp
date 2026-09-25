@@ -1,6 +1,6 @@
 # CVA depth dynamics 执行记录（2026-09-26）
 
-状态：独立 P0 验收通过，D0/D1 的 50-update 配对运行已启动；本记录不宣称塌缩机制已确定。
+状态：独立 P0 验收及 D0/D1 的 50-update 配对运行完成，已从完整状态续跑至 500 updates；本记录不宣称塌缩机制已确定。
 
 ## 环境与初始化
 
@@ -54,6 +54,34 @@ warn-only 模式下发出非确定性警告；bilinear interpolate 会切换到�
 16 个 train 帧均满足事件判读的 GT std 条件；初始 flat fraction=0，initial_flat=false。
 随后在 GPU 0/1 以相同实验 commit 启动 D0=none、D1=all 的 50 次更新。
 汇总工具的后续修正单独提交，不改变正在运行的模型代码或实验 commit。
+
+## 50-update 配对结果
+
+两组均完成 50 次实际更新、50 个训练图像。逐张比较初始 checkpoint 的 model state 和
+optimizer state 完全相同；初始与 step 50 的 loader、Python/NumPy/CPU/CUDA RNG 也均相同。
+训练日志中的全部配对记录使用相同样本索引，首步总 loss 均为 0.6337293386459351。
+
+| Arm / eval 探针 | GT-valid MAE (mm) | 平均前景 std ratio | 平均局部斜率 | 平均 depth bias (mm) |
+|---|---:|---:|---:|---:|
+| D0 / train | 2.5247 | 0.98354 | 0.67467 | -1.1059 |
+| D1 / train | 6.7550 | 1.01977 | 0.74622 | +1.7370 |
+| D0 / test_seen | 4.0257 | 0.97034 | 0.64095 | -0.1059 |
+| D1 / test_seen | 6.5838 | 1.04205 | 0.68141 | +1.8055 |
+
+两组 train/eval 事件探针的 flat fraction 都为 0。D1 的 MAE 上升，但图内对比度并未整体
+变平；局部斜率反而较初始值增大。不能把这 50 步结果称为 constant-depth collapse，也不能
+由此证明长期稳定。固定图、共享米制色标的误差图及逐图指标已保存。
+
+50 次更新的观测用时（不含初始/结束探针）为 D0 168.65 秒、D1 130.33 秒；共享机器上的
+I/O 等条件会影响此数值，不能据此比较路径的固有计算成本。观测到的进程 GPU 显存为
+6516 / 6570 MiB；未发生 OOM 或非有限数值。完成检查后，两组从各自 step 50 完整状态
+继续到 500，仍使用同一实验 commit 与优化设置。
+
+逐 split/mode 的原始汇总见 [summary50.csv](depth_dynamics_results_20260926/summary50.csv)，
+P0 gate 见 [p0_gate.json](depth_dynamics_results_20260926/p0_gate.json)。
+P1 的定量复核与有限差分适用范围见 [P1_REVIEW_ZH.md](depth_dynamics_results_20260926/P1_REVIEW_ZH.md)。
+该有限差分仅验证单图、all route、foreground 固定连续子函数；没有验证所有 batch/路由。
+Q/C 在两个局部方向上有明显抵消，不能用 Q-only 梯度大小代替 all 的实际网络更新。
 
 ## 产物与判读范围
 
