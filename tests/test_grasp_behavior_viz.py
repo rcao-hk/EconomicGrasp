@@ -70,6 +70,9 @@ def test_visualization_cli_help_does_not_require_cuda():
     assert "--frames" in p.stdout
     assert "--items" in p.stdout
     assert "--eval-cases" in p.stdout
+    assert "--dataset-root" in p.stdout
+    assert "--stage1-checkpoint" in p.stdout
+    assert "--dataset_root" not in p.stdout
 
 
 def test_candidate_latent_response_writes_png(tmp_path):
