@@ -1,6 +1,6 @@
 # CVA depth dynamics 执行记录（2026-09-26）
 
-状态：P0/P1 工程验收中，尚未开始正式 D0/D1 更新；本记录不宣称塌缩机制已确定。
+状态：独立 P0 验收通过，D0/D1 的 50-update 配对运行已启动；本记录不宣称塌缩机制已确定。
 
 ## 环境与初始化
 
@@ -37,6 +37,24 @@ gradient/optimizer 保留原容差，参数最大差的固定绝对上限为 1e-
 warn-only 模式下发出非确定性警告；bilinear interpolate 会切换到其 decomposition 实现。
 正式运行保持原后端设置，没有因此切换训练算子。单步数值一致性不等于逐位确定性。
 
+## 独立验收与配对启动
+
+`aa4ffd20ee52f0a60f776c1c3b90d048ef7fa216` 的
+`20260926_stage1_calibrated_seed0` 完成独立完整验收：8 个真实 batch 的开关前向/梯度检查、
+三分支非干扰验证、16 train + 32 test_seen 帧的 train/eval 探针均通过。
+审计状态和前向逐位一致；plain/plain 参数最大差为 7.484e-6，audit/plain 为
+5.977e-6 / 5.465e-6，均在运行前锁定的 1e-5 绝对上限内。
+`diagnostic_noninterference_strict_passed=False` 如实保留，calibrated gate 为 true。
+
+| 初始 eval 探针 | 帧数 | GT-valid MAE (mm) | 平均前景 std ratio | 平均局部斜率 |
+|---|---:|---:|---:|---:|
+| train | 16 | 1.8564 | 0.99279 | 0.68271 |
+| test_seen（指定验证集） | 32 | 3.9312 | 0.96739 | 0.63700 |
+
+16 个 train 帧均满足事件判读的 GT std 条件；初始 flat fraction=0，initial_flat=false。
+随后在 GPU 0/1 以相同实验 commit 启动 D0=none、D1=all 的 50 次更新。
+汇总工具的后续修正单独提交，不改变正在运行的模型代码或实验 commit。
+
 ## 产物与判读范围
 
 完整产物保存在训练服务器：
@@ -44,6 +62,7 @@ warn-only 模式下发出非确定性警告；bilinear interpolate 会切换到�
 - `/data/robotarm/result/grasp/rgbgrasp/experiment/cva_depth_dynamics/20260926_labelcheck_seed0/diagnostics/P0/`
 - `/data/robotarm/result/grasp/rgbgrasp/experiment/cva_depth_dynamics/20260926_stage1_seed0/diagnostics/P0/`
 - `/data/robotarm/result/grasp/rgbgrasp/experiment/cva_depth_dynamics/20260926_replay_control_seed0/diagnostics/P0/`
+- `/data/robotarm/result/grasp/rgbgrasp/experiment/cva_depth_dynamics/20260926_stage1_calibrated_seed0/diagnostics/`
 - `/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_seed0/P0/`
 
-产物包括 contract、逐项梯度、route connectivity、前向相等性、方向探针、梯度图及单步非干扰报告。上述两个运行的 `p0_gate.json` 保持 false；后续新运行独立验收。局部导数不等于实际优化器更新效果；尚无配对训练轨迹，也没有必要性/充分性或修正方案结论。
+产物包括 contract、逐项梯度、route connectivity、前向相等性、方向探针、梯度图及单步非干扰报告。前两次 strict 运行的 `p0_gate.json` 保持 false；calibrated 新运行独立验收通过。局部导数不等于实际优化器更新效果；配对轨迹正在生成，尚无必要性/充分性或修正方案结论。
