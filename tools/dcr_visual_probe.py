@@ -52,10 +52,22 @@ def inspect_dcr_case(model, batch, case: str, case_seed: int,
         model.corrector.encode_image(
             batch, pack, active_depth, return_maps=True))
 
-    local_ep: Dict[str, Any] = {}
-    logits, latent = model.corrector.score_bundle(
-        feature, proposal_logits, batch, active_depth, bundle,
-        return_features=True, debug_sink=local_ep)
+    # Preserve the production query-chunk contract.  Visualization must not
+    # silently turn a full-query run into one giant grouping call.
+    logits_parts, latent_parts = [], []
+    nquery = int(bundle["actions"].shape[1])
+    for start in range(0, nquery, int(query_chunk)):
+        ids = torch.arange(
+            start, min(start + int(query_chunk), nquery),
+            device=bundle["actions"].device)
+        sub = subset_bundle(bundle, ids)
+        logits_c, latent_c = model.corrector.score_bundle(
+            feature, proposal_logits, batch, active_depth, sub,
+            return_features=True)
+        logits_parts.append(logits_c)
+        latent_parts.append(latent_c)
+    logits = torch.cat(logits_parts, dim=1)
+    latent = torch.cat(latent_parts, dim=1)
     native_score = bundle["actions"][model.zero, :, 0]
     residual = model.ranker(
         latent, logits, native_score,
@@ -106,9 +118,16 @@ def inspect_e1_like_case(model, batch, bundle, active_depth, depth_pack,
     """Run an E1-compatible zero-ranker model on an already aligned DCR bundle."""
     feature, proposal_logits, raw, enhanced, spatial = model.corrector.encode_image(
         batch, depth_pack, active_depth, return_maps=True)
-    logits = model.corrector.score_bundle(
-        feature, proposal_logits, batch, active_depth, bundle,
-        return_features=False)
+    parts = []
+    nquery = int(bundle["actions"].shape[1])
+    for start in range(0, nquery, int(query_chunk)):
+        ids = torch.arange(
+            start, min(start + int(query_chunk), nquery),
+            device=bundle["actions"].device)
+        parts.append(model.corrector.score_bundle(
+            feature, proposal_logits, batch, active_depth,
+            subset_bundle(bundle, ids), return_features=False))
+    logits = torch.cat(parts, dim=1)
     utility = logits.sigmoid().mean(-1)
     selected = select_centers(utility, bundle["valid"], model.zero)
     return {
