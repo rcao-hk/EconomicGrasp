@@ -302,6 +302,24 @@ def save_depth_bundle(out_dir: str | Path, rgb: np.ndarray, K: Any,
                  "Depth corruption delta [mm]", cmap="coolwarm", vmin=-lim, vmax=lim)
     save_overlay(out / "depth_active_overlay.png", rgb, act,
                  "Active depth over RGB", cmap="viridis", vmin=.2, vmax=1.0)
+    # Reference-error maps separate the model's native geometry error from
+    # the synthetic corruption injected by DCR-E1-4.
+    for ref_name, ref_depth in (("sensor", sensor), ("rendered", rendered)):
+        if ref_depth is None:
+            continue
+        ref = np.squeeze(to_numpy(ref_depth))
+        valid = np.isfinite(ref) & (ref > 0) & np.isfinite(nom) & (nom > 0)
+        for src_name, src in (("pred_nominal", nom), ("active", act)):
+            diff = np.full_like(ref, np.nan, dtype=np.float32)
+            diff[valid] = (src[valid] - ref[valid]) * 1000.0
+            finite = np.isfinite(diff)
+            if finite.any():
+                lim = max(1.0, float(np.nanpercentile(np.abs(diff[finite]), 99)))
+                save_heatmap(
+                    out / f"depth_{src_name}_minus_{ref_name}_mm.png",
+                    diff, f"{src_name} - {ref_name} [mm]",
+                    cmap="coolwarm", vmin=-lim, vmax=lim)
+
     for name, depth in (("pred_nominal", nom), ("active", act),
                         ("sensor", sensor), ("rendered", rendered)):
         if depth is None:
@@ -370,6 +388,30 @@ def sparse_query_map(token_ids: Any, values: Any, hw: Tuple[int, int],
         else:
             out[int(idx)] = max(float(old), float(v))
     return out.reshape(h, w)
+
+
+def save_query_scalar_overlay(path: str | Path, rgb: np.ndarray,
+                              token_ids: Any, values: Any, title: str,
+                              cmap: str = "coolwarm", symmetric: bool = False) -> None:
+    h, w = rgb.shape[:2]
+    arr = sparse_query_map(token_ids, values, (h, w), reduce="mean")
+    masked = np.ma.masked_invalid(arr)
+    kwargs = {}
+    if symmetric:
+        finite = np.isfinite(arr)
+        lim = max(1e-6, float(np.nanpercentile(np.abs(arr[finite]), 99))) if finite.any() else 1.0
+        kwargs.update(vmin=-lim, vmax=lim)
+    plt = _plt()
+    fig, ax = plt.subplots(figsize=(6, 6), dpi=160)
+    ax.imshow(rgb)
+    im = ax.imshow(masked, cmap=cmap, alpha=.78, **kwargs)
+    ax.axis("off")
+    ax.set_title(title)
+    fig.colorbar(im, ax=ax, fraction=.046, pad=.04)
+    fig.tight_layout(pad=0)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path)
+    plt.close(fig)
 
 
 def save_query_response(out_dir: str | Path, rgb: np.ndarray,
@@ -646,8 +688,19 @@ def save_view_response(out_dir: str | Path, rgb: np.ndarray,
     entropy = entropy / math.log(max(score.shape[-1], 2))
     top2 = torch.topk(prob, k=min(2, prob.shape[-1]), dim=-1).values
     margin = top2[..., 0] - top2[..., -1]
-    token = torch.as_tensor(stage1_ep.get("token_sel_idx", bundle["token_ids"]))
-    token = token[0] if token.ndim == 2 else token
+    # view_score is normally defined on the base seed set, whereas
+    # token_sel_idx may already be expanded into CVA queries.  Prefer an
+    # explicitly aligned source before falling back to the expanded tensor.
+    bundle_token = torch.as_tensor(bundle["token_ids"])
+    if entropy.shape[1] == int(bundle_token.numel()):
+        token = bundle_token.reshape(-1)
+    else:
+        source = stage1_ep.get(
+            "kview_base_token_sel_idx",
+            stage1_ep.get("token_sel_idx", bundle["token_ids"]))
+        token = torch.as_tensor(source)
+        token = token[0] if token.ndim == 2 else token
+        token = token.reshape(-1)
     n = min(len(token), entropy.shape[1])
     h, w = rgb.shape[:2]
     for name, val, title in (
