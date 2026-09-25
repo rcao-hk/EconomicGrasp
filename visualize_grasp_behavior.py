@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
-from dcr_cva_common import DCR_VERSION
+from dcr_cva_common import DCR_VERSION, anchored_score
 from e1e2_common import (VERSION, get_batch, load_torch, make_dataset, seed_all,
                          seed_for, select_centers)
 from tools.dcr_visual_probe import inspect_dcr_case, inspect_e1_like_case
@@ -440,6 +440,32 @@ def main():
                         ("Stage-1 query score", case_dir / "query_stage1_score.png"),
                         ("Selected offset", case_dir / "query_selected_offset_mm.png"),
                         ("Best local utility", case_dir / "query_best_local_utility.png"),
+                    ])
+
+                    q_rank = torch.arange(
+                        len(snapshot["selected"]),
+                        device=snapshot["selected"].device)
+                    selected_rank_residual = snapshot["rank_residual"][
+                        snapshot["selected"], q_rank]
+                    anchored = anchored_score(
+                        snapshot["stage1_score"], selected_rank_residual, 1.0)
+                    save_query_scalar_overlay(
+                        case_dir / "dcr_rank_residual_selected.png",
+                        rgb, snapshot["bundle"]["token_ids"],
+                        selected_rank_residual,
+                        "DCR learned rank log-odds residual (diagnostic)",
+                        cmap="coolwarm", symmetric=True)
+                    save_query_scalar_overlay(
+                        case_dir / "dcr_anchored_minus_stage1_score.png",
+                        rgb, snapshot["bundle"]["token_ids"],
+                        anchored - snapshot["stage1_score"],
+                        "Anchored score - frozen Stage-1 score (diagnostic)",
+                        cmap="coolwarm", symmetric=True)
+                    images.extend([
+                        ("DCR learned rank residual",
+                         case_dir / "dcr_rank_residual_selected.png"),
+                        ("Anchored score shift",
+                         case_dir / "dcr_anchored_minus_stage1_score.png"),
                     ])
 
                     motion_stats = save_center_selection_motion(
