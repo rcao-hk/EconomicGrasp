@@ -23,6 +23,7 @@ QUERY_LIMIT=${QUERY_LIMIT:-0}
 QUERY_CHUNK=${QUERY_CHUNK:-64}
 POINT_STRIDE=${POINT_STRIDE:-3}
 EVAL_METHODS=${EVAL_METHODS:-dcr}
+EVAL_CASES=${EVAL_CASES:-nominal}
 EVAL_TOPK=${EVAL_TOPK:-50}
 EVAL_VOXEL_SIZE=${EVAL_VOXEL_SIZE:-0.008}
 NMS_TRANS_TH=${NMS_TRANS_TH:-0.03}
@@ -74,6 +75,7 @@ for s in "${!GPU_IDS[@]}"; do
     --query-chunk "$QUERY_CHUNK"
     --point-stride "$POINT_STRIDE"
     --eval-methods "$EVAL_METHODS"
+    --eval-cases "$EVAL_CASES"
     --eval-topk "$EVAL_TOPK"
     --eval-voxel-size "$EVAL_VOXEL_SIZE"
     --nms-trans-th "$NMS_TRANS_TH"
