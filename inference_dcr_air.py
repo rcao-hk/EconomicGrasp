@@ -85,7 +85,9 @@ def main():
         'query_chunk': cfg['query_chunk'],
         'methods': ['native', 'dcr_stage1', 'air_stage1'],
         'score_contract': 'all methods use frozen Stage-1 query score',
-        'code_sha256': digest({p: file_sha(Path(__file__).resolve().parent / p) for p in\n            ('inference_dcr_air.py', 'dcr_air_common.py',\n             'models/economicgrasp_cva_air.py')}),
+        'code_sha256': digest({p: file_sha(Path(__file__).resolve().parent / p) for p in
+            ('inference_dcr_air.py', 'dcr_air_common.py',
+             'models/economicgrasp_cva_air.py')}),
     }
     del ck
 
