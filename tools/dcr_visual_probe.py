@@ -8,8 +8,7 @@ import torch
 
 from dcr_cva_common import make_outputs
 from e1e2_common import select_centers
-from models.economicgrasp_cva_centers import extract_depth_features, reference_candidates
-
+# IMPORTANT: do not import models.* at module import time. models/__init__.py\n# imports legacy EconomicGrasp modules, which import utils.arguments and parse\n# sys.argv immediately. The visualization CLI must parse/clear its own argv first.\n
 
 @contextmanager
 def preserve_eval(module):
@@ -41,6 +40,9 @@ def inspect_dcr_case(model, batch, case: str, case_seed: int,
                      query_limit: int = 0, query_chunk: int = 64,
                      depth_pack=None, local_queries: int = 8):
     """Return a rich, detached snapshot without changing the normal forward API."""
+    from models.economicgrasp_cva_centers import (
+        extract_depth_features, reference_candidates,
+    )
     pack = extract_depth_features(model.reference, batch) if depth_pack is None else depth_pack
     bundle, active_depth, stage1_ep_full = reference_candidates(
         model.reference, batch, pack, case, case_seed,
