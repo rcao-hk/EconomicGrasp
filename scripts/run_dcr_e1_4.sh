@@ -124,6 +124,14 @@ for phase in "${STEPS[@]}"; do
     summary)
       "$PYTHON_BIN" "$ROOT_DIR/summarize_dcr_e1_4.py"         --work-root "$WORK_ROOT"         --dcr-label dcr         --e1-label e1_ref
       ;;
+    audit)
+      "$PYTHON_BIN" "$ROOT_DIR/audit_dcr_selection.py" \
+        --dcr-root "$WORK_ROOT/test/dcr" \
+        --e1-root "$WORK_ROOT/test/e1_ref" \
+        --output-root "$WORK_ROOT/selection_audit" \
+        --splits "$SPLITS" \
+        --topks 10,50
+      ;;
     *)
       echo "Unknown phase: $phase" >&2
       exit 2
