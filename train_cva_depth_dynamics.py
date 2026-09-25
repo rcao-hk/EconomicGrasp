@@ -834,53 +834,203 @@ class Experiment:
         self.contract["resume"] = {"path": str(Path(path).resolve()), "sha256": dd.sha256_file(path), "step": self.step}
 
     def verify_diagnostic_step(self):
-        """Real one-update paired replay; restore original state after verification."""
+        """Two no-audit controls plus audit replay, with unchanged strict gates.
+
+        The extra control distinguishes backend variability from an audit effect.
+        Gradient/update differences are evidence, never grounds for silently
+        increasing the configured comparison tolerances.
+        """
         path = self.checkpoint("initial" if self.step == 0 else "replay_reference")
         initial = torch.load(path, map_location="cpu", weights_only=False)
-        outcomes = []
-        for with_diagnostics in (False, True):
+
+        def digest(value):
+            result = hashlib.sha256()
+
+            def visit(item):
+                if torch.is_tensor(item):
+                    tensor = item.detach().cpu().contiguous()
+                    result.update(f"tensor:{tensor.dtype}:{tuple(tensor.shape)}".encode())
+                    result.update(tensor.reshape(-1).view(torch.uint8).numpy().tobytes())
+                elif isinstance(item, np.ndarray):
+                    result.update(f"numpy:{item.dtype}:{item.shape}".encode())
+                    result.update(item.tobytes())
+                elif isinstance(item, dict):
+                    for key in sorted(item, key=str):
+                        result.update(repr(key).encode())
+                        visit(item[key])
+                elif isinstance(item, (tuple, list)):
+                    result.update(type(item).__name__.encode())
+                    for entry in item:
+                        visit(entry)
+                else:
+                    result.update(repr(item).encode())
+            visit(value)
+            return result.hexdigest()
+
+        def tensor_difference(left, right, *, gradients=False):
+            if left is None or right is None:
+                return {"reference_unused": left is None, "comparison_unused": right is None,
+                        "exact_equal": left is None and right is None}
+            left, right = left.detach().cpu(), right.detach().cpu()
+            if left.shape != right.shape or left.dtype != right.dtype:
+                return {"exact_equal": False, "reference_shape": list(left.shape),
+                        "comparison_shape": list(right.shape), "reference_dtype": str(left.dtype),
+                        "comparison_dtype": str(right.dtype)}
+            a, b = left.double().reshape(-1), right.double().reshape(-1)
+            finite = torch.isfinite(a) & torch.isfinite(b)
+            difference = b - a
+            changed = a.ne(b)
+            above_tolerance = ~torch.isclose(a, b, atol=self.args.forward_atol, rtol=self.args.forward_rtol)
+            valid_delta = difference[finite]
+            row = {"shape": list(left.shape), "numel": left.numel(), "dtype": str(left.dtype),
+                   "exact_equal": bool(torch.equal(left, right)), "changed_count": int(changed.sum()),
+                   "exceeds_tolerance_count": int(above_tolerance.sum()), "nonfinite_count": int((~finite).sum()),
+                   "max_abs_difference": float(valid_delta.abs().max()) if valid_delta.numel() else None,
+                   "rms_difference": float(valid_delta.square().mean().sqrt()) if valid_delta.numel() else None,
+                   "difference_l2": float(valid_delta.norm()) if valid_delta.numel() else None,
+                   "reference_l2": float(a[finite].norm()), "comparison_l2": float(b[finite].norm()),
+                   "reference_max_abs": float(a[finite].abs().max()) if bool(finite.any()) else None,
+                   "comparison_max_abs": float(b[finite].abs().max()) if bool(finite.any()) else None,
+                   "sign_flip_count": int(((a * b < 0) & finite).sum()),
+                   "zero_vs_nonzero_count": int(((a == 0) != (b == 0)).sum())}
+            if a.numel():
+                ranked = torch.nan_to_num(difference.abs(), nan=float("inf")).topk(min(8, a.numel())).indices
+                row["largest_difference_elements"] = [{"flat_index": int(index), "reference": float(a[index]),
+                    "comparison": float(b[index]), "difference": float(difference[index])} for index in ranked]
+            if gradients:
+                magnitude = torch.maximum(a.abs(), b.abs())
+                row["near_zero"] = {str(threshold): {
+                    "both_abs_at_most_count": int((finite & (magnitude <= threshold)).sum()),
+                    "changed_within_count": int((finite & changed & (magnitude <= threshold)).sum()),
+                    "sign_flips_within_count": int((finite & (a * b < 0) & (magnitude <= threshold)).sum())}
+                    for threshold in (1e-12, 1e-10, 1e-8, 1e-6)}
+            return row
+
+        def restore_initial():
             self.model.load_state_dict(initial["model_state_dict"])
             self.optimizer.load_state_dict(copy.deepcopy(initial["optimizer_state_dict"]))
             self.stream.load_state_dict(initial["loader"])
-            dd.restore_rng_state(initial["rng"])
+            self.optimizer.zero_grad(set_to_none=True)
             for name, module in self.model.named_modules():
+                module.training = initial["module_training"][name]
+                if name in initial["is_training"]:
+                    module.is_training = initial["is_training"][name]
                 for key, value in initial.get("runtime_counters", {}).get(name, {}).items():
                     setattr(module, key, value)
-            self.model.train()
-            for module in self.model.modules():
-                if hasattr(module, "is_training"):
-                    module.is_training = True
-            if with_diagnostics:
-                self.audit(count=1, routes=[self.args.routes])
-            batch, _ = self.stream.next()
-            self.optimizer.zero_grad(set_to_none=True)
-            loss, _ = self.forward(batch)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_norm, error_if_nonfinite=True)
-            self.optimizer.step()
-            outcomes.append(dd.snapshot_state(self.model, self.optimizer, loader=self.stream.state_dict()))
-        errors = compare_state(outcomes[0]["model_state_dict"], outcomes[1]["model_state_dict"],
-                               atol=self.args.forward_atol, rtol=self.args.forward_rtol, path="model_and_buffers")
-        errors += compare_state(outcomes[0]["optimizer_state_dict"], outcomes[1]["optimizer_state_dict"],
-                                atol=self.args.forward_atol, rtol=self.args.forward_rtol, path="optimizer")
-        errors += compare_state(outcomes[0]["rng_state"], outcomes[1]["rng_state"], path="RNG")
-        errors += compare_state(outcomes[0]["module_modes"], outcomes[1]["module_modes"], path="module_modes")
-        errors += compare_state(outcomes[0]["module_flags"], outcomes[1]["module_flags"], path="module_flags")
-        errors += compare_state(outcomes[0]["metadata"], outcomes[1]["metadata"], path="loader")
-        self.model.load_state_dict(initial["model_state_dict"])
-        self.optimizer.load_state_dict(copy.deepcopy(initial["optimizer_state_dict"]))
-        self.stream.load_state_dict(initial["loader"])
-        self.optimizer.zero_grad(set_to_none=True)
-        dd.restore_rng_state(initial["rng"])
-        for name, module in self.model.named_modules():
-            module.training = initial["module_training"][name]
-            if name in initial["is_training"]:
-                module.is_training = initial["is_training"][name]
-            for key, value in initial.get("runtime_counters", {}).get(name, {}).items():
-                setattr(module, key, value)
-        dd.write_json(self.diag / "diagnostic_noninterference.json", {"passed": not errors,
-                      "errors": errors, "atol": self.args.forward_atol, "rtol": self.args.forward_rtol,
-                      "scope": "one real update with/without actual audit; parameters/buffers/optimizer tolerance, exact RNG/loader/modes/flags"})
+            dd.restore_rng_state(initial["rng"])
+
+        def gradient_copy():
+            return {name: None if parameter.grad is None else parameter.grad.detach().cpu().clone()
+                    for name, parameter in self.model.named_parameters() if parameter.requires_grad}
+
+        outcomes = []
+        try:
+            for branch, with_diagnostics in (("no_audit_A", False), ("no_audit_B", False), ("with_audit", True)):
+                restore_initial()
+                self.model.train()
+                for module in self.model.modules():
+                    if hasattr(module, "is_training"):
+                        module.is_training = True
+                audit_state_check = None
+                if with_diagnostics:
+                    audit_before = dd.snapshot_state(self.model, self.optimizer, loader=self.stream.state_dict(),
+                                                     routes=self.model.get_depth_grad_routes(), existing_grads=gradient_copy())
+                    audit_before_sha = {key: digest(value) for key, value in audit_before.items()}
+                    del audit_before
+                    self.audit(count=1, routes=[self.args.routes])
+                    audit_after = dd.snapshot_state(self.model, self.optimizer, loader=self.stream.state_dict(),
+                                                    routes=self.model.get_depth_grad_routes(), existing_grads=gradient_copy())
+                    audit_after_sha = {key: digest(value) for key, value in audit_after.items()}
+                    del audit_after
+                    audit_state_check = {"before_sha256": audit_before_sha, "after_sha256": audit_after_sha,
+                                         "mismatch_keys": [key for key in audit_before_sha
+                                             if audit_before_sha[key] != audit_after_sha[key]]}
+                    audit_state_check["exact_equal"] = not audit_state_check["mismatch_keys"]
+                batch, indices = self.stream.next()
+                self.optimizer.zero_grad(set_to_none=True)
+                before = dd.snapshot_state(self.model, self.optimizer, loader=self.stream.state_dict(),
+                                           routes=self.model.get_depth_grad_routes())
+                state_sha = {key: digest(value) for key, value in before.items()}
+                del before
+                batch_sha = digest(batch)
+                loss, endpoints = self.forward(batch)
+                forward_values = self.equality_tensors(endpoints)
+                forward_sha = {key: digest(value) for key, value in forward_values.items()}
+                forward_losses = {key: float(value.detach()) for key, value in self.losses(endpoints).items()}
+                forward_losses["total"] = float(loss.detach())
+                del forward_values
+                loss.backward()
+                preclip = gradient_copy()
+                grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_norm,
+                                                                 error_if_nonfinite=True))
+                postclip = gradient_copy()
+                self.optimizer.step()
+                state = dd.snapshot_state(self.model, self.optimizer, loader=self.stream.state_dict())
+                outcomes.append({"branch": branch, "state": state, "preclip": preclip, "postclip": postclip,
+                                 "pre_forward_state_sha256": state_sha, "batch_sha256": batch_sha,
+                                 "audit_state_check": audit_state_check,
+                                 "batch_indices": indices, "forward_tensor_sha256": forward_sha,
+                                 "forward_losses": forward_losses, "gradient_norm": grad_norm,
+                                 "clip_coefficient": min(1., self.args.clip_norm / (grad_norm + 1e-6))})
+                del loss, endpoints, batch
+                print(f"[noninterference] captured {branch}", flush=True)
+        finally:
+            restore_initial()
+
+        def compare_branches(reference, other):
+            left, right = reference["state"], other["state"]
+            errors = []
+            for key in ("model_state_dict", "optimizer_state_dict"):
+                errors += compare_state(left[key], right[key], atol=self.args.forward_atol,
+                                        rtol=self.args.forward_rtol, path=key)
+            for key in ("rng_state", "module_modes", "module_flags", "metadata"):
+                errors += compare_state(left[key], right[key], path=key)
+            before_mismatch = [key for key in reference["pre_forward_state_sha256"]
+                               if reference["pre_forward_state_sha256"][key] != other["pre_forward_state_sha256"][key]]
+            if before_mismatch:
+                errors.append("pre_forward_state_not_exact: " + ",".join(before_mismatch))
+            if reference["batch_sha256"] != other["batch_sha256"]:
+                errors.append("input_batch_not_exact")
+            for branch in (reference, other):
+                if branch["audit_state_check"] is not None and not branch["audit_state_check"]["exact_equal"]:
+                    errors.append("audit_changed_exact_state: " + ",".join(branch["audit_state_check"]["mismatch_keys"]))
+            model_differences, gradient_differences, context = {}, {}, {}
+            for name, a in left["model_state_dict"].items():
+                b = right["model_state_dict"][name]
+                if not torch.equal(a, b):
+                    model_differences[name] = tensor_difference(a, b)
+                    if name in reference["preclip"]:
+                        context[name] = {"preclip_gradient": tensor_difference(reference["preclip"][name], other["preclip"][name], gradients=True),
+                                         "postclip_gradient": tensor_difference(reference["postclip"][name], other["postclip"][name], gradients=True),
+                                         "actual_update": tensor_difference(a - initial["model_state_dict"][name],
+                                                                              b - initial["model_state_dict"][name])}
+            for name, a in reference["preclip"].items():
+                b = other["preclip"][name]
+                if (a is None) != (b is None) or (a is not None and not torch.equal(a, b)):
+                    gradient_differences[name] = tensor_difference(a, b, gradients=True)
+            return {"reference": reference["branch"], "comparison": other["branch"], "passed": not errors,
+                    "errors": errors, "pre_forward_state_mismatch_keys": before_mismatch,
+                    "batch_exact_equal": reference["batch_sha256"] == other["batch_sha256"],
+                    "forward_loss_exact_equal": reference["forward_losses"] == other["forward_losses"],
+                    "forward_tensor_exact_mismatch_keys": [key for key in reference["forward_tensor_sha256"]
+                        if reference["forward_tensor_sha256"][key] != other["forward_tensor_sha256"].get(key)],
+                    "model_tensor_differences": model_differences, "preclip_gradient_differences": gradient_differences,
+                    "changed_model_tensor_context": context}
+
+        comparisons = {"no_audit_repeat": compare_branches(outcomes[0], outcomes[1]),
+                       "audit_vs_reference": compare_branches(outcomes[0], outcomes[2]),
+                       "audit_vs_repeat": compare_branches(outcomes[1], outcomes[2])}
+        errors = [f"{name}: {error}" for name, comparison in comparisons.items() for error in comparison["errors"]]
+        summary = {"passed": not errors, "errors": errors, "atol": self.args.forward_atol,
+                   "rtol": self.args.forward_rtol, "comparisons": comparisons,
+                   "branches": [{key: value for key, value in outcome.items() if key not in ("state", "preclip", "postclip")}
+                                for outcome in outcomes],
+                   "scope": "three real updates from identical complete state; strict original model/optimizer tolerance; exact RNG/loader/modes/flags",
+                   "interpretation": "no_audit_repeat_also_exceeds_gate; audit causality not established"
+                   if not comparisons["no_audit_repeat"]["passed"] else (
+                       "only_audit_comparison_exceeds_gate; investigate diagnostic or backend execution-path effects" if errors else "passed"),
+                   "tolerance_changed": False}
+        dd.write_json(self.diag / "diagnostic_noninterference.json", summary)
         gate_path = self.diag / "p0_gate.json"
         if gate_path.exists():
             gate = json.loads(gate_path.read_text())
