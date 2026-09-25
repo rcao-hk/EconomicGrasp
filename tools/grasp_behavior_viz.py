@@ -27,11 +27,11 @@ ITEM_PRESETS = {
         "rgb,depth,proposal,feature,query_response,grasps"
     ),
     "core": (
-        "rgb,depth,pointcloud,proposal,feature,spatial,view,cdf,"
+        "rgb,depth,pointcloud,proposal,feature,pose,spatial,view,cdf,"
         "query_response,local,grasps,corruption_delta"
     ),
     "all": (
-        "rgb,depth,pointcloud,proposal,feature,spatial,view,cdf,"
+        "rgb,depth,pointcloud,proposal,feature,pose,spatial,view,cdf,"
         "query_response,local,grasps,corruption_delta,evaluator,air"
     ),
 }
@@ -235,6 +235,127 @@ def save_feature_bundle(out_dir: str | Path, raw: Any, enhanced: Any) -> None:
     save_heatmap(out / "feature_pre_norm.png", raw_norm, "Pre-enhancer feature norm")
     save_heatmap(out / "feature_post_norm.png", enh_norm, "Post-enhancer feature norm")
 
+
+
+def _feature_map_from_any(value: Any) -> Optional[torch.Tensor]:
+    """Best-effort conversion of DINO/DPT tensors to CxHxW for inspection."""
+    x = value
+    if isinstance(x, (tuple, list)):
+        tensors = [v for v in x if torch.is_tensor(v)]
+        if not tensors:
+            return None
+        x = tensors[0]
+    if not torch.is_tensor(x):
+        return None
+    x = x.detach().float().cpu()
+    if x.ndim == 4:
+        return x[0]
+    if x.ndim == 3:
+        x = x[0]  # token x channel, normally 32x32 tokens for 448 input
+        n, c = x.shape
+        side = int(round(math.sqrt(n)))
+        if side * side == n:
+            return x.T.reshape(c, side, side)
+        side = int(round(math.sqrt(max(n - 1, 0))))
+        if side * side == n - 1:
+            return x[1:].T.reshape(c, side, side)
+    return None
+
+
+def save_backbone_feature_bundle(out_dir: str | Path, features: Any,
+                                 max_levels: int = 4) -> List[Path]:
+    """Save PCA/norm views of DINO intermediate feature levels when available."""
+    out = Path(out_dir)
+    seq = list(features) if isinstance(features, (tuple, list)) else [features]
+    written = []
+    for i, value in enumerate(seq[:max(1, int(max_levels))]):
+        fmap = _feature_map_from_any(value)
+        if fmap is None:
+            continue
+        rgb = feature_pca_rgb(fmap)
+        p = out / f"backbone_level{i}_pca.png"
+        save_rgb(p, rgb, f"DINO feature level {i} PCA")
+        written.append(p)
+        p = out / f"backbone_level{i}_norm.png"
+        save_heatmap(p, fmap.norm(dim=0), f"DINO feature level {i} norm")
+        written.append(p)
+    return written
+
+
+def save_depth_feature_bundle(out_dir: str | Path, depth_feature: Any) -> List[Path]:
+    fmap = _feature_map_from_any(depth_feature)
+    if fmap is None:
+        return []
+    out = Path(out_dir)
+    pca = out / "depth_head_feature_pca.png"
+    norm = out / "depth_head_feature_norm.png"
+    save_rgb(pca, feature_pca_rgb(fmap), "Metric-depth head feature PCA")
+    save_heatmap(norm, fmap.norm(dim=0), "Metric-depth head feature norm")
+    return [pca, norm]
+
+
+def _small_diagnostic(value: Any, max_numel: int = 256):
+    if torch.is_tensor(value):
+        x = value.detach().cpu()
+        if x.numel() > max_numel:
+            return None
+        return x.item() if x.ndim == 0 else x.tolist()
+    if isinstance(value, np.ndarray):
+        if value.size > max_numel:
+            return None
+        return value.item() if value.ndim == 0 else value.tolist()
+    if isinstance(value, (float, int, str, bool)) or value is None:
+        return value
+    return None
+
+
+def save_pose_depth_bundle(out_dir: str | Path, pose_aux: Any,
+                           camera_pose_vec: Optional[Any] = None,
+                           camera_gravity_vec: Optional[Any] = None) -> List[Path]:
+    """Persist/plot the pose-aware metric-depth FiLM diagnostics."""
+    if not isinstance(pose_aux, Mapping):
+        pose_aux = {}
+    out = Path(out_dir)
+    payload = {}
+    for key, value in pose_aux.items():
+        small = _small_diagnostic(value)
+        if small is not None:
+            payload[str(key)] = small
+    if camera_pose_vec is not None:
+        payload["camera_pose_vec"] = raw_numpy(camera_pose_vec).reshape(-1).tolist()
+    if camera_gravity_vec is not None:
+        payload["camera_gravity_vec"] = raw_numpy(camera_gravity_vec).reshape(-1).tolist()
+    json_path = out / "pose_depth_diagnostics.json"
+    write_json(json_path, payload)
+    written = [json_path]
+
+    gamma = pose_aux.get("pose_depth_gamma_abs_mean_levels")
+    beta = pose_aux.get("pose_depth_beta_abs_mean_levels")
+    if gamma is None:
+        gamma = pose_aux.get("pose_film_gamma_abs_mean_levels")
+    if beta is None:
+        beta = pose_aux.get("pose_film_beta_abs_mean_levels")
+    if gamma is not None or beta is not None:
+        plt = _plt()
+        fig, ax = plt.subplots(figsize=(6, 4), dpi=160)
+        if gamma is not None:
+            g = raw_numpy(gamma).reshape(-1)
+            ax.plot(np.arange(len(g)), g, marker="o", label="|gamma| mean")
+        if beta is not None:
+            b = raw_numpy(beta).reshape(-1)
+            ax.plot(np.arange(len(b)), b, marker="o", label="|beta| mean")
+        ax.set_xlabel("DPT feature level")
+        ax.set_ylabel("FiLM modulation magnitude")
+        ax.grid(True, alpha=.25)
+        ax.legend()
+        ax.set_title("Pose-aware metric-depth modulation")
+        fig.tight_layout()
+        p = out / "pose_depth_film_levels.png"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(p)
+        plt.close(fig)
+        written.append(p)
+    return written
 
 def depth_to_points(depth: Any, K: Any, rgb: Optional[np.ndarray] = None,
                     stride: int = 2, min_depth: float = .05,
