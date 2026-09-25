@@ -1,6 +1,6 @@
 # CVA depth dynamics 执行记录（2026-09-26）
 
-状态：独立 P0 验收及 D0/D1 的 50-update 配对运行完成，已从完整状态续跑至 500 updates；本记录不宣称塌缩机制已确定。
+状态：独立 P0 验收及 D0/D1 的 50-update 配对运行完成，正从完整状态续跑，目标为 500 updates；本记录不宣称塌缩机制已确定。
 
 ## 环境与初始化
 
@@ -93,4 +93,4 @@ Q/C 在两个局部方向上有明显抵消，不能用 Q-only 梯度大小代�
 - `/data/robotarm/result/grasp/rgbgrasp/experiment/cva_depth_dynamics/20260926_stage1_calibrated_seed0/diagnostics/`
 - `/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_seed0/P0/`
 
-产物包括 contract、逐项梯度、route connectivity、前向相等性、方向探针、梯度图及单步非干扰报告。前两次 strict 运行的 `p0_gate.json` 保持 false；calibrated 新运行独立验收通过。局部导数不等于实际优化器更新效果；配对轨迹正在生成，尚无必要性/充分性或修正方案结论。
+产物包括 contract、逐项梯度、route connectivity、前向相等性、方向探针、梯度图及单步非干扰报告。前两次 strict 运行的 `p0_gate.json` 保持 false；calibrated 新运行独立验收通过。局部导数不等于实际优化器更新效果；已取得 50-update 配对轨迹，500-update 运行进行中，尚无必要性/充分性或修正方案结论。

@@ -341,9 +341,172 @@ def render_fixed_frames(root, output):
         plt.close(figure)
 
 
+def render_gradient_maps(files, output):
+    """Render saved output gradients with one locked signed scale per endpoint.
+
+    Scales cover EVERY loaded route and both weighted objectives. None and
+    connected-zero maps retain different visual/metadata states. This function
+    reads local .pt snapshots and writes only PNGs and compact JSON metadata.
+    """
+    if not files:
+        return []
+    import hashlib
+    import torch
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize, SymLogNorm
+    from matplotlib.ticker import FuncFormatter
+
+    endpoints = (("depth_net_pred", "metric_depth", "metric depth z (m)"),
+                 ("depth_head_raw_pred", "raw_depth", "raw depth output (dimensionless)"))
+    objectives = ("depth", "task")
+    bundles = defaultdict(dict)
+    loaded = []
+    for path in files:
+        state = torch.load(path, map_location="cpu", weights_only=False)
+        key = (str(path.parent.resolve()), int(state["step"]), int(state["batch_id"]))
+        route = str(state["route"])
+        if route in bundles[key]:
+            raise ValueError(f"Duplicate gradient snapshot for {key}, route={route}")
+        item = {"path": str(path.resolve()), "state": state, "maps": {}, "statistics": {}}
+        for endpoint, _, _ in endpoints:
+            for objective in objectives:
+                name = objective + "_wrt_" + endpoint
+                if name not in state["gradients"]:
+                    raise ValueError(f"Missing gradient snapshot key {name}: {path}")
+                tensor = state["gradients"][name]
+                if tensor is None:
+                    item["maps"][name] = None
+                    item["statistics"][name] = {"state": "disconnected", "tensor_is_none": True}
+                    continue
+                value = tensor.detach().squeeze().float().numpy()
+                if value.ndim != 2:
+                    raise ValueError(f"Gradient must reduce to one HxW map: {path}, {name}, {value.shape}")
+                good = np.isfinite(value)
+                finite_values = value[good]
+                nonzero = int(np.count_nonzero(finite_values))
+                item["maps"][name] = value
+                item["statistics"][name] = {
+                    "state": "nonfinite" if not bool(good.all()) else "connected_nonzero" if nonzero else "connected_zero",
+                    "tensor_is_none": False, "shape": list(value.shape),
+                    "finite_count": int(good.sum()), "nonfinite_count": int((~good).sum()),
+                    "nonzero_finite_count": nonzero, "total_count": int(value.size),
+                    "max_abs_finite": float(np.abs(finite_values).max()) if finite_values.size else None,
+                    "l2_norm_finite": float(np.linalg.norm(finite_values.astype(np.float64))),
+                }
+        bundles[key][route] = item
+        loaded.append(item)
+
+    metadata = {
+        "scope": "Image 0 of saved initial audit batch; local output-space gradients, not actual network/optimizer updates",
+        "objectives": {"depth": "actual weighted metric-depth loss", "task": "sum of actual weighted non-depth losses"},
+        "normalization_scope": "one global signed scale per observation point across every loaded route, objective and bundle",
+        "metric_depth_context_range_m": [0.0, 1.0],
+        "rgb_display": "ImageNet mean/std inverse normalization, then clipping to [0,1]",
+        "sources": [item["path"] for item in loaded], "scales": {}, "artifacts": [],
+        "none_semantics": "disconnected: saved gradient was None; distinct from a connected tensor containing zeros",
+        "nonfinite_display": "masked pixels are gray; finite color scale excludes NaN/Inf and counts are reported",
+    }
+    norms = {}
+    for endpoint, _, _ in endpoints:
+        maxima = [item["statistics"][objective + "_wrt_" + endpoint].get("max_abs_finite")
+                  for item in loaded for objective in objectives]
+        maxima = [value for value in maxima if finite(value)]
+        observed = max(maxima) if maxima else None
+        bound = observed if observed is not None and observed > 0 else 1.0
+        threshold = max(bound * 1e-3, 1e-300)
+        norms[endpoint] = SymLogNorm(linthresh=threshold, linscale=1.0, vmin=-bound, vmax=bound, base=10)
+        metadata["scales"][endpoint] = {
+            "normalization": "SymLogNorm", "colormap": "RdBu_r", "base": 10,
+            "observed_global_max_abs_finite": observed, "vmin": -bound, "vmax": bound,
+            "linthresh": threshold, "linthresh_fraction_of_global_display_max": 1e-3, "linscale": 1.0,
+            "zero_or_no_finite_data_display_fallback": observed is None or observed == 0,
+            "locked_before_rendering": True,
+        }
+    cmap = plt.get_cmap("RdBu_r").copy()
+    cmap.set_bad("#9e9e9e")
+    paths = []
+    preferred = ("none", "gse", "seed_xyz", "support", "all")
+    for (directory, step, batch_id), items in sorted(bundles.items()):
+        routes = [route for route in preferred if route in items] + sorted(set(items) - set(preferred))
+        first = items[routes[0]]["state"]
+        for route, item in items.items():
+            state = item["state"]
+            for name in ("rgb", "gt_m"):
+                if not torch.equal(first[name], state[name]):
+                    raise ValueError(f"Gradient route panels have different frame inputs: {directory}, {route}, {name}")
+            for name in ("pred_m", "raw"):
+                if not torch.allclose(first[name], state[name], atol=1e-6, rtol=1e-5):
+                    raise ValueError(f"Gradient route panels have different forward values: {directory}, {route}, {name}")
+        rgb = first["rgb"].float().numpy().transpose(1, 2, 0)
+        rgb = np.clip(rgb * np.array([.229, .224, .225]) + np.array([.485, .456, .406]), 0, 1)
+        gt = first["gt_m"].squeeze().float().numpy()
+        pred = first["pred_m"].squeeze().float().numpy()
+        suffix = "" if len(bundles) == 1 else "_" + hashlib.sha256(directory.encode()).hexdigest()[:8] + f"_s{step}_b{batch_id}"
+        for endpoint, slug, endpoint_label in endpoints:
+            columns = max(len(routes), 3)
+            figure, axes = plt.subplots(3, columns, figsize=(3.4 * columns, 10.0),
+                                       squeeze=False, constrained_layout=True)
+            axes[0, 0].imshow(rgb)
+            axes[0, 0].set_title("Same audited RGB frame")
+            depth_artist = axes[0, 1].imshow(gt, cmap="viridis", norm=Normalize(0, 1))
+            axes[0, 1].set_title("GT depth (m)")
+            axes[0, 2].imshow(pred, cmap="viridis", norm=Normalize(0, 1))
+            axes[0, 2].set_title("Predicted depth (m)")
+            for ax in axes[0]:
+                ax.axis("off")
+            figure.colorbar(depth_artist, ax=[axes[0, 1], axes[0, 2]], shrink=.7,
+                            label="Depth: fixed 0–1 m scale")
+            scale = metadata["scales"][endpoint]
+            panels = []
+            for row, objective in enumerate(objectives, 1):
+                for column, route in enumerate(routes):
+                    ax = axes[row, column]
+                    name = objective + "_wrt_" + endpoint
+                    value = items[route]["maps"][name]
+                    statistics = items[route]["statistics"][name]
+                    ax.set_title(f"{route} · weighted {objective}", fontsize=10)
+                    if value is None:
+                        ax.set_facecolor("#eeeeee")
+                        ax.text(.5, .5, "Disconnected\n(gradient is None)", ha="center", va="center", transform=ax.transAxes)
+                    else:
+                        ax.imshow(np.ma.masked_invalid(value), cmap=cmap, norm=norms[endpoint], interpolation="nearest")
+                        if statistics["state"] == "connected_zero":
+                            ax.text(.5, .5, "Connected zero", ha="center", va="center", color="#333333", transform=ax.transAxes)
+                        elif statistics["state"] == "nonfinite":
+                            ax.text(.02, .02, f"Nonfinite: {statistics['nonfinite_count']} pixels", color="black",
+                                    transform=ax.transAxes, bbox={"facecolor": "white", "alpha": .8, "edgecolor": "none"})
+                    ax.set_xticks([])
+                    ax.set_yticks([])
+                    panels.append({"route": route, "objective": objective, **statistics})
+                for ax in axes[row, len(routes):]:
+                    ax.axis("off")
+            bar = figure.colorbar(ScalarMappable(norm=norms[endpoint], cmap=cmap), ax=list(axes[1:].flat),
+                                 shrink=.85, label=f"Signed derivative w.r.t. {endpoint_label}; shared across every route/objective")
+            bound, threshold = scale["vmax"], scale["linthresh"]
+            bar.set_ticks([-bound, -threshold, 0.0, threshold, bound])
+            bar.ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _position: f"{value:.3g}"))
+            figure.suptitle(f"Local gradients w.r.t. {endpoint_label} · update {step}, audit batch {batch_id}, image 0\n"
+                           f"One signed SymLog scale: ±{bound:.3g}, linear threshold {threshold:.3g}; not parameter updates", fontsize=12)
+            path = output / f"gradient_spatial_{slug}{suffix}.png"
+            figure.savefig(path, dpi=160)
+            plt.close(figure)
+            paths.append(path)
+            metadata["artifacts"].append({"png_path": str(path.resolve()), "observation_point": endpoint,
+                                           "source_directory": directory, "step": step, "batch_id": batch_id,
+                                           "image_index": 0, "routes": routes,
+                                           "missing_standard_routes": [route for route in preferred if route not in items],
+                                           "panels": panels})
+    metadata_path = output.parent / "gradient_spatial_metadata.json"
+    metadata_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return paths
+
+
 def summarize(root, output, plots=True):
     output.mkdir(parents=True, exist_ok=True)
     auxiliary = collect_training_and_audits(root)
+    gradient_map_files = sorted(root.rglob("gradient_maps_*_initial.pt"))
     for name, values in (("training_summary", auxiliary["training"]),
                          ("gradient_summary", auxiliary["gradients"]),
                          ("coverage_summary", auxiliary["coverage"]),
@@ -419,6 +582,10 @@ def summarize(root, output, plots=True):
                "the first record is retained; repetitions are neither summed nor silently averaged. "
                "Original record ordinals and differing fields are recorded in gradient_summary.csv.",
                "- Actual parameter deltas are measured optimizer updates. Global clipping coefficients are not Adam learning-rate multipliers.",
+               f"- Saved spatial gradient snapshots: {len(gradient_map_files)}. When plotted, signed scales are fixed globally "
+               "across routes and depth/task objectives separately for metric/raw observation points. "
+               "None is labeled disconnected, not zero. These maps show local output derivatives, not optimizer updates. "
+               "Artifact paths and scale parameters are recorded in gradient_spatial_metadata.json.",
                "- Probe coverage is averaged per fixed frame. Identity changes compare the same frame/mode to its previous probe; "
                "aligned-slot changes can include changed queries, whereas same-identity NN changes condition on matching query IDs.",
                "- Reproduction: interpret only the measured initialization, route, data protocol and update budget.",
@@ -430,16 +597,18 @@ def summarize(root, output, plots=True):
                "", "Source contracts and measured files are indexed in `summary_sources.json`."]
     (output / "report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
     (output / "summary_sources.json").write_text(json.dumps({"fixed_probe_files": sources,
+        "gradient_snapshot_files": [str(path.resolve()) for path in gradient_map_files],
         "additional_measured_files": auxiliary["sources"], "contracts": contracts}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     generated = []
-    if plots and (rows or any(auxiliary[key] for key in ("training", "gradients", "coverage", "switches"))):
+    if plots and (rows or gradient_map_files or any(auxiliary[key] for key in ("training", "gradients", "coverage", "switches"))):
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         figures = output / "figures"
         figures.mkdir(exist_ok=True)
         generated.extend(render_training_and_audits(auxiliary, figures))
+        generated.extend(path.name for path in render_gradient_maps(gradient_map_files, figures))
     if plots and rows:
         figure, axes = plt.subplots(2, 3, figsize=(13, 7), constrained_layout=True)
         metrics = [("mae_m", "Depth MAE (m)"), ("bias_m", "Depth bias (m)"),
@@ -462,6 +631,7 @@ def summarize(root, output, plots=True):
         render_fixed_frames(root, figures)
     return {"rows": len(rows), "training_rows": len(auxiliary["training"]),
             "gradient_rows": len(auxiliary["gradients"]), "figures": generated,
+            "gradient_spatial_metadata": str(output / "gradient_spatial_metadata.json") if plots and gradient_map_files else None,
             "summary": str(csv_path), "report": str(output / "report.md")}
 
 
