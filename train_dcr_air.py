@@ -226,12 +226,20 @@ def main():
             metric, by_case = validate(
                 model, val_paths, val_ds, val_lookup,
                 cache_signature, device, args.query_chunk)
+            # The structural experiment must start as an exact no-op over DCR.
+            # Fail before training if the real checkpoint/data path violates that
+            # contract; a synthetic unit test alone is not sufficient.
+            if any(abs(v['selection_change_rate']) > 0 or
+                   abs(v['air_over_dcr_exact']) > 1e-12
+                   for v in by_case.values()):
+                raise RuntimeError(
+                    'Zero-init AIR failed exact DCR selection equivalence')
             best = metric
             initial_row = {
                 'epoch': -1,
                 'val_macro_utility': metric,
                 'val_cases': by_case,
-                'note': 'zero-init AIR; must reproduce frozen DCR center selection',
+                'note': 'zero-init AIR exactly reproduces frozen DCR center selection',
             }
             initial = _checkpoint(
                 model, optimizer, run, signature, -1, best, history)
