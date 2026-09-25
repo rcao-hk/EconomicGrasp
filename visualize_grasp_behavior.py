@@ -307,9 +307,12 @@ def main():
 
     index_groups: Dict[str, List[Tuple[str, Path]]] = {}
     summary_rows = []
+    datasets = {}
 
     for split, sid in tasks:
-        ds, lookup = make_dataset(args.dataset_root, split, args.camera)
+        if split not in datasets:
+            datasets[split] = make_dataset(args.dataset_root, split, args.camera)
+        ds, lookup = datasets[split]
         if evaluator is not None:
             evaluator.set_scene(sid)
 
@@ -579,9 +582,9 @@ def main():
 
         if evaluator is not None:
             evaluator.clear()
-        del ds, lookup
         gc.collect()
 
+    datasets.clear()
     write_csv(out_root / f"summary_shard{args.shard_id}.csv", summary_rows)
     write_html_index(
         out_root / f"index_shard{args.shard_id}.html",
