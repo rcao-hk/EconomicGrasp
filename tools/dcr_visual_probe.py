@@ -131,10 +131,27 @@ def inspect_dcr_case(model, batch, case: str, case_seed: int,
 
 @torch.no_grad()
 def inspect_e1_like_case(model, batch, bundle, active_depth, depth_pack,
-                         query_chunk: int = 64):
-    """Run an E1-compatible zero-ranker model on an already aligned DCR bundle."""
-    feature, proposal_logits, raw, enhanced, spatial = model.corrector.encode_image(
-        batch, depth_pack, active_depth, return_maps=True)
+                         query_chunk: int = 64, return_maps: bool = False):
+    """Run an E1-compatible zero-ranker on an aligned DCR action grid.
+
+    The default returns only selection diagnostics so an optional E1 comparison
+    does not retain another set of large feature maps on GPU.
+    """
+    maps = {}
+    if return_maps:
+        feature, proposal_logits, raw, enhanced, spatial = (
+            model.corrector.encode_image(
+                batch, depth_pack, active_depth, return_maps=True))
+        maps = {
+            "feature_pre": raw,
+            "feature_post": enhanced,
+            "proposal_logits": proposal_logits,
+            "spatial_aux": spatial,
+        }
+    else:
+        feature, proposal_logits = model.corrector.encode_image(
+            batch, depth_pack, active_depth, return_maps=False)
+
     parts = []
     nquery = int(bundle["actions"].shape[1])
     for start in range(0, nquery, int(query_chunk)):
@@ -147,13 +164,12 @@ def inspect_e1_like_case(model, batch, bundle, active_depth, depth_pack,
     logits = torch.cat(parts, dim=1)
     utility = logits.sigmoid().mean(-1)
     selected = select_centers(utility, bundle["valid"], model.zero)
-    return {
-        "feature_pre": raw,
-        "feature_post": enhanced,
-        "proposal_logits": proposal_logits,
-        "spatial_aux": spatial,
-        "cdf_logits": logits,
+    result = {
         "selected": selected,
         "selected_offsets_mm": model.corrector.offsets_mm[selected],
         "local_utility": utility,
     }
+    if return_maps:
+        result.update(maps)
+        result["cdf_logits"] = logits
+    return result
