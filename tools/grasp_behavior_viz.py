@@ -546,6 +546,43 @@ def save_query_scalar_overlay(path: str | Path, rgb: np.ndarray,
     plt.close(fig)
 
 
+def save_candidate_latent_response(path: str | Path, latent: Any,
+                                   offsets_mm: Any, stage1_score: Any,
+                                   zero_index: int,
+                                   max_queries: int = 32) -> None:
+    """Show how CVA candidate representation changes across center offsets."""
+    h = np.asarray(to_numpy(latent), np.float32)
+    off = np.asarray(to_numpy(offsets_mm), np.float32).reshape(-1)
+    score = np.asarray(to_numpy(stage1_score), np.float32).reshape(-1)
+    if h.ndim != 3 or h.shape[0] != len(off):
+        raise ValueError(f"Expected latent [C,Q,H] aligned to offsets, got {h.shape}")
+    if not 0 <= int(zero_index) < h.shape[0]:
+        raise ValueError("Invalid native center index")
+    qidx = np.argsort(-score, kind="stable")[:min(int(max_queries), len(score))]
+    sub = h[:, qidx]
+    norm = np.linalg.norm(sub, axis=-1).T
+    native = sub[int(zero_index)]
+    denom = np.linalg.norm(sub, axis=-1) * np.linalg.norm(native, axis=-1)[None, :]
+    cosine = ((sub * native[None, ...]).sum(-1) / np.maximum(denom, 1e-8)).T
+
+    plt = _plt()
+    fig, axes = plt.subplots(1, 2, figsize=(13, max(5, len(qidx) * .22)), dpi=160)
+    im = axes[0].imshow(norm, aspect="auto", cmap="magma")
+    axes[0].set_title("Candidate latent L2 norm")
+    fig.colorbar(im, ax=axes[0], fraction=.04, pad=.03)
+    im = axes[1].imshow(cosine, aspect="auto", vmin=-1, vmax=1, cmap="coolwarm")
+    axes[1].set_title("Cosine similarity to native-center latent")
+    fig.colorbar(im, ax=axes[1], fraction=.04, pad=.03)
+    for ax in axes:
+        ax.set_xticks(range(len(off)), [f"{x:g}" for x in off])
+        ax.set_xlabel("center offset [mm]")
+        ax.set_ylabel("query (Stage-1 score order)")
+    fig.tight_layout()
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path)
+    plt.close(fig)
+
 def save_query_response(out_dir: str | Path, rgb: np.ndarray,
                         token_ids: Any, stage1_score: Any,
                         selected_offset_mm: Any,
