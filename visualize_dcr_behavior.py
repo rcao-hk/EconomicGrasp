@@ -22,7 +22,7 @@ from e1e2_common import (VERSION, file_sha, get_batch, load_torch, make_dataset,
 from tools.grasp_behavior_visualizer import (
     BehaviorVisConfig, BehaviorVisualizer, backproject_depth, denormalize_rgb,
     save_cdf_heatmap, save_center_shift_overlay, save_depth_panel,
-    save_evaluation_overlay, save_feature_panel, save_grasp_overlay,
+    save_evaluation_overlay, save_evaluator_friction_overlay, save_feature_panel, save_grasp_overlay,
     save_local_patch_overlay, save_offset_response, save_ply,
     save_pointcloud_views, save_proposal_panel, save_rank_residual_panel,
     to_numpy,
@@ -44,6 +44,10 @@ def parser():
     p.add_argument('--air-checkpoint', default='')
     p.add_argument('--official-root', default='',
                    help='Optional DCR inference root containing official accuracy.npy')
+    p.add_argument('--run-evaluator', action='store_true',
+                   help='Run exact GraspNet evaluator on these sparse selected frames')
+    p.add_argument('--evaluator-methods', default='stage1,native',
+                   help='DCR output modes to send through sparse-frame evaluator')
     p.add_argument('--splits',
                    default='test_seen,test_similar,test_novel')
     p.add_argument('--frames', default='0,128,255')
@@ -317,7 +321,8 @@ def _load_official_accuracy(root, method, case, split, sid, aid):
 
 
 def _save_case(vis, out, rgb_model, sensor, K, pack, result, case, args,
-               eval_root='', air_result=None):
+               eval_root='', air_result=None, frame_evaluator=None,
+               evaluator_methods=()):
     bundle = result['bundle']
     outputs = result['outputs']
     score = outputs['stage1'][:, 0]
@@ -408,21 +413,43 @@ def _save_case(vis, out, rgb_model, sensor, K, pack, result, case, args,
                 title=f'CVA view-conditioned local regions: {case}')
 
     if vis.wants('evaluation'):
-        # "eval input" is always available; post-evaluator coloring is optional.
-        eval_grasps = to_numpy(outputs['stage1'])
-        np.save(out / '09_eval_input_grasps.npy', eval_grasps, allow_pickle=False)
-        acc = _load_official_accuracy(
-            eval_root, 'stage1', case,
-            result['_split'], result['_scene_id'], result['_anno_id'])
-        if acc is not None:
-            save_evaluation_overlay(
-                out / '09b_post_evaluator_quality.png', rgb_model, K,
-                eval_grasps, acc, topk=50,
-                title=f'Official evaluator outcome: {case}')
-        else:
-            (out / '09b_post_evaluator_unavailable.txt').write_text(
-                'No matching official accuracy.npy for this exact frame. '
-                'The eval-input grasp array is saved as 09_eval_input_grasps.npy.\n')
+        # Save exactly what is sent to evaluator for every requested score policy.
+        for method in evaluator_methods or ('stage1',):
+            if method not in outputs:
+                continue
+            eval_grasps = to_numpy(outputs[method])
+            np.save(
+                out / f'09_eval_input_{method}.npy',
+                eval_grasps, allow_pickle=False)
+            if frame_evaluator is not None:
+                er = frame_evaluator.evaluate(
+                    result['_scene_id'], result['_anno_id'], eval_grasps)
+                np.savez_compressed(
+                    out / f'09_eval_result_{method}.npz', **er.as_npz())
+                save_evaluator_friction_overlay(
+                    out / f'09_post_evaluator_{method}.png',
+                    rgb_model, K, er.grasps, er.friction_scores,
+                    er.collision, topk=50,
+                    title=f'Post-evaluator grasps ({method}): {case}')
+                save_evaluation_overlay(
+                    out / f'09_post_evaluator_prefix_accuracy_{method}.png',
+                    rgb_model, K, er.grasps, er.accuracy,
+                    topk=50,
+                    title=f'Evaluator prefix accuracy ({method}): {case}')
+            else:
+                acc = _load_official_accuracy(
+                    eval_root, method, case,
+                    result['_split'], result['_scene_id'], result['_anno_id'])
+                if acc is not None:
+                    save_evaluation_overlay(
+                        out / f'09_post_evaluator_prefix_accuracy_{method}.png',
+                        rgb_model, K, eval_grasps, acc, topk=50,
+                        title=f'Official evaluator outcome ({method}): {case}')
+        if frame_evaluator is None and not eval_root:
+            (out / '09_post_evaluator_unavailable.txt').write_text(
+                'Exact post-evaluator visualization was not requested. '
+                'Re-run with --run-evaluator for sparse frames 0/128/255, '
+                'or provide --official-root for already-evaluated frames.\n')
 
     if vis.wants('air') and air_result is not None:
         fused, base, residual, air_bundle, _, diag = air_result
@@ -504,6 +531,15 @@ def main():
         args.output_root, args.items, every=1, topk=args.topk,
         max_points=args.max_points)
     vis = BehaviorVisualizer(vis_cfg)
+    evaluator_methods = tuple(_parse_strs(args.evaluator_methods))
+    allowed_eval_methods = {'native', 'local', 'stage1', 'anchored'}
+    if set(evaluator_methods) - allowed_eval_methods:
+        raise ValueError(f'Bad evaluator methods: {set(evaluator_methods)-allowed_eval_methods}')
+    frame_evaluator = None
+    if args.run_evaluator and vis.wants('evaluation'):
+        from tools.graspnet_frame_evaluator import SelectedFrameGraspEvaluator
+        frame_evaluator = SelectedFrameGraspEvaluator(
+            args.dataset_root, protocol['camera'], top_k=50)
     scene_jobs = []
     for split in splits:
         for sid in SPLIT_SCENES[split]:
@@ -525,6 +561,8 @@ def main():
         'stage1_checkpoint': args.stage1_checkpoint,
         'air_checkpoint': args.air_checkpoint or None,
         'official_root': args.official_root or None,
+        'run_evaluator': bool(args.run_evaluator),
+        'evaluator_methods': list(evaluator_methods),
         'shard_id': args.shard_id,
         'num_shards': args.num_shards,
         'sensor_depth_role': 'visual context only; never fed to RGB-only model',
@@ -574,7 +612,8 @@ def main():
                             query_chunk=args.query_chunk, depth_pack=pack)
                     _save_case(
                         vis, out, rgb_model, sensor, batch['K'], pack,
-                        result, case, args, args.official_root, air_result)
+                        result, case, args, args.official_root, air_result,
+                        frame_evaluator, evaluator_methods)
 
             if vis.wants('grasp_delta') and 'nominal' in case_results:
                 nominal = case_results['nominal']
