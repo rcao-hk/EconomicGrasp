@@ -28,10 +28,10 @@ from e1e2_common import (VERSION, get_batch, load_torch, make_dataset, seed_all,
 from tools.dcr_visual_probe import inspect_dcr_case, inspect_e1_like_case
 from tools.grasp_behavior_viz import (
     BehaviorVizWriter, depth_to_points, imagenet_rgb, make_contact_sheet,
-    parse_items, save_center_cdf_panels, save_corruption_motion,
-    save_depth_bundle, save_feature_bundle, save_grasp_overlay,
+    parse_items, save_center_cdf_panels, save_center_selection_motion,
+    save_corruption_motion, save_depth_bundle, save_feature_bundle, save_grasp_overlay,
     save_grasp_scene_ply, save_local_patch_overlay, save_proposal_bundle,
-    save_query_response, save_rgb, save_spatial_bundle,
+    save_query_response, save_query_scalar_overlay, save_rgb, save_spatial_bundle,
     save_stage1_angle_depth, save_view_response, write_csv, write_html_index,
     write_json,
 )
@@ -70,6 +70,8 @@ def parser():
     p.add_argument("--point-stride", type=int, default=3)
     p.add_argument("--eval-methods", default="dcr",
                    help="Comma list from native,dcr,e1,air; only used when evaluator is enabled.")
+    p.add_argument("--eval-cases", default="nominal",
+                   help="Comma-separated cases sent to detailed Dex-Net evaluation. Use all to evaluate every case.")
     p.add_argument("--eval-topk", type=int, default=50)
     p.add_argument("--eval-workers", type=int, default=1,
                    help="Reserved for compatibility; detailed per-frame evaluator is sequential.")
@@ -277,6 +279,7 @@ def main():
         "query_limit": args.query_limit,
         "query_chunk": args.query_chunk,
         "point_stride": args.point_stride,
+        "eval_cases": args.eval_cases,
         "dcr_checkpoint": str(args.dcr_checkpoint),
         "e1_checkpoint": str(args.e1_checkpoint) if args.e1_checkpoint else None,
         "air_checkpoint": str(args.air_checkpoint) if args.air_checkpoint else None,
@@ -329,7 +332,7 @@ def main():
 
             from models.economicgrasp_cva_centers import extract_depth_features
             pack = extract_depth_features(dcr.reference, batch)
-            nominal_snapshot = None
+            nominal_reference = None
             case_groups = {}
 
             for case in cases:
@@ -365,12 +368,23 @@ def main():
                         sensor=raw_item.get("sensor_depth_m"),
                         rendered=raw_item.get("gt_depth_m"),
                         point_stride=args.point_stride)
-                    for name in ("depth_pred_nominal.png", "depth_active.png",
-                                 "depth_corruption_delta_mm.png", "depth_sensor.png",
-                                 "depth_rendered.png"):
+                    for name in (
+                            "depth_pred_nominal.png", "depth_active.png",
+                            "depth_corruption_delta_mm.png", "depth_sensor.png",
+                            "depth_rendered.png",
+                            "depth_pred_nominal_minus_sensor_mm.png",
+                            "depth_pred_nominal_minus_rendered_mm.png",
+                            "depth_active_minus_sensor_mm.png",
+                            "depth_active_minus_rendered_mm.png"):
                         p = case_dir / name
                         if p.is_file():
                             images.append((name, p))
+                    for name in (
+                            "pointcloud_pred_nominal.ply", "pointcloud_active.ply",
+                            "pointcloud_sensor.ply", "pointcloud_rendered.ply"):
+                        p = case_dir / name
+                        if p.is_file():
+                            files.append((name, p))
 
                 if "proposal" in items:
                     save_proposal_bundle(case_dir, rgb, snapshot["proposal_logits"])
@@ -428,6 +442,17 @@ def main():
                         ("Best local utility", case_dir / "query_best_local_utility.png"),
                     ])
 
+                    motion_stats = save_center_selection_motion(
+                        case_dir / "dcr_center_correction_motion.png",
+                        rgb, K, snapshot["bundle"]["actions"],
+                        snapshot["selected"], dcr.zero,
+                        dcr.corrector.offsets_mm,
+                        title="DCR native→selected")
+                    write_json(case_dir / "dcr_center_correction_motion.json",
+                               motion_stats)
+                    images.append(("DCR center correction motion",
+                                   case_dir / "dcr_center_correction_motion.png"))
+
                 if "local" in items:
                     p = case_dir / "local_attention_overlay.png"
                     save_local_patch_overlay(
@@ -458,6 +483,28 @@ def main():
                             snapshot["stage1_score"],
                             e1_info["selected_offsets_mm"],
                             e1_info["local_utility"])
+                        delta_off = (
+                            snapshot["selected_offsets_mm"] -
+                            e1_info["selected_offsets_mm"])
+                        save_query_scalar_overlay(
+                            case_dir / "e1_vs_dcr_offset_delta_mm.png",
+                            rgb, snapshot["bundle"]["token_ids"], delta_off,
+                            "DCR selected offset - E1 selected offset [mm]",
+                            symmetric=True)
+                        save_center_selection_motion(
+                            case_dir / "e1" / "center_correction_motion.png",
+                            rgb, K, snapshot["bundle"]["actions"],
+                            e1_info["selected"], e1_model.zero,
+                            e1_model.corrector.offsets_mm,
+                            title="E1 native→selected")
+                        images.extend([
+                            ("E1 selected offset",
+                             case_dir / "e1" / "query_selected_offset_mm.png"),
+                            ("DCR-E1 offset delta",
+                             case_dir / "e1_vs_dcr_offset_delta_mm.png"),
+                            ("E1 center correction motion",
+                             case_dir / "e1" / "center_correction_motion.png"),
+                        ])
 
                 air_info = None
                 if air_model is not None and "air" in items:
@@ -479,8 +526,35 @@ def main():
                         case_dir / "air", rgb,
                         snapshot["bundle"]["token_ids"],
                         snapshot["stage1_score"], air_off, air_u)
-                    images.append(("AIR selected offset",
-                                   case_dir / "air" / "query_selected_offset_mm.png"))
+                    save_query_scalar_overlay(
+                        case_dir / "air" / "air_logit_residual_selected.png",
+                        rgb, snapshot["bundle"]["token_ids"],
+                        residual[air_sel, torch.arange(
+                            len(air_sel), device=air_sel.device)],
+                        "AIR scalar logit residual at selected center",
+                        cmap="coolwarm", symmetric=True)
+                    save_query_scalar_overlay(
+                        case_dir / "air" / "air_minus_dcr_offset_mm.png",
+                        rgb, snapshot["bundle"]["token_ids"],
+                        air_off - snapshot["selected_offsets_mm"],
+                        "AIR selected offset - DCR selected offset [mm]",
+                        symmetric=True)
+                    save_center_selection_motion(
+                        case_dir / "air" / "center_correction_motion.png",
+                        rgb, K, snapshot["bundle"]["actions"],
+                        air_sel, air_model.zero,
+                        air_model.base.corrector.offsets_mm,
+                        title="AIR native→selected")
+                    images.extend([
+                        ("AIR selected offset",
+                         case_dir / "air" / "query_selected_offset_mm.png"),
+                        ("AIR residual",
+                         case_dir / "air" / "air_logit_residual_selected.png"),
+                        ("AIR-DCR offset delta",
+                         case_dir / "air" / "air_minus_dcr_offset_mm.png"),
+                        ("AIR center correction motion",
+                         case_dir / "air" / "center_correction_motion.png"),
+                    ])
 
                 active_pts, active_cols = depth_to_points(
                     snapshot["active_depth"], K, rgb,
@@ -501,27 +575,36 @@ def main():
                             files.append((f"{method} scene PLY", ply))
 
                 if case == "nominal":
-                    nominal_snapshot = snapshot
-                elif "corruption_delta" in items and nominal_snapshot is not None:
+                    nominal_reference = {
+                        "bundle": {
+                            "token_ids": snapshot["bundle"]["token_ids"].detach().cpu(),
+                            "native": snapshot["bundle"]["native"].detach().cpu(),
+                        },
+                        "dcr_action": snapshot["outputs"]["stage1"].detach().cpu().numpy(),
+                    }
+                elif "corruption_delta" in items and nominal_reference is not None:
                     stats = save_corruption_motion(
                         case_dir / "corruption_native_motion.png",
-                        rgb, K, nominal_snapshot["bundle"],
+                        rgb, K, nominal_reference["bundle"],
                         snapshot["bundle"])
                     write_json(case_dir / "corruption_motion.json", stats)
                     images.append(("Nominal→corrupted Stage-1 center motion",
                                    case_dir / "corruption_native_motion.png"))
 
                     if "grasps" in items:
-                        nominal_dcr = nominal_snapshot["outputs"]["stage1"].cpu().numpy()
                         save_grasp_overlay(
                             case_dir / "grasps_nominal_dcr_reference.png",
-                            rgb, nominal_dcr, K,
+                            rgb, nominal_reference["dcr_action"], K,
                             title="Nominal DCR reference", topk=args.topk)
                         images.append(("Nominal DCR reference",
                                        case_dir / "grasps_nominal_dcr_reference.png"))
 
                 eval_summaries = {}
-                if evaluator is not None:
+                eval_cases = set(parse_csv(args.eval_cases))
+                evaluate_this_case = (
+                    evaluator is not None and
+                    ("all" in eval_cases or case in eval_cases))
+                if evaluate_this_case:
                     eval_methods = set(parse_csv(args.eval_methods))
                     for method, arr in methods.items():
                         if method not in eval_methods:
