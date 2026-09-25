@@ -721,6 +721,60 @@ def save_view_response(out_dir: str | Path, rgb: np.ndarray,
         plt.close(fig)
 
 
+def save_center_selection_motion(path: str | Path, rgb: np.ndarray, K: Any,
+                                 actions: Any, selected: Any, zero: int,
+                                 offsets_mm: Any, max_lines: int = 160,
+                                 title: str = "Native to selected center") -> Dict[str, float]:
+    """Visualize the physical translation made by a center corrector."""
+    import cv2
+    a = np.asarray(to_numpy(actions), np.float32)
+    sel = np.asarray(to_numpy(selected), np.int64).reshape(-1)
+    off = np.asarray(to_numpy(offsets_mm), np.float32).reshape(-1)
+    if a.ndim != 3 or a.shape[-1] != 17 or a.shape[1] != len(sel):
+        raise ValueError("Expected center actions [C,Q,17] and selected [Q]")
+    q = np.arange(len(sel))
+    native = a[int(zero), q, 13:16]
+    chosen = a[sel, q, 13:16]
+    chosen_off = off[sel]
+    moved = np.flatnonzero(sel != int(zero))
+    image = (np.clip(rgb, 0, 1) * 255).astype(np.uint8)[..., ::-1].copy()
+    k = to_numpy(K)
+    if k.ndim == 3:
+        k = k[0]
+    if len(moved):
+        mag = np.linalg.norm(chosen[moved] - native[moved], axis=1)
+        order = moved[np.argsort(-mag)[:min(int(max_lines), len(moved))]]
+        for qi in order:
+            uv, ok = _project_xyz(np.stack((native[qi], chosen[qi])), k)
+            if not ok.all():
+                continue
+            p0 = tuple(np.round(uv[0]).astype(int))
+            p1 = tuple(np.round(uv[1]).astype(int))
+            # blue = toward camera / negative z offset, red = away / positive.
+            color = (230, 100, 30) if chosen_off[qi] < 0 else (30, 80, 230)
+            cv2.line(image, p0, p1, color, 1, cv2.LINE_AA)
+            cv2.circle(image, p0, 2, (235, 235, 235), -1, cv2.LINE_AA)
+            cv2.circle(image, p1, 3, color, -1, cv2.LINE_AA)
+    text = (
+        f"{title} | move={len(moved)/max(1,len(sel)):.2f} "
+        f"mean dz={float(chosen_off.mean()):+.1f} mm")
+    cv2.putText(image, text, (8, 20), cv2.FONT_HERSHEY_SIMPLEX,
+                .45, (255,255,255), 2, cv2.LINE_AA)
+    cv2.putText(image, text, (8, 20), cv2.FONT_HERSHEY_SIMPLEX,
+                .45, (0,0,0), 1, cv2.LINE_AA)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(path), image)
+    return {
+        "queries": int(len(sel)),
+        "move_rate": float(len(moved) / max(1, len(sel))),
+        "negative_rate": float((chosen_off < 0).mean()),
+        "positive_rate": float((chosen_off > 0).mean()),
+        "mean_offset_mm": float(chosen_off.mean()),
+        "mean_abs_offset_mm": float(np.abs(chosen_off).mean()),
+    }
+
+
 def save_corruption_motion(path: str | Path, rgb: np.ndarray, K: Any,
                            nominal_bundle: Mapping[str, Any],
                            active_bundle: Mapping[str, Any],
