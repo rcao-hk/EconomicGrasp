@@ -88,3 +88,31 @@ For the current research question, inspect `smooth:5` and `smooth:10` on
 Similar/Novel first. If DCR does not materially improve them, the result supports
 moving to an independent evidence path rather than further center-corrector
 optimization.
+
+
+## Selection-behavior audit
+
+The DCR/E1 inference traces already contain the selected center index, center
+offset grid, local CDF utility and frozen Stage-1 query score. A label-free
+selection audit can therefore be run without another network forward:
+
+```bash
+WORK_ROOT=/data2/robotarm/result/grasp/rgbgrasp/dcr_e1_4_10pct \
+bash scripts/run_dcr_selection_audit.sh
+```
+
+It reports all queries plus per-frame Stage-1 Top-10/Top-50 subsets:
+
+```text
+WORK_ROOT/selection_audit/selection_audit.csv
+WORK_ROOT/selection_audit/offset_histogram.csv
+WORK_ROOT/selection_audit/transition_matrix.csv
+WORK_ROOT/selection_audit/audit_meta.json
+```
+
+The audit is intentionally label-free. It can establish signed-offset bias,
+STAY/MOVE behavior and E1->DCR selection transitions, but it must not be
+described as exact-action rescue/harm without matched evaluator labels.
+
+The follow-up structural experiment that adds independent, action-aligned
+pre-enhancer image evidence is documented in `experiments/DCR_AIR.md`.
