@@ -23,7 +23,7 @@ import numpy as np
 import torch
 
 from dcr_cva_common import DCR_VERSION, anchored_score
-from e1e2_common import (VERSION, get_batch, load_torch, make_dataset, seed_all,
+from e1e2_common import (VERSION, load_torch, make_dataset, move_batch, seed_all,
                          seed_for, select_centers)
 from tools.dcr_visual_probe import inspect_dcr_case, inspect_e1_like_case
 from tools.grasp_behavior_viz import (
@@ -155,6 +155,17 @@ def selected_action_from_logits(logits, bundle, zero, offsets):
 
 def _subset_raw_item(ds, lookup, sid, aid):
     return ds[lookup[(sid, aid)]]
+
+
+def _batch_from_raw_item(item, device):
+    from dataset.graspnet_dataset import collate_fn
+    keys = (
+        "img", "K", "camera_pose_vec", "camera_gravity_vec",
+        "scene_idx", "anno_idx", "token_valid_mask",
+    )
+    return move_batch(
+        collate_fn([{k: item[k] for k in keys if k in item}]),
+        device)
 
 
 class DetailedEvaluator:
@@ -326,7 +337,7 @@ def main():
                 continue
 
             raw_item = _subset_raw_item(ds, lookup, sid, aid)
-            batch = get_batch(ds, lookup, sid, aid, device)
+            batch = _batch_from_raw_item(raw_item, device)
             rgb = imagenet_rgb(batch["img"])
             K = batch["K"]
 
