@@ -202,28 +202,50 @@ def plot_panels(rows, panels, groups, path, title, symlog=False):
     if not rows or not any(finite(row.get(metric)) for row in rows for metric, _ in panels):
         return False
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import FixedLocator, FuncFormatter, MaxNLocator
     ncols = min(3, len(panels))
     nrows = math.ceil(len(panels) / ncols)
     figure, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 3.5 * nrows),
                                squeeze=False, constrained_layout=True)
     for ax, (metric, label) in zip(axes.flat, panels):
         lines = defaultdict(lambda: defaultdict(list))
+        plotted_values = []
         for row in rows:
             lines[tuple(str(row.get(key, "unspecified")) for key in groups)][row["step"]].append(row.get(metric))
         for identity, by_step in sorted(lines.items()):
             points = [(step, avg(values)) for step, values in sorted(by_step.items())]
             if any(finite(value) for _, value in points):
+                plotted_values.extend(value for _, value in points if finite(value))
                 ax.plot([step for step, _ in points],
                         [value if finite(value) else math.nan for _, value in points],
                         marker=".", label=" / ".join(identity))
         ax.set(title=label, xlabel="Successful optimizer updates")
         ax.grid(alpha=.2)
-        if symlog and metric != "clip_coefficient":
-            ax.set_yscale("symlog", linthresh=1e-8)
+        magnitudes = [abs(value) for value in plotted_values if value != 0]
+        wide_range = bool(magnitudes) and max(magnitudes) / min(magnitudes) >= 20
+        crosses_zero = bool(plotted_values) and min(plotted_values) < 0 < max(plotted_values)
+        if symlog and metric != "clip_coefficient" and (wide_range or crosses_zero):
+            ax.set_yscale("symlog", linthresh=max(min(magnitudes) * .5, 1e-12))
+            # A symlog major locator can emit no in-range ticks for a narrow
+            # visible interval. Guarantee readable numeric labels even then.
+            low, high = ax.get_ylim()
+            visible = [tick for tick in ax.get_yticks() if low <= tick <= high]
+            if len(visible) < 2:
+                ticks = sorted(set([min(plotted_values), max(plotted_values),
+                                    *([0.0] if low <= 0 <= high else [])]))
+                ax.yaxis.set_major_locator(FixedLocator(ticks))
+        else:
+            ax.yaxis.set_major_locator(MaxNLocator(nbins=5, min_n_ticks=3))
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _position: f"{value:.3g}"))
         if ax.lines:
             ax.legend(fontsize=6)
         else:
-            ax.text(.5, .5, "No finite measurements", ha="center", transform=ax.transAxes, fontsize=9)
+            states = [row[metric + "__state"] for row in rows if metric + "__state" in row]
+            message = ("No connected gradients (None)" if states and all(state == "unused/None" for state in states)
+                       else "Parameters do not require gradients" if states and all(state == "not_requires_grad" for state in states)
+                       else "Nonfinite gradient measurements" if "nonfinite" in states
+                       else "No finite measurements")
+            ax.text(.5, .5, message, ha="center", transform=ax.transAxes, fontsize=9)
     for ax in list(axes.flat)[len(panels):]:
         ax.axis("off")
     figure.suptitle(title, fontsize=11)
@@ -258,6 +280,7 @@ def render_training_and_audits(data, figures):
                 continue
             key = tuple(row[k] for k in ("arm", "route", "split", "step", "batch", "indices", "source_path"))
             by_measurement[key][row["loss"]] = row["depth_parameter_grad_norm"]
+            by_measurement[key][row["loss"] + "__state"] = row["state"]
         rows = [{**dict(zip(("arm", "route", "split", "step", "batch", "indices", "source_path"), key)), **values}
                 for key, values in by_measurement.items()]
         draw(rows, [(loss, loss.capitalize() + " loss → depth-parameter gradient norm") for loss in LOSS_TERMS],
