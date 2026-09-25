@@ -1,6 +1,6 @@
 # CVA depth dynamics 执行记录（2026-09-26）
 
-状态：独立 P0 验收及 D0/D1 的 50-update 配对运行完成，正从完整状态续跑，目标为 500 updates；本记录不宣称塌缩机制已确定。
+状态：独立 P0 验收及 D0/D1 的 500-update 配对运行完成，正从完整状态续跑至 1000，再按曲线决定至 2000 的分段延长。第 500 步出现 D1 几何失真，另启动 E-only/Q-only 的 500-update 路径对照；本记录不宣称常量深度塌缩或机制已确定。
 
 ## 环境与初始化
 
@@ -80,8 +80,53 @@ I/O 等条件会影响此数值，不能据此比较路径的固有计算成本�
 逐 split/mode 的原始汇总见 [summary50.csv](depth_dynamics_results_20260926/summary50.csv)，
 P0 gate 见 [p0_gate.json](depth_dynamics_results_20260926/p0_gate.json)。
 P1 的定量复核与有限差分适用范围见 [P1_REVIEW_ZH.md](depth_dynamics_results_20260926/P1_REVIEW_ZH.md)。
-该有限差分仅验证单图、all route、foreground 固定连续子函数；没有验证所有 batch/路由。
+原有限差分仅验证单图、all route、foreground 固定连续子函数；后续八批补充见下文。
 Q/C 在两个局部方向上有明显抵消，不能用 Q-only 梯度大小代替 all 的实际网络更新。
+
+## 500-update 配对结果与路径对照
+
+两组各完成 500 次实际更新、500 张训练图像。完整状态的 Python/NumPy/CPU/CUDA RNG、
+loader、module mode、is_training 逐项完全一致；全部已记录步骤的样本索引也一致。
+校验及完整 checkpoint SHA256 见 [paired_state500.json](depth_dynamics_results_20260926/paired_state500.json)。
+
+| Arm / test_seen eval（32 帧） | GT-valid MAE (mm) | GT-valid bias (mm) | 平均前景 std ratio | 平均局部斜率 | 平均局部 contrast ratio |
+|---|---:|---:|---:|---:|---:|
+| D0 | 4.0010 | -0.0509 | 0.98264 | 0.62174 | 0.98580 |
+| D1 | 34.8060 | +31.6324 | 1.37767 | -0.71352 | 2.37939 |
+
+D1 在 step 100/200/300/400 的验证 MAE 分别为 13.992/10.679/8.503/9.333 mm，
+step 500 明显恶化。固定图中多个物体呈现正深度偏移和局部深度关系反转。
+其全 GT-valid 图内 std ratio 仍约 1.00556，不能仅用这一指标判断几何健康；前景 ratio
+与全 GT-valid ratio 也不可混称。预设 constant-depth flat fraction 两组均为 0，无该类
+confirmed event。这里测得的是几何偏移/失真，尚未证明其持续性、必要路径或任务标签逃逸。
+
+完整曲线汇总见 [summary500.csv](depth_dynamics_results_20260926/summary500.csv)。
+step 100/200/300/400/500 的 D0/D1 完整状态额外以 hardlink 保留在各 arm 的
+`geometry_review_at_500/`，避免后续正常滚动保留删除早期证据；训练状态未改写。
+主线继续使用 `aa4ffd2`，从 500 续到 1000；分段检查使后续事件观察可控制在约 200 步。
+
+基于 P1 的 GSE→view 冲突线索及 Q/C 局部抵消，增加 `E_only=gse`、`Q_only=seed_xyz`
+两组 500-update 对照。二者使用同一初始权重、重置优化器、数据流、超参数和已通过的
+P0 gate，分别在 GPU 2/3 运行；终点是检查同类几何退化，不能将其自动称为常量塌缩复现。
+必要性仍需要 all-minus-suspect，实际有害更新还需要完整状态反事实，当前均未完成。
+
+## 八批有限差分与标签读取核查
+
+`20260926_stage1_fd8_retry_seed0` 完成 4 train + 4 test_seen 的 all-route 前景方向检查，
+共 1248 个唯一 FD 行。mu 最小相对步长的 task AD/FD 相对误差均小于 1%；alpha 的
+直接 FP32 总 loss 差分对步长和相消较敏感，其中 batch3 的中间步长误差仍为 29.506%。
+使用已记录 raw 分项在 FP64 中重组小步长 secant 可改善总和精度，但这不是网络 float64
+前向，也未替换原测量。全部数值、范围与例外见
+[FD8_REVIEW_ZH.md](depth_dynamics_results_20260926/FD8_REVIEW_ZH.md) 和
+[FD8_AGGREGATE.csv](depth_dynamics_results_20260926/FD8_AGGREGATE.csv)。
+首次辅助启动遇到 CUDA 初始化错误，原失败日志保留；retry 独立目录完成，主线未受影响。
+
+旧 NumPy 的 NPZ membership 会实际读取解压数组。`aca81f7` 将两个存在性检查改用
+archive key 元数据；真实四帧 ABBA 对照的 16 次样本和 collate 全值/hash/RNG 完全一致，
+每样本 NPZ 读取从 22 次降到 11 次，两个合成归回测试也通过。
+共享机器上的平均 getitem 时间旧/新为 3.922/5.213 秒，中位数为 2.954/2.403 秒；
+受 I/O/并发影响，本次没有证实平均速度提升。主线及路径对照继续使用原 `aa4ffd2`。
+原始核查见 [npz_abba_aca81f7.json](depth_dynamics_results_20260926/npz_abba_aca81f7.json)。
 
 ## 产物与判读范围
 
@@ -93,4 +138,4 @@ Q/C 在两个局部方向上有明显抵消，不能用 Q-only 梯度大小代�
 - `/data/robotarm/result/grasp/rgbgrasp/experiment/cva_depth_dynamics/20260926_stage1_calibrated_seed0/diagnostics/`
 - `/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_seed0/P0/`
 
-产物包括 contract、逐项梯度、route connectivity、前向相等性、方向探针、梯度图及单步非干扰报告。前两次 strict 运行的 `p0_gate.json` 保持 false；calibrated 新运行独立验收通过。局部导数不等于实际优化器更新效果；已取得 50-update 配对轨迹，500-update 运行进行中，尚无必要性/充分性或修正方案结论。
+产物包括 contract、逐项梯度、route connectivity、前向相等性、方向探针、梯度图及单步非干扰报告。前两次 strict 运行的 `p0_gate.json` 保持 false；calibrated 新运行独立验收通过。局部导数不等于实际优化器更新效果；已取得 500-update 配对轨迹，尚无必要性/充分性或修正方案结论。
