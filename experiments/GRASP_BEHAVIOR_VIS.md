@@ -120,7 +120,13 @@ diagnostic:
 ```text
 dcr_rank_residual_selected.png
 dcr_anchored_minus_stage1_score.png
+candidate_latent_response.png
 ```
+
+`candidate_latent_response.png` shows the CVA candidate latent magnitude and
+its cosine similarity to the native-center latent across the DCR offset grid.
+It is useful for checking whether nearby physical center hypotheses actually
+produce distinguishable internal representations before center selection.
 
 These images must not be confused with the deployed DCR-E1-4 score.
 
