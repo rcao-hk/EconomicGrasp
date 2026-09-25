@@ -88,14 +88,18 @@ def _plt():
     return plt
 
 
-def to_numpy(x: Any) -> np.ndarray:
+def raw_numpy(x: Any) -> np.ndarray:
     if torch.is_tensor(x):
         x = x.detach().float().cpu().numpy()
-    return np.nan_to_num(np.asarray(x), nan=0.0, posinf=0.0, neginf=0.0)
+    return np.asarray(x)
+
+
+def to_numpy(x: Any) -> np.ndarray:
+    return np.nan_to_num(raw_numpy(x), nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def robust_limits(x: Any, low: float = 1.0, high: float = 99.0) -> Tuple[float, float]:
-    a = to_numpy(x)
+    a = raw_numpy(x)
     finite = np.isfinite(a)
     if not finite.any():
         return 0.0, 1.0
@@ -143,7 +147,7 @@ def save_rgb(path: str | Path, rgb: Any, title: str = "") -> None:
 def save_heatmap(path: str | Path, value: Any, title: str = "",
                  cmap: str = "viridis", vmin=None, vmax=None,
                  colorbar: bool = True) -> None:
-    arr = np.squeeze(to_numpy(value))
+    arr = np.squeeze(raw_numpy(value)).astype(np.float32, copy=False)
     if arr.ndim != 2:
         raise ValueError(f"Heatmap must be 2D, got {arr.shape}")
     if vmin is None or vmax is None:
@@ -152,7 +156,7 @@ def save_heatmap(path: str | Path, value: Any, title: str = "",
         vmax = hi if vmax is None else vmax
     plt = _plt()
     fig, ax = plt.subplots(figsize=(6, 5), dpi=160)
-    im = ax.imshow(arr, cmap=cmap, vmin=vmin, vmax=vmax)
+    im = ax.imshow(np.ma.masked_invalid(arr), cmap=cmap, vmin=vmin, vmax=vmax)
     ax.axis("off")
     if title:
         ax.set_title(title)
@@ -167,7 +171,7 @@ def save_heatmap(path: str | Path, value: Any, title: str = "",
 def save_overlay(path: str | Path, rgb: np.ndarray, value: Any,
                  title: str = "", cmap: str = "magma", alpha: float = .45,
                  vmin=None, vmax=None) -> None:
-    arr = np.squeeze(to_numpy(value))
+    arr = np.squeeze(raw_numpy(value)).astype(np.float32, copy=False)
     h, w = rgb.shape[:2]
     if arr.shape != (h, w):
         t = torch.as_tensor(arr).float()[None, None]
@@ -180,7 +184,7 @@ def save_overlay(path: str | Path, rgb: np.ndarray, value: Any,
     plt = _plt()
     fig, ax = plt.subplots(figsize=(6, 6), dpi=160)
     ax.imshow(np.clip(rgb, 0, 1))
-    im = ax.imshow(arr, cmap=cmap, alpha=float(alpha), vmin=vmin, vmax=vmax)
+    im = ax.imshow(np.ma.masked_invalid(arr), cmap=cmap, alpha=float(alpha), vmin=vmin, vmax=vmax)
     ax.axis("off")
     if title:
         ax.set_title(title)
@@ -419,6 +423,7 @@ def save_query_response(out_dir: str | Path, rgb: np.ndarray,
                         selected_offset_mm: Any,
                         local_utility: Any) -> None:
     out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
     h, w = rgb.shape[:2]
     score_map = sparse_query_map(token_ids, stage1_score, (h, w))
     off_map = sparse_query_map(token_ids, selected_offset_mm, (h, w), reduce="mean")
@@ -517,6 +522,7 @@ def save_grasp_overlay(path: str | Path, rgb: np.ndarray, grasps: Any, K: Any,
     import cv2
     image = (np.clip(rgb, 0, 1) * 255).astype(np.uint8)[..., ::-1].copy()
     g = np.asarray(to_numpy(grasps), np.float32).reshape(-1, 17)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     if len(g) == 0:
         cv2.imwrite(str(path), image)
         return
