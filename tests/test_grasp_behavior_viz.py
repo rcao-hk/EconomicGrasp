@@ -10,6 +10,7 @@ from tools.grasp_behavior_viz import (
     BehaviorVizWriter,
     depth_to_points,
     feature_pca_rgb,
+    save_candidate_latent_response,
     parse_items,
     sparse_query_map,
 )
@@ -69,3 +70,15 @@ def test_visualization_cli_help_does_not_require_cuda():
     assert "--frames" in p.stdout
     assert "--items" in p.stdout
     assert "--eval-cases" in p.stdout
+
+
+def test_candidate_latent_response_writes_png(tmp_path):
+    torch.manual_seed(7)
+    latent = torch.randn(3, 5, 8)
+    offsets = torch.tensor([-20., 0., 20.])
+    score = torch.tensor([.9, .7, .5, .3, .1])
+    path = tmp_path / "latent.png"
+    save_candidate_latent_response(
+        path, latent, offsets, score, zero_index=1, max_queries=4)
+    assert path.is_file()
+    assert path.stat().st_size > 0
