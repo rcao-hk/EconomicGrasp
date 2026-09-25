@@ -42,10 +42,23 @@ def inspect_dcr_case(model, batch, case: str, case_seed: int,
                      depth_pack=None, local_queries: int = 8):
     """Return a rich, detached snapshot without changing the normal forward API."""
     pack = extract_depth_features(model.reference, batch) if depth_pack is None else depth_pack
-    bundle, active_depth, stage1_ep = reference_candidates(
+    bundle, active_depth, stage1_ep_full = reference_candidates(
         model.reference, batch, pack, case, case_seed,
         model.corrector.offsets_mm.cpu().numpy(),
         query_limit=query_limit, return_end_points=True)
+    # Keep only tensors consumed by the visualizer.  The complete Stage-1
+    # endpoint dict can include full-resolution feature maps and many debug
+    # tensors; retaining it across every panel unnecessarily inflates VRAM.
+    stage1_keep = {
+        "grasp_cdf_pred_angle_depth", "view_score", "token_sel_idx",
+        "kview_base_token_sel_idx", "grasp_top_view_inds",
+        "grasp_top_view_xyz", "kview_query_parent",
+    }
+    stage1_ep = {
+        k: v for k, v in stage1_ep_full.items()
+        if k in stage1_keep or k.startswith("kview_debug_view_")
+    }
+    del stage1_ep_full
 
     h, w = batch["img"].shape[-2:]
     feature, proposal_logits, raw_feature, enhanced_feature, spatial_aux = (
@@ -88,6 +101,10 @@ def inspect_dcr_case(model, batch, case: str, case_seed: int,
         model.corrector.score_bundle(
             feature, proposal_logits, batch, active_depth, sub,
             return_features=False, debug_sink=top_local_ep)
+        top_local_ep = {
+            k: v for k, v in top_local_ep.items()
+            if k.startswith("kview_debug_") or k.startswith("D:")
+        }
 
     return {
         "pack": pack,
