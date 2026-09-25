@@ -614,3 +614,65 @@ def save_evaluator_friction_overlay(path: Path, rgb, K, grasps,
     fig.tight_layout()
     fig.savefig(path, dpi=140)
     plt.close(fig)
+
+
+def save_latent_response_panel(path: Path, latent, offsets_mm, query_scores,
+                               zero_index=None, max_queries=32,
+                               title="Candidate latent response"):
+    """Visualize feature magnitude and native-relative cosine across offsets."""
+    h = to_numpy(latent, np.float32)
+    offsets = to_numpy(offsets_mm, np.float32).reshape(-1)
+    score = to_numpy(query_scores, np.float32).reshape(-1)
+    if h.ndim != 3:
+        raise ValueError(f"Expected latent [C,Q,H], got {h.shape}")
+    if zero_index is None:
+        z = np.flatnonzero(np.isclose(offsets, 0.))
+        if len(z) != 1:
+            raise ValueError("Cannot infer native offset")
+        zero_index = int(z[0])
+    qidx = np.argsort(-score, kind="stable")[:min(max_queries, len(score))]
+    sub = h[:, qidx]
+    norm = np.linalg.norm(sub, axis=-1).T
+    native = sub[zero_index]
+    denom = np.linalg.norm(sub, axis=-1) * np.linalg.norm(native, axis=-1)[None]
+    cosine = (sub * native[None]).sum(-1) / np.maximum(denom, 1e-8)
+    cosine = cosine.T
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, max(5, len(qidx) * .22)))
+    im0 = axes[0].imshow(norm, aspect="auto", cmap="magma")
+    axes[0].set_title("latent L2 norm")
+    fig.colorbar(im0, ax=axes[0], fraction=.046, pad=.04)
+    im1 = axes[1].imshow(cosine, aspect="auto", vmin=-1, vmax=1, cmap="coolwarm")
+    axes[1].set_title("cosine to native-offset latent")
+    fig.colorbar(im1, ax=axes[1], fraction=.046, pad=.04)
+    for ax in axes:
+        ax.set_xticks(np.arange(len(offsets)))
+        ax.set_xticklabels([f"{x:g}" for x in offsets])
+        ax.set_xlabel("camera-z offset [mm]")
+        ax.set_ylabel("query (Stage-1 score order)")
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(path, dpi=140)
+    plt.close(fig)
+
+
+def save_accuracy_heatmap(path: Path, accuracy,
+                          title="Official evaluator prefix accuracy"):
+    acc = np.asarray(accuracy, np.float32)
+    if acc.ndim != 2:
+        raise ValueError(f"Expected [rank, friction] accuracy, got {acc.shape}")
+    fig, ax = plt.subplots(figsize=(8, 6))
+    im = ax.imshow(acc, aspect="auto", vmin=0, vmax=1, cmap="viridis")
+    ax.set_xlabel("friction threshold")
+    ax.set_ylabel("prefix rank k")
+    ax.set_xticks(np.arange(acc.shape[1]))
+    default = [.2, .4, .6, .8, 1.0, 1.2]
+    labels = default[:acc.shape[1]]
+    ax.set_xticklabels([f"{x:g}" for x in labels])
+    ax.set_yticks(np.arange(0, acc.shape[0], max(1, acc.shape[0] // 10)))
+    ax.set_yticklabels([str(i + 1) for i in ax.get_yticks().astype(int)])
+    ax.set_title(title)
+    fig.colorbar(im, ax=ax, label="cumulative success fraction")
+    fig.tight_layout()
+    fig.savefig(path, dpi=140)
+    plt.close(fig)
