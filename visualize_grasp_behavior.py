@@ -680,7 +680,7 @@ def main():
                 case_groups[case] = images + files
                 summary_rows.append(case_manifest)
 
-                del snapshot
+                del snapshot, e1_info, air_info, methods
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
