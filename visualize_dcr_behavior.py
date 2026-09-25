@@ -17,8 +17,8 @@ import torch
 from PIL import Image
 
 from dcr_cva_common import DCR_VERSION, make_outputs
-from e1e2_common import (VERSION, file_sha, get_batch, load_torch, make_dataset,
-                         perturb_depth, seed_all, seed_for)
+from e1e2_common import (VERSION, file_sha, load_torch, make_dataset,
+                         move_batch, seed_all, seed_for)
 from tools.grasp_behavior_visualizer import (
     BehaviorVisConfig, BehaviorVisualizer, backproject_depth, denormalize_rgb,
     save_cdf_heatmap, save_center_shift_overlay, save_depth_panel,
@@ -128,7 +128,7 @@ def _load_air(args, device):
 
 
 def _score_corrector_inspect(model, batch, pack, case, case_seed,
-                             query_limit, query_chunk):
+                             query_limit, query_chunk, rank_strength=0.):
     """Reproduce DCR corrector forward while retaining visualization tensors."""
     from models.economicgrasp_cva_centers import reference_candidates
     bundle, active, stage1_ep = reference_candidates(
@@ -168,7 +168,7 @@ def _score_corrector_inspect(model, batch, pack, case, case_seed,
         latent, logits, native_score,
         model.corrector.offsets_mm, model.zero)
     outputs, selected = make_outputs(
-        logits, residual, bundle, model.zero, 0.)
+        logits, residual, bundle, model.zero, rank_strength)
     return {
         'bundle': bundle,
         'active_depth': active,
@@ -187,15 +187,17 @@ def _score_corrector_inspect(model, batch, pack, case, case_seed,
     }
 
 
-def _sensor_context(ds, lookup, sid, aid):
+def _get_vis_batch(ds, lookup, sid, aid, device):
+    """Load the dataset item once, preserving context tensors not used by model."""
+    from dataset.graspnet_dataset import collate_fn
     idx = lookup[(sid, aid)]
-    rgb = np.asarray(Image.open(ds.colorpath[idx]).convert('RGB'),
-                     dtype=np.float32) / 255.
-    # Model works on crop+resize. For direct overlays use the model tensor RGB.
-    # Sensor depth below is taken from dataset item so it is in the same 448 grid.
     item = ds[idx]
+    keys = ('img', 'K', 'camera_pose_vec', 'camera_gravity_vec',
+            'scene_idx', 'anno_idx', 'token_valid_mask')
+    batch = move_batch(
+        collate_fn([{k: item[k] for k in keys if k in item}]), device)
     sensor = np.asarray(item.get('sensor_depth_m'), np.float32)
-    return rgb, sensor
+    return batch, sensor
 
 
 def _scalar_endpoint_summary(*dicts):
@@ -572,22 +574,23 @@ def main():
         json.dumps(run, indent=2))
 
     from models.economicgrasp_cva_centers import extract_depth_features
+    datasets = {
+        split: make_dataset(args.dataset_root, split, protocol['camera'])
+        for split in sorted({x[0] for x in scene_jobs})
+    }
     processed = 0
     for split, sid in scene_jobs:
-        ds, lookup = make_dataset(args.dataset_root, split, protocol['camera'])
+        ds, lookup = datasets[split]
         for aid in frames:
             frame_base = vis.root / split / f'scene_{sid:04d}' / f'ann_{aid:04d}'
             marker = frame_base / 'completed.json'
             if marker.is_file() and not args.overwrite:
                 print(f'[VIS skip] {split} {sid}/{aid}', flush=True)
                 continue
-            batch = get_batch(ds, lookup, sid, aid, device)
+            batch, sensor = _get_vis_batch(
+                ds, lookup, sid, aid, device)
             pack = extract_depth_features(model.reference, batch)
             rgb_model = denormalize_rgb(batch['img'])
-            # Sensor depth is context only, aligned to the 448 model crop.
-            idx = lookup[(sid, aid)]
-            raw_item = ds[idx]
-            sensor = np.asarray(raw_item['sensor_depth_m'], np.float32)
             case_results = {}
 
             with torch.no_grad():
@@ -595,7 +598,8 @@ def main():
                     case_seed = seed_for(2030, sid, aid, case)
                     result = _score_corrector_inspect(
                         model, batch, pack, case, case_seed,
-                        args.query_limit, args.query_chunk)
+                        args.query_limit, args.query_chunk,
+                        args.rank_strength)
                     result.update({
                         '_split': split,
                         '_scene_id': sid,
