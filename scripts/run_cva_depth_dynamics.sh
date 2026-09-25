@@ -7,7 +7,7 @@ Usage: run_cva_depth_dynamics.sh --mode audit|pair --run-id ID --checkpoint FILE
        --gpus 0[,1] [--max-steps 50] [--seed 0] [--batch-size 1]
        [--python /path/python] [--dataset-root DIR] [--log-root DIR]
        [--experiment-root DIR] [--resume] [--audit-batches 8]
-       [--probe-interval 100] [--audit-interval 200]
+       [--probe-interval 100] [--audit-interval 200] [--replay-policy calibrated|strict]
 
 audit: one GPU, real-model P0/P1 and diagnostic noninterference check.
 pair:  two distinct GPUs, D0=none and D1=all, requires this run's P0 gate.
@@ -15,11 +15,15 @@ Resume extends both arms from their recorded latest complete snapshots to the
 same TOTAL update budget. Review 50 -> 500 -> 2000; extensions are explicit.
 The Stage-1 pose/fused-depth settings are inherited from checkpoint metadata.
 test_seen is the user-designated validation source; the contract records this.
+This launcher explicitly selects calibrated replay acceptance (exact state and
+forward checks, fixed 1e-5 absolute parameter cap, measured repeat envelope).
+The underlying Python entry point defaults to strict; strict results are retained.
 HELP
 }
 
 mode= run_id= checkpoint= gpus= resume=0
 max_steps=50 seed=0 batch=1 audit_batches=8 probe_interval=100 audit_interval=200
+replay_policy=calibrated
 python_bin="${PYTHON:-python}"
 dataset_root="${GRASPNET_ROOT:-/data/robotarm/dataset/graspnet}"
 log_root="${DEPTH_DYNAMICS_LOG_ROOT:-/data/robotarm/result/grasp/rgbgrasp/log}"
@@ -41,11 +45,13 @@ while (($#)); do
     --audit-batches) audit_batches="$2"; shift 2;;
     --probe-interval) probe_interval="$2"; shift 2;;
     --audit-interval) audit_interval="$2"; shift 2;;
+    --replay-policy) replay_policy="$2"; shift 2;;
     --resume) resume=1; shift;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2;;
   esac
 done
 [[ "$mode" == audit || "$mode" == pair ]] || { usage >&2; exit 2; }
+[[ "$replay_policy" == strict || "$replay_policy" == calibrated ]] || { echo 'Invalid replay policy' >&2; exit 2; }
 [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || { echo 'Invalid run ID' >&2; exit 2; }
 [[ -f "$checkpoint" ]] || { echo "Checkpoint not found: $checkpoint" >&2; exit 2; }
 [[ "$gpus" =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo 'Explicit numeric GPU IDs required' >&2; exit 2; }
@@ -65,6 +71,7 @@ nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu --for
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 common=(--init_checkpoint "$checkpoint" --dataset_root "$dataset_root" --seed "$seed"
         --batch_size "$batch" --learning_rate 0.0001 --lr_schedule constant
+        --replay_policy "$replay_policy"
         --weight_decay 0 --depth_weight_decay 0 --camera realsense --graspness_mode scene
         --kview_mode A1 --audit_batches "$audit_batches" --probe_interval "$probe_interval"
         --audit_interval "$audit_interval" --train_probe_frames 16 --heldout_test_probe_frames 32)

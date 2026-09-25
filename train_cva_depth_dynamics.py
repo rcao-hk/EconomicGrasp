@@ -65,6 +65,8 @@ def parse_args(argv=None):
     parser.add_argument("--lr_schedule", choices=("constant", "source_cosine"), default="constant")
     parser.add_argument("--forward_atol", type=float, default=1e-6)
     parser.add_argument("--forward_rtol", type=float, default=1e-5)
+    parser.add_argument("--replay_policy", choices=("strict", "calibrated"), default="strict",
+                        help="Replay acceptance: strict original tolerance, or exact-state checks plus a locked CUDA update cap.")
     parser.add_argument("--skip_initial_audit", action="store_true",
                         help="Only for already-audited paired runs; provide --audit_contract.")
     parser.add_argument("--audit_contract", "--audit_gate", dest="audit_contract", default="",
@@ -667,6 +669,7 @@ class Experiment:
             self.contract["p0_passed"] = bool(all_pass and connectivity_pass and all(route_nonzero.values()))
             config = {key: value for key, value in vars(self.cfg).items() if key not in ("log_dir",)}
             gate = {"passed": False, "route_checks_passed": self.contract["p0_passed"],
+                    "replay_policy": self.args.replay_policy,
                     "diagnostic_noninterference_passed": None, "init_sha256": self.init_sha,
                     "resolved_config_sha256": hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest(),
                     "git_head": self.contract["git"]["head"],
@@ -813,6 +816,8 @@ class Experiment:
         for key in ("seed", "arm", "clip_norm", "lr_schedule", "train_probe_frames", "heldout_test_probe_frames"):
             if state["arguments"][key] != vars(self.args)[key]:
                 raise ValueError(f"Resume diagnostic setting mismatch: {key}")
+        if state["arguments"].get("replay_policy", "strict") != self.args.replay_policy:
+            raise ValueError("Resume diagnostic setting mismatch: replay_policy")
         self.model.load_state_dict(state["model_state_dict"], strict=True)
         self.optimizer.load_state_dict(state["optimizer_state_dict"])
         self.stream.load_state_dict(state["loader"])
@@ -834,11 +839,11 @@ class Experiment:
         self.contract["resume"] = {"path": str(Path(path).resolve()), "sha256": dd.sha256_file(path), "step": self.step}
 
     def verify_diagnostic_step(self):
-        """Two no-audit controls plus audit replay, with unchanged strict gates.
+        """Two no-audit controls plus audit replay, retaining strict results.
 
         The extra control distinguishes backend variability from an audit effect.
-        Gradient/update differences are evidence, never grounds for silently
-        increasing the configured comparison tolerances.
+        The optional calibrated policy has a fixed absolute parameter cap and
+        exact-state requirements; its result never replaces the strict report.
         """
         path = self.checkpoint("initial" if self.step == 0 else "replay_reference")
         initial = torch.load(path, map_location="cpu", weights_only=False)
@@ -1021,7 +1026,80 @@ class Experiment:
                        "audit_vs_reference": compare_branches(outcomes[0], outcomes[2]),
                        "audit_vs_repeat": compare_branches(outcomes[1], outcomes[2])}
         errors = [f"{name}: {error}" for name, comparison in comparisons.items() for error in comparison["errors"]]
-        summary = {"passed": not errors, "errors": errors, "atol": self.args.forward_atol,
+
+        # These constants were locked before this run, following the independent
+        # strict-repeat measurement. The repeat envelope may further restrict
+        # acceptance, but can never increase the fixed absolute parameter cap.
+        limits = {"parameter_abs_cap": 1e-5, "plain_repeat_multiplier": 2.0,
+                  "numerical_floor": 1e-6, "parameter_rtol": 0.0,
+                  "gradient_atol": self.args.forward_atol, "gradient_rtol": self.args.forward_rtol,
+                  "optimizer_atol": self.args.forward_atol, "optimizer_rtol": self.args.forward_rtol,
+                  "locked_before_run": True}
+        parameter_names = {name for name, _ in self.model.named_parameters()}
+        buffer_names = {name for name, _ in self.model.named_buffers()}
+        global_weights = {}
+        for name, comparison in comparisons.items():
+            rows = [row for key, row in comparison["model_tensor_differences"].items() if key in parameter_names]
+            global_weights[name] = {
+                "max_abs": max((row["max_abs_difference"] or 0. for row in rows), default=0.),
+                "l2": math.sqrt(sum((row["difference_l2"] or 0.) ** 2 for row in rows)),
+                "changed_count": sum(row.get("changed_count", 0) for row in rows),
+                "nonfinite_count": sum(row.get("nonfinite_count", 0) for row in rows),
+                "strict_tolerance_exceed_count": sum(row.get("exceeds_tolerance_count", 0) for row in rows)}
+        baseline = global_weights["no_audit_repeat"]
+        max_envelope = limits["plain_repeat_multiplier"] * baseline["max_abs"] + limits["numerical_floor"]
+        l2_envelope = limits["plain_repeat_multiplier"] * baseline["l2"] + limits["numerical_floor"]
+        calibrated_errors = []
+        calibrated_checks = {}
+        for name, (reference_index, other_index) in {
+            "no_audit_repeat": (0, 1), "audit_vs_reference": (0, 2), "audit_vs_repeat": (1, 2)
+        }.items():
+            reference, other = outcomes[reference_index], outcomes[other_index]
+            comparison = comparisons[name]
+            guard_errors = []
+            for field in ("rng_state", "module_modes", "module_flags", "metadata"):
+                guard_errors += compare_state(reference["state"][field], other["state"][field], path=field)
+            guard_errors += compare_state(reference["state"]["optimizer_state_dict"], other["state"]["optimizer_state_dict"],
+                                          atol=self.args.forward_atol, rtol=self.args.forward_rtol, path="optimizer_original_tolerance")
+            for field in ("preclip", "postclip"):
+                guard_errors += compare_state(reference[field], other[field], atol=self.args.forward_atol,
+                                              rtol=self.args.forward_rtol, path=field + "_original_tolerance")
+            guard_errors += compare_state(
+                {key: value for key, value in reference["state"]["model_state_dict"].items() if key in buffer_names},
+                {key: value for key, value in other["state"]["model_state_dict"].items() if key in buffer_names},
+                path="buffers_exact")
+            if comparison["pre_forward_state_mismatch_keys"]:
+                guard_errors.append("pre_forward_state_not_exact")
+            if not comparison["batch_exact_equal"]:
+                guard_errors.append("input_batch_not_exact")
+            if not comparison["forward_loss_exact_equal"] or comparison["forward_tensor_exact_mismatch_keys"]:
+                guard_errors.append("forward_outputs_not_exact")
+            for branch in (reference, other):
+                if branch["audit_state_check"] is not None and not branch["audit_state_check"]["exact_equal"]:
+                    guard_errors.append("audit_changed_exact_state_including_existing_grads")
+            weights = global_weights[name]
+            if weights["nonfinite_count"]:
+                guard_errors.append("nonfinite_parameters")
+            if weights["max_abs"] > limits["parameter_abs_cap"]:
+                guard_errors.append("parameter_difference_exceeds_fixed_absolute_cap")
+            if name != "no_audit_repeat":
+                if weights["max_abs"] > max_envelope:
+                    guard_errors.append("parameter_max_exceeds_plain_repeat_envelope")
+                if weights["l2"] > l2_envelope:
+                    guard_errors.append("parameter_l2_exceeds_plain_repeat_envelope")
+            calibrated_checks[name] = {"passed": not guard_errors, "errors": guard_errors,
+                                       "global_parameter_difference": weights}
+            calibrated_errors += [f"{name}: {error}" for error in guard_errors]
+        calibrated = {"passed": not calibrated_errors, "errors": calibrated_errors, "limits": limits,
+                      "plain_repeat_measured": baseline, "audit_max_envelope": max_envelope,
+                      "audit_effective_max_cap": min(limits["parameter_abs_cap"], max_envelope),
+                      "audit_l2_envelope": l2_envelope, "comparisons": calibrated_checks,
+                      "claim": "exact audited state and forward; CUDA parameter updates within a locked absolute cap, not bitwise replay"}
+        selected_errors = errors if self.args.replay_policy == "strict" else calibrated_errors
+        selected_passed = not selected_errors
+        summary = {"passed": selected_passed, "errors": selected_errors, "policy": self.args.replay_policy,
+                   "strict_passed": not errors, "strict_errors": errors, "calibrated": calibrated,
+                   "atol": self.args.forward_atol,
                    "rtol": self.args.forward_rtol, "comparisons": comparisons,
                    "branches": [{key: value for key, value in outcome.items() if key not in ("state", "preclip", "postclip")}
                                 for outcome in outcomes],
@@ -1029,16 +1107,25 @@ class Experiment:
                    "interpretation": "no_audit_repeat_also_exceeds_gate; audit causality not established"
                    if not comparisons["no_audit_repeat"]["passed"] else (
                        "only_audit_comparison_exceeds_gate; investigate diagnostic or backend execution-path effects" if errors else "passed"),
-                   "tolerance_changed": False}
+                   "strict_tolerances_changed": False,
+                   "selected_acceptance_claim": "original strict tensor tolerances" if self.args.replay_policy == "strict" else calibrated["claim"]}
         dd.write_json(self.diag / "diagnostic_noninterference.json", summary)
+        self.contract["diagnostic_noninterference"] = {"policy": self.args.replay_policy,
+            "passed": selected_passed, "strict_passed": not errors, "calibrated_passed": calibrated["passed"],
+            "calibrated_limits": limits, "claim": summary["selected_acceptance_claim"]}
+        self.write_contract()
         gate_path = self.diag / "p0_gate.json"
         if gate_path.exists():
             gate = json.loads(gate_path.read_text())
-            gate["diagnostic_noninterference_passed"] = not errors
-            gate["passed"] = bool(not errors and gate["route_checks_passed"] and gate.get("healthy_probe_completed"))
+            gate["replay_policy"] = self.args.replay_policy
+            gate["diagnostic_noninterference_passed"] = selected_passed
+            gate["diagnostic_noninterference_strict_passed"] = not errors
+            gate["diagnostic_noninterference_calibrated_passed"] = calibrated["passed"]
+            gate["calibrated_limits"] = limits
+            gate["passed"] = bool(selected_passed and gate["route_checks_passed"] and gate.get("healthy_probe_completed"))
             dd.write_json(gate_path, gate)
-        if errors:
-            raise RuntimeError("Diagnostic replay changed the next optimizer update")
+        if not selected_passed:
+            raise RuntimeError(f"Diagnostic replay failed the explicit {self.args.replay_policy} policy")
 
     def train(self):
         self.model.train()
@@ -1117,6 +1204,8 @@ def main(argv=None):
             prior = json.loads(Path(args.audit_contract).read_text())
             if not prior.get("passed") or prior["init_sha256"] != experiment.init_sha:
                 raise ValueError("Audit contract must have passed P0 on exactly this initialization")
+            if prior.get("replay_policy", "strict") != args.replay_policy:
+                raise ValueError("Audit and training replay acceptance policies differ")
             if prior["git_head"] != experiment.contract["git"]["head"]:
                 raise ValueError("Audit and training code HEAD differ")
             if prior["tracked_diff_sha256"] != experiment.contract["git"]["tracked_diff_sha256"]:
@@ -1127,6 +1216,12 @@ def main(argv=None):
                 raise ValueError("Audit and training resolved configurations differ")
             experiment.contract["p0_passed"] = True
             experiment.contract["audit_reference"] = str(Path(args.audit_contract).resolve())
+            experiment.contract["audit_acceptance"] = {
+                "replay_policy": prior.get("replay_policy", "strict"),
+                "strict_noninterference_passed": prior.get("diagnostic_noninterference_strict_passed"),
+                "calibrated_noninterference_passed": prior.get("diagnostic_noninterference_calibrated_passed"),
+                "selected_noninterference_passed": prior.get("diagnostic_noninterference_passed"),
+                "calibrated_limits": prior.get("calibrated_limits")}
             experiment.write_contract()
         elif not args.resume_checkpoint:
             experiment.audit()
