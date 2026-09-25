@@ -22,7 +22,8 @@ from e1e2_common import (VERSION, file_sha, load_torch, make_dataset,
 from tools.grasp_behavior_visualizer import (
     BehaviorVisConfig, BehaviorVisualizer, backproject_depth, denormalize_rgb,
     save_cdf_heatmap, save_center_shift_overlay, save_depth_panel,
-    save_evaluation_overlay, save_evaluator_friction_overlay, save_feature_panel, save_grasp_overlay,
+    save_accuracy_heatmap, save_evaluation_overlay, save_evaluator_friction_overlay,
+    save_feature_panel, save_grasp_overlay, save_latent_response_panel,
     save_local_patch_overlay, save_offset_response, save_ply,
     save_pointcloud_views, save_proposal_panel, save_rank_residual_panel,
     to_numpy,
@@ -395,6 +396,11 @@ def _save_case(vis, out, rgb_model, sensor, K, pack, result, case, args,
             out / '06d_rank_residual.png', result['rank_residual'],
             result_model_offsets(bundle, result), score,
             title=f'DCR rank-head residual (diagnostic): {case}')
+        save_latent_response_panel(
+            out / '06e_candidate_latent_response.png', result['latent'],
+            result_model_offsets(bundle, result), score,
+            zero_index=result['_model'].zero,
+            title=f'Candidate latent response across center offsets: {case}')
 
     if vis.wants('cdf'):
         save_cdf_heatmap(
@@ -443,10 +449,12 @@ def _save_case(vis, out, rgb_model, sensor, K, pack, result, case, args,
                     eval_root, method, case,
                     result['_split'], result['_scene_id'], result['_anno_id'])
                 if acc is not None:
-                    save_evaluation_overlay(
-                        out / f'09_post_evaluator_prefix_accuracy_{method}.png',
-                        rgb_model, K, eval_grasps, acc, topk=50,
-                        title=f'Official evaluator outcome ({method}): {case}')
+                    # Official accuracy.npy stores cumulative rank metrics but
+                    # not the post-assignment grasp rows. Do not pretend those
+                    # values correspond one-to-one to the raw input grasp array.
+                    save_accuracy_heatmap(
+                        out / f'09_official_prefix_accuracy_{method}.png',
+                        acc, title=f'Official evaluator prefix accuracy ({method}): {case}')
         if frame_evaluator is None and not eval_root:
             (out / '09_post_evaluator_unavailable.txt').write_text(
                 'Exact post-evaluator visualization was not requested. '
