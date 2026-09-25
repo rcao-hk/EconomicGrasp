@@ -571,3 +571,46 @@ def save_ply(path: Path, points, rgb=None):
         f.write("end_header\n")
         for p, c in zip(pts, col):
             f.write(f"{p[0]:.7f} {p[1]:.7f} {p[2]:.7f} {int(c[0])} {int(c[1])} {int(c[2])}\n")
+
+
+def save_evaluator_friction_overlay(path: Path, rgb, K, grasps,
+                                    friction_scores, collision=None,
+                                    topk=50,
+                                    title="Post-evaluator grasp quality"):
+    """Color evaluator-returned grasps by exact friction score.
+
+    Lower positive friction is better; -1/collision is shown separately by
+    marker shape. This is a per-grasp diagnostic, unlike cumulative AP.
+    """
+    a = np.asarray(grasps, np.float32)
+    score = np.asarray(friction_scores, np.float32).reshape(-1)
+    if collision is None:
+        collision = score < 0
+    collision = np.asarray(collision, np.bool_).reshape(-1)
+    n = min(len(a), len(score), int(topk))
+    if n == 0:
+        return
+    uv, valid = project_xyz(a[:n, 13:16], K)
+    q = np.clip((1.2 - score[:n]) / 1.0, 0., 1.)
+    good = valid[:n] & (~collision[:n]) & (score[:n] > 0)
+    bad = valid[:n] & (~good)
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+    ax.imshow(rgb)
+    if np.any(good):
+        sc = ax.scatter(
+            uv[:n][good, 0], uv[:n][good, 1], c=q[good], s=30,
+            vmin=0, vmax=1, cmap="viridis", marker="o",
+            label="force-closure evaluated")
+        fig.colorbar(sc, ax=ax,
+                     label="quality proxy (lower required friction = better)")
+    if np.any(bad):
+        ax.scatter(
+            uv[:n][bad, 0], uv[:n][bad, 1], s=36, marker="x",
+            label="collision / evaluator fail")
+    ax.set_title(title)
+    ax.axis("off")
+    ax.legend(loc="lower right", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(path, dpi=140)
+    plt.close(fig)
