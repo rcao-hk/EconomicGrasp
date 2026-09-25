@@ -106,9 +106,9 @@ def inspect_e1_like_case(model, batch, bundle, active_depth, depth_pack,
     """Run an E1-compatible zero-ranker model on an already aligned DCR bundle."""
     feature, proposal_logits, raw, enhanced, spatial = model.corrector.encode_image(
         batch, depth_pack, active_depth, return_maps=True)
-    logits = model.corrector(
-        batch, bundle, case="nominal", case_seed=0,
-        query_chunk=query_chunk, depth_pack=depth_pack)[0]
+    logits = model.corrector.score_bundle(
+        feature, proposal_logits, batch, active_depth, bundle,
+        return_features=False)
     utility = logits.sigmoid().mean(-1)
     selected = select_centers(utility, bundle["valid"], model.zero)
     return {
