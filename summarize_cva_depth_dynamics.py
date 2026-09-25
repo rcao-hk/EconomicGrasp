@@ -120,14 +120,31 @@ def collect_training_and_audits(root):
             if name == "gradient_audit":
                 # Depth DPT/FiLM/other groups are disjoint. Endpoint aliases are
                 # excluded, because they are observations of the same graph.
-                grouped = defaultdict(list)
-                for r in records:
+                grouped = defaultdict(dict)
+                duplicate_records = defaultdict(list)
+                first_ordinals = defaultdict(dict)
+                for ordinal, r in enumerate(records, 1):
                     if str(r.get("group", "")).startswith("depth_"):
                         key = (r.get("arm", path.parent.name), r.get("route", "unspecified"),
                                r.get("split", "unspecified"), r.get("step", 0),
-                               r.get("batch", 0), r.get("scale", "raw"), r.get("loss", "unknown"))
-                        grouped[key].append(r)
-                for (arm, route, split, step, batch, scale, loss), components in sorted(grouped.items()):
+                               r.get("batch", 0), tuple(r.get("indices") or ()),
+                               r.get("scale", "raw"), r.get("loss", "unknown"))
+                        group = r["group"]
+                        if group in grouped[key]:
+                            first = grouped[key][group]
+                            # A repeated audit is not another disjoint parameter
+                            # group. Preserve the first row and expose differences.
+                            compared = ("norm", "state", "state_numel", "connected_numel",
+                                        "total_numel", "loss_value", "weight")
+                            differences = [field for field in compared if first.get(field) != r.get(field)]
+                            duplicate_records[key].append({"group": group, "record_ordinal": ordinal,
+                                                           "different_fields": differences})
+                        else:
+                            grouped[key][group] = r
+                            first_ordinals[key][group] = ordinal
+                for key, by_group in sorted(grouped.items()):
+                    arm, route, split, step, batch, indices, scale, loss = key
+                    components = list(by_group.values())
                     states = defaultdict(int)
                     for r in components:
                         for state, numel in r.get("state_numel", {}).items():
@@ -140,10 +157,14 @@ def collect_training_and_audits(root):
                              else "not_requires_grad" if all(r.get("state") == "not_requires_grad" for r in components)
                              else "unused/None")
                     gradients.append({"arm": arm, "route": route, "split": split, "step": step,
-                                      "batch": batch, "scale": scale, "loss": loss,
+                                      "batch": batch, "indices": json.dumps(indices), "scale": scale, "loss": loss,
                                       "depth_parameter_grad_norm": norm, "state": state,
                                       "connected_numel": sum(r.get("connected_numel", 0) for r in components),
                                       "state_numel": json.dumps(dict(states), sort_keys=True),
+                                      "duplicate_records": len(duplicate_records[key]),
+                                      "different_duplicate_records": sum(bool(r["different_fields"]) for r in duplicate_records[key]),
+                                      "first_group_record_ordinals": json.dumps(first_ordinals[key], sort_keys=True),
+                                      "duplicate_record_provenance": json.dumps(duplicate_records[key], sort_keys=True),
                                       "source_path": str(path.resolve())})
                 continue
             for record in records:
@@ -235,9 +256,9 @@ def render_training_and_audits(data, figures):
         for row in data["gradients"]:
             if row["scale"] != scale:
                 continue
-            key = tuple(row[k] for k in ("arm", "route", "split", "step", "batch", "source_path"))
+            key = tuple(row[k] for k in ("arm", "route", "split", "step", "batch", "indices", "source_path"))
             by_measurement[key][row["loss"]] = row["depth_parameter_grad_norm"]
-        rows = [{**dict(zip(("arm", "route", "split", "step", "batch", "source_path"), key)), **values}
+        rows = [{**dict(zip(("arm", "route", "split", "step", "batch", "indices", "source_path"), key)), **values}
                 for key, values in by_measurement.items()]
         draw(rows, [(loss, loss.capitalize() + " loss → depth-parameter gradient norm") for loss in LOSS_TERMS],
              ("arm", "route", "split"), f"depth_parameter_gradients_{scale}.png",
@@ -369,6 +390,11 @@ def summarize(root, output, plots=True):
                "- Loss plots retain raw and actual weighted units separately; native batches and targets can change.",
                "- Gradient norms combine disjoint depth-parameter groups in quadrature, separately for each loss. "
                "Task-loss norms are never added to estimate a total task gradient. Disconnected gradients remain missing.",
+               f"- Repeated gradient audit records: {sum(r['duplicate_records'] for r in auxiliary['gradients'])} "
+               f"duplicates, including {sum(r['different_duplicate_records'] for r in auxiliary['gradients'])} with "
+               "different measured fields. For the same source/arm/route/split/update/batch/indices/scale/loss/group, "
+               "the first record is retained; repetitions are neither summed nor silently averaged. "
+               "Original record ordinals and differing fields are recorded in gradient_summary.csv.",
                "- Actual parameter deltas are measured optimizer updates. Global clipping coefficients are not Adam learning-rate multipliers.",
                "- Probe coverage is averaged per fixed frame. Identity changes compare the same frame/mode to its previous probe; "
                "aligned-slot changes can include changed queries, whereas same-identity NN changes condition on matching query IDs.",
