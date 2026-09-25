@@ -29,9 +29,11 @@ from tools.dcr_visual_probe import inspect_dcr_case, inspect_e1_like_case
 from tools.grasp_behavior_viz import (
     BehaviorVizWriter, depth_to_points, imagenet_rgb, make_contact_sheet,
     parse_items, save_center_cdf_panels, save_center_selection_motion,
-    save_corruption_motion, save_depth_bundle, save_feature_bundle, save_grasp_overlay,
+    save_backbone_feature_bundle, save_corruption_motion, save_depth_bundle,
+    save_depth_feature_bundle, save_feature_bundle, save_grasp_overlay,
     save_grasp_scene_ply, save_local_patch_overlay, save_proposal_bundle,
-    save_query_response, save_query_scalar_overlay, save_rgb, save_heatmap, save_spatial_bundle,
+    save_pose_depth_bundle, save_query_response, save_query_scalar_overlay,
+    save_rgb, save_heatmap, save_spatial_bundle,
     save_stage1_angle_depth, save_view_response, write_csv, write_html_index,
     write_json,
 )
@@ -61,7 +63,7 @@ def parser():
                    help="Comma-separated corruption cases. nominal is always first.")
     p.add_argument("--items", default="core",
                    help="light/core/all or comma list: rgb,depth,pointcloud,proposal,"
-                        "feature,spatial,view,cdf,query_response,local,grasps,"
+                        "feature,pose,spatial,view,cdf,query_response,local,grasps,"
                         "corruption_delta,evaluator,air")
     p.add_argument("--topk", type=int, default=50)
     p.add_argument("--local-queries", type=int, default=8)
@@ -432,10 +434,34 @@ def main():
                 if "feature" in items:
                     save_feature_bundle(
                         case_dir, snapshot["feature_pre"], snapshot["feature_post"])
+                    backbone_paths = save_backbone_feature_bundle(
+                        case_dir / "backbone", snapshot["pack"][4])
+                    depth_feature_paths = save_depth_feature_bundle(
+                        case_dir / "depth_head", snapshot["pack"][2])
                     images.extend([
                         ("Pre-enhancer feature PCA", case_dir / "feature_pre_enhancer_pca.png"),
                         ("Post-enhancer feature PCA", case_dir / "feature_post_enhancer_pca.png"),
                     ])
+                    images.extend([
+                        (f"DINO {p.stem}", p) for p in backbone_paths
+                        if p.suffix.lower() == ".png"
+                    ])
+                    images.extend([
+                        (f"Depth head {p.stem}", p) for p in depth_feature_paths
+                        if p.suffix.lower() == ".png"
+                    ])
+
+                if "pose" in items:
+                    pose_paths = save_pose_depth_bundle(
+                        case_dir / "pose_depth",
+                        snapshot["pack"][5],
+                        batch.get("camera_pose_vec"),
+                        batch.get("camera_gravity_vec"))
+                    for p in pose_paths:
+                        if p.suffix.lower() == ".png":
+                            images.append(("Pose-aware depth FiLM", p))
+                        else:
+                            files.append(("Pose-aware depth diagnostics", p))
 
                 if "spatial" in items:
                     save_spatial_bundle(case_dir, rgb, snapshot["spatial_aux"])
