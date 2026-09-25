@@ -340,7 +340,9 @@ def proposal_maps(proposal_logits: Any):
     if x.ndim != 4 or x.shape[1] < 3:
         raise ValueError("Expected proposal logits [B,>=3,H,W]")
     obj = torch.softmax(x[:, :2], 1)[:, 1:2]
-    grasp = torch.sigmoid(x[:, 2:3])
+    # The EconomicGrasp-DPT forward path treats channel 2 as a directly
+    # supervised graspness field and clamps it to [0,1]; it is not a logit.
+    grasp = x[:, 2:3].clamp(0.0, 1.0)
     return obj, grasp
 
 
