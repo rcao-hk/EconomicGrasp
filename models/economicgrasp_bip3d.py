@@ -6396,6 +6396,7 @@ class economicgrasp_dpt(nn.Module):
         debug_print_every: int = 50,
         seed_selection_mode: str = "point_fps",
         geometry_depth_source: str = "pred",
+        depth_grad_routes: Union[str, Sequence[str]] = "none",
     ):
         super().__init__()
         self.is_training = bool(is_training)
@@ -6768,6 +6769,7 @@ class economicgrasp_dpt(nn.Module):
                 use_cdf=self.use_cdf,
             )
         )
+        self.set_depth_grad_routes(depth_grad_routes)
 
         # Geometry diagnostics are independent of the prediction-head choice
         # and are enabled automatically whenever visualization is enabled.
@@ -6876,6 +6878,53 @@ class economicgrasp_dpt(nn.Module):
                 + self.geometry_depth_source,
                 flush=True,
             )
+
+    def set_depth_grad_routes(self, routes: Union[str, Sequence[str]]) -> str:
+        """Select grasp-to-depth boundaries without changing forward values.
+
+        E (``gse``), Q (``seed_xyz``), and C (``support``) are independent:
+        detaching the support map still permits derivatives through Q's sampling
+        grid and residual center. Other stop-gradients, including auxiliary
+        proposal maps and discrete selections, are intentionally unchanged.
+        This runtime setting is metadata, not part of the model state_dict.
+        """
+        names = ("gse", "seed_xyz", "support")
+        if isinstance(routes, str):
+            selected = [name.strip().lower() for name in routes.split(",")]
+        else:
+            selected = [str(name).strip().lower() for name in routes]
+        if selected == ["none"]:
+            enabled = set()
+        elif selected == ["all"]:
+            enabled = set(names)
+        else:
+            enabled = set(selected)
+            if not selected or not enabled.issubset(names):
+                raise ValueError(
+                    "depth_grad_routes must be 'none', 'all', or a comma-"
+                    "separated list of gse,seed_xyz,support; got "
+                    f"{routes!r}."
+                )
+        self.spatial_enhancer.detach_depth_grad = "gse" not in enabled
+        self.detach_seed_xyz_grad = "seed_xyz" not in enabled
+        self.kview_config.detach_depth = "support" not in enabled
+        # These references normally share one config. Update the actual
+        # sampling module as well so runtime replay reads the real boundary.
+        self.kview_grasp_module.config.detach_depth = "support" not in enabled
+        self.kview_grasp_module.group.config.detach_depth = "support" not in enabled
+        self.depth_grad_routes = (
+            "all" if len(enabled) == len(names)
+            else ",".join(name for name in names if name in enabled) or "none"
+        )
+        return self.depth_grad_routes
+
+    def get_depth_grad_routes(self) -> dict:
+        """Read the three boundaries' current runtime values (True = open)."""
+        return {
+            "gse": not self.spatial_enhancer.detach_depth_grad,
+            "seed_xyz": not self.detach_seed_xyz_grad,
+            "support": not self.kview_grasp_module.group.config.detach_depth,
+        }
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -7236,9 +7285,15 @@ class economicgrasp_dpt(nn.Module):
             u = (token_sel_idx % W).to(dtype=z_seed.dtype)
             v = (token_sel_idx // W).to(dtype=z_seed.dtype)
             uv = torch.stack([u, v], dim=-1)
+            z_seed_for_xyz = (
+                z_seed if use_gt_xyz or not self.detach_seed_xyz_grad
+                else z_seed.detach()
+            )
+            if bool(end_points.get("depth_grad_capture_routes", False)):
+                end_points["depth_grad_seed_xyz_input"] = z_seed_for_xyz
             seed_xyz = self._backproject_uvz(
                 uv,
-                z_seed if use_gt_xyz else z_seed.detach(),
+                z_seed_for_xyz,
                 camera_K,
             )
 
@@ -7279,9 +7334,14 @@ class economicgrasp_dpt(nn.Module):
             posinf=0.0,
             neginf=0.0,
         ).clamp_min(1e-6)
+        z_all_for_xyz = (
+            z_all_pred.detach() if self.detach_seed_xyz_grad else z_all_pred
+        )
+        if bool(end_points.get("depth_grad_capture_routes", False)):
+            end_points["depth_grad_seed_xyz_input"] = z_all_for_xyz
         xyz_all_pred = self._backproject_uvz(
             uv_all,
-            z_all_pred.detach(),
+            z_all_for_xyz,
             camera_K,
         )
         if use_gt_xyz:
@@ -7944,6 +8004,7 @@ class economicgrasp_dpt(nn.Module):
             image_hw=(H, W),
             return_maps=False,
             img=end_points.get("img", img),
+            capture_depth_grad=bool(end_points.get("depth_grad_capture_routes", False)),
         )
 
         for k, v in spatial_aux.items():

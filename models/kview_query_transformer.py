@@ -973,6 +973,7 @@ class ViewConditionedAttentionGrouping(nn.Module):
         objectness_logits: Optional[torch.Tensor],
         graspness_map: Optional[torch.Tensor],
         valid: torch.Tensor,
+        depth_grad_inputs: Optional[List[torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         B, Q, P, _ = grid.shape
         device = grid.device
@@ -985,6 +986,10 @@ class ViewConditionedAttentionGrouping(nn.Module):
             dmap = dmap[:, :1]
             if self.config.detach_depth:
                 dmap = dmap.detach()
+            if depth_grad_inputs is not None:
+                # One post-C alias per query chunk; the list lives only in
+                # explicit audit end_points, never in persistent module state.
+                depth_grad_inputs.append(dmap)
             depth_patch = self._sample_map(dmap.to(dtype=dtype), grid).squeeze(-1)  # [B,Q,P]
             depth_delta = (depth_patch - seed_xyz[..., 2].unsqueeze(-1)) / max(float(self.config.depth_norm_scale), self.config.eps)
             depth_delta = torch.nan_to_num(depth_delta, nan=0.0, posinf=0.0, neginf=0.0).clamp(-5.0, 5.0)
@@ -1118,6 +1123,10 @@ class ViewConditionedAttentionGrouping(nn.Module):
         query = query + self.view_rot_embed(top_view_rot.reshape(B, Q, 9).float().to(query.dtype))
 
         max_q = max(int(self.config.grouping_max_queries_per_chunk), 1)
+        depth_grad_inputs = None
+        if bool(end_points.get("depth_grad_capture_routes", False)):
+            depth_grad_inputs = []
+            end_points["depth_grad_support_input"] = depth_grad_inputs
         outputs = []
         valid_sum = seed_features.new_tensor(0.0)
         valid_count = 0
@@ -1177,6 +1186,7 @@ class ViewConditionedAttentionGrouping(nn.Module):
                 objectness_logits=objectness_logits,
                 graspness_map=graspness_map,
                 valid=valid,
+                depth_grad_inputs=depth_grad_inputs,
             )
             offsets = self.unit_offsets.to(device=feat_map.device, dtype=feat_map.dtype).view(1, 1, -1, 2)
             offsets = offsets.expand(B, qn, -1, -1)
