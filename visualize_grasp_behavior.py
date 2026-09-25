@@ -29,7 +29,8 @@ from tools.dcr_visual_probe import inspect_dcr_case, inspect_e1_like_case
 from tools.grasp_behavior_viz import (
     BehaviorVizWriter, depth_to_points, imagenet_rgb, make_contact_sheet,
     parse_items, save_center_cdf_panels, save_center_selection_motion,
-    save_backbone_feature_bundle, save_corruption_motion, save_depth_bundle,
+    save_backbone_feature_bundle, save_candidate_latent_response,
+    save_corruption_motion, save_depth_bundle,
     save_depth_feature_bundle, save_feature_bundle, save_grasp_overlay,
     save_grasp_scene_ply, save_local_patch_overlay, save_proposal_bundle,
     save_pose_depth_bundle, save_query_response, save_query_scalar_overlay,
@@ -523,11 +524,20 @@ def main():
                         anchored - snapshot["stage1_score"],
                         "Anchored score - frozen Stage-1 score (diagnostic)",
                         cmap="coolwarm", symmetric=True)
+                    save_candidate_latent_response(
+                        case_dir / "candidate_latent_response.png",
+                        snapshot["candidate_latent"],
+                        dcr.corrector.offsets_mm,
+                        snapshot["stage1_score"],
+                        dcr.zero,
+                        max_queries=max(args.local_queries, 24))
                     images.extend([
                         ("DCR learned rank residual",
                          case_dir / "dcr_rank_residual_selected.png"),
                         ("Anchored score shift",
                          case_dir / "dcr_anchored_minus_stage1_score.png"),
+                        ("Candidate latent response",
+                         case_dir / "candidate_latent_response.png"),
                     ])
 
                     motion_stats = save_center_selection_motion(
