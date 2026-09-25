@@ -301,7 +301,11 @@ def save_depth_bundle(out_dir: str | Path, rgb: np.ndarray, K: Any,
     delta_mm = (act - nom) * 1000.0
     save_heatmap(out / "depth_pred_nominal.png", nom, "Predicted metric depth", vmin=.2, vmax=1.0)
     save_heatmap(out / "depth_active.png", act, "Active/corrupted predicted depth", vmin=.2, vmax=1.0)
-    lim = max(1.0, float(np.percentile(np.abs(delta_mm), 99)))
+    finite_delta = np.isfinite(delta_mm)
+    lim = max(
+        1.0,
+        float(np.percentile(np.abs(delta_mm[finite_delta]), 99))
+        if finite_delta.any() else 1.0)
     save_heatmap(out / "depth_corruption_delta_mm.png", delta_mm,
                  "Depth corruption delta [mm]", cmap="coolwarm", vmin=-lim, vmax=lim)
     save_overlay(out / "depth_active_overlay.png", rgb, act,
@@ -312,8 +316,9 @@ def save_depth_bundle(out_dir: str | Path, rgb: np.ndarray, K: Any,
         if ref_depth is None:
             continue
         ref = np.squeeze(to_numpy(ref_depth))
-        valid = np.isfinite(ref) & (ref > 0) & np.isfinite(nom) & (nom > 0)
+        ref_valid = np.isfinite(ref) & (ref > 0)
         for src_name, src in (("pred_nominal", nom), ("active", act)):
+            valid = ref_valid & np.isfinite(src) & (src > 0)
             diff = np.full_like(ref, np.nan, dtype=np.float32)
             diff[valid] = (src[valid] - ref[valid]) * 1000.0
             finite = np.isfinite(diff)
