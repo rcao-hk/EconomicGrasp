@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Repeat native CDF matching on identical queries; never modifies the matcher.
+"""Repeat active CDF matching; contrast its mapping with the old raw scatter.
 
 Accepts the same checkpoint/dataset/config arguments as the dynamics entrypoint.
 Use a NEW --output directory. The default reproduces P0 audit batch zero and
@@ -73,12 +73,18 @@ def inverse_mapping_evidence(ep, labels, repeat):
                 old_inverse[row, slot] = scene
                 outcomes.append(old_inverse)
             varying = [int((x != outcomes[0]).sum()) for x in outcomes[1:]]
+            fixed = labels._deterministic_top_view_scene(view_index, top)
+            fixed_changes = [int((labels._deterministic_top_view_scene(view_index, top) != fixed).sum())
+                             for _ in range(repeat - 1)]
             evidence.append({"batch": b, "object": i, "matched_queries": len(query_rows),
                              "object_views_with_multiple_scene_preimages": int((multiplicity > 1).sum()),
                              "duplicate_destination_extra_writes": repeated_destinations,
                              "ambiguous_topk_destinations": int((multiplicity[top] > 1).sum()),
                              "max_scene_preimages": int(multiplicity.max()),
-                             "repeated_inverse_changed_vs_first": varying})
+                             "old_scatter_repeated_inverse_changed_vs_first": varying,
+                             "active_max_scene_mapper_repeated_changes": fixed_changes,
+                             "old_scatter_vs_active_max_scene_mapper_changes":
+                             [int((old != fixed).sum()) for old in outcomes]})
     return evidence
 
 
@@ -109,7 +115,9 @@ def main():
                                                              experiment.cfg.batch_size, dtype=int).tolist())
         batch = experiment.original.collate_fn([experiment.stream.sample(i, epoch=0) for i in indices])
         report = {"indices": indices, "repeats": options.label_repeats,
-                  "git": experiment.contract["git"], "routes": {}}
+                  "git": experiment.contract["git"], "routes": {},
+                  "active_label_mapper": "deterministic_max_scene_index",
+                  "inverse_demo": "old conflicting scatter is tested separately; not used by active matcher"}
         forward_reference = None
         for route in ("none", "all"):
             experiment.model.set_depth_grad_routes(route)
@@ -142,7 +150,7 @@ def main():
                     report["routes"][route] = route_report
                     dd.write_json(experiment.diag / "cdf_label_determinism.json", report)
                     print(f"[label determinism] route={route}, report={experiment.diag / 'cdf_label_determinism.json'}", flush=True)
-        print("Completed identical-input native label repeats; matcher unchanged.", flush=True)
+        print("Completed active-label repeats and separate old-scatter demonstration.", flush=True)
     finally:
         if experiment is not None:
             experiment.trainer.close()

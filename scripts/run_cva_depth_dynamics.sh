@@ -74,7 +74,7 @@ if [[ "$mode" == audit ]]; then
   }
   CUDA_VISIBLE_DEVICES="${gpu_ids[0]}" "$python_bin" train_cva_depth_dynamics.py \
     --mode audit --arm P0 --routes none --output "$log_dir/P0" \
-    --diagnostics_dir "$exp_dir/diagnostics/P0" --verify_diagnostic_step "${common[@]}"
+    --diagnostics_dir "$exp_dir/diagnostics/P0" --verify_diagnostic_step --save_gradient_maps "${common[@]}"
   exit
 fi
 gate="$exp_dir/diagnostics/P0/p0_gate.json"

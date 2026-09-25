@@ -57,6 +57,8 @@ def parse_args(argv=None):
     parser.add_argument("--validation_probe_frames", "--heldout_test_probe_frames", dest="heldout_test_probe_frames", type=int, default=32,
                         help="User-designated test_seen validation frames (32 by default).")
     parser.add_argument("--directional_batches", type=int, default=1)
+    parser.add_argument("--save_gradient_maps", action="store_true",
+                        help="Save first fixed audit image's task/depth metric and raw gradients per route.")
     parser.add_argument("--checkpoint_interval", type=int, default=100)
     parser.add_argument("--keep_last", type=int, default=6)
     parser.add_argument("--clip_norm", type=float, default=1.0)
@@ -283,6 +285,7 @@ class Experiment:
                        "confirmed_event": None, "consecutive_thresholds": 0}
         self.manifest = []
         self.locked_steps = set()
+        self.probe_previous = {}
         self.train_rows, train_sha = dataset_manifest(self.trainer.TRAIN_DATASET)
         self.probe_specs = [("train", index) for index in select_probe_indices(
             self.trainer.TRAIN_DATASET, args.train_probe_frames)]
@@ -402,14 +405,14 @@ class Experiment:
                     for key, value in values.items():
                         setattr(module, key, value)
 
-    def forward(self, batch, capture=False):
+    def forward(self, batch, capture=False, diagnostics=True):
         inputs = dict(batch)
         self.original.drop_unused_point_inputs(inputs)
         self.original.validate_batch_label_contract(inputs, use_cdf=True)
         inputs = self.original.move_batch_to_device(inputs, self.trainer.device, use_cdf=True, non_blocking=False)
         inputs.update(depth_grad_capture_routes=capture, cva_compute_diagnostics=True,
                       geometry_compute_diagnostics=False, cva_export_angle_feature=False,
-                      cva_force_process_grasp_labels=True)
+                      cva_force_process_grasp_labels=True, depth_dynamics_diagnostics=diagnostics)
         self.original.assert_cpu_resident_label_lists(inputs, use_cdf=True)
         for key in ("img", "K", "gt_depth_m"):
             if not bool(torch.isfinite(inputs[key]).all()):
@@ -426,7 +429,70 @@ class Experiment:
 
     def scalar_metrics(self, endpoints):
         metrics = self.trainer.extract_scalar_metrics(endpoints)
+        with torch.no_grad():
+            gt = endpoints["gt_depth_m"].detach()
+            valid_gt = torch.isfinite(gt) & (gt >= .2) & (gt <= 1.)
+            metrics["D: Dynamics GT valid pixels"] = int(valid_gt.sum())
+            metrics["D: Dynamics depth loss denominator"] = gt.numel()
+            obj = endpoints["objectness_label_tok"].detach()
+            metrics["D: Dynamics objectness denominator"] = int((obj != -1).sum())
+            foreground = obj == 1
+            if "token_valid_mask" in endpoints:
+                foreground &= endpoints["token_valid_mask"].bool()
+            metrics["D: Dynamics graspness denominator"] = int(foreground.sum())
+            metrics["D: Dynamics view denominator"] = endpoints["view_score"].numel()
+            for key, label in (("batch_grasp_cdf_valid_mask", "CDF valid count"),
+                               ("batch_grasp_cdf_pos_mask", "CDF positive count"),
+                               ("batch_grasp_width_valid_mask_angle_depth", "width valid count")):
+                if key in endpoints:
+                    metrics["D: Dynamics " + label] = int(endpoints[key].bool().sum())
+            idx = endpoints.get("kview_base_token_sel_idx", endpoints["token_sel_idx"]).detach().long()
+            raw_seed = endpoints["depth_net_pred"].detach().flatten(1).gather(1, idx)
+            metrics["D: Dynamics seed clamp fraction"] = float(((raw_seed <= self.model.min_depth) |
+                (raw_seed >= self.model.max_depth) | ~torch.isfinite(raw_seed)).float().mean())
+            metrics["D: Dynamics repeated seed fraction"] = sum(1. - len(torch.unique(row)) / row.numel()
+                                                               for row in idx) / len(idx)
+            if "dbg_mask_pred" in endpoints:
+                primary = endpoints["dbg_mask_pred"].gather(1, idx)
+                metrics["D: Dynamics seed fallback fraction"] = float((~primary).float().mean())
+            query_idx = endpoints["token_sel_idx"].detach().long()
+            gt_seed = gt.reshape(gt.shape[0], -1).gather(1, query_idx)
+            gt_seed_valid = (gt_seed >= .2) & (gt_seed <= 1.) & torch.isfinite(gt_seed)
+            query_z = endpoints["xyz_graspable"][..., 2].detach()
+            metrics["D: Dynamics center z error m"] = float((query_z - gt_seed)[gt_seed_valid].abs().mean()) if bool(gt_seed_valid.any()) else None
+            traces = endpoints.get("depth_dynamics_label_trace", [])
+            if traces:
+                trace = traces[-1]
+                distances = trace["point_distance_m"].detach()
+                metrics["D: Dynamics NN distance mean m"] = float(distances.mean())
+                metrics["D: Dynamics NN distance max m"] = float(distances.max())
+                metrics["D: Dynamics point valid fraction"] = float(trace["point_valid"].float().mean())
+                metrics["D: Dynamics view valid fraction"] = float(trace["view_valid"].float().mean())
         return {key: json_safe(value) for key, value in metrics.items()}
+
+    def probe_identity_metrics(self, item, mode, endpoints):
+        traces = endpoints.get("depth_dynamics_label_trace", [])
+        if not traces:
+            return {"status": "label_trace_not_exported"}
+        latest = traces[-1]
+        current = {key: latest[key].detach().cpu().clone() for key in (
+            "nn_indices", "point_valid", "view_valid", "token_indices", "view_indices")}
+        current["xyz"] = endpoints["xyz_graspable"].detach().cpu().clone()
+        cache_key = f"{item['split']}/{item['index']}/{int(mode)}"
+        prior = self.probe_previous.get(cache_key)
+        self.probe_previous[cache_key] = current
+        if prior is None:
+            return {"status": "initial_reference"}
+        same = (current["token_indices"] == prior["token_indices"]) & (current["view_indices"] == prior["view_indices"])
+        changed_nn = current["nn_indices"] != prior["nn_indices"]
+        return {"status": "compared_to_previous_probe_same_frame_mode",
+                "query_identity_switch_rate_aligned_slots": float((~same).float().mean()),
+                "nn_switch_rate_aligned_slots": float(changed_nn.float().mean()),
+                "nn_switch_rate_same_identity": float(changed_nn[same].float().mean()) if bool(same.any()) else None,
+                "same_identity_queries": int(same.sum()),
+                "point_valid_switch_rate_aligned_slots": float((current["point_valid"] != prior["point_valid"]).float().mean()),
+                "view_valid_switch_rate_aligned_slots": float((current["view_valid"] != prior["view_valid"]).float().mean()),
+                "same_identity_query_displacement_m": float((current["xyz"] - prior["xyz"]).norm(dim=-1)[same].mean()) if bool(same.any()) else None}
 
     def equality_tensors(self, endpoints):
         # Include logits, seed/view identities, masks, matched targets and every loss.
@@ -436,6 +502,58 @@ class Experiment:
         return {key: value.detach().cpu().clone() for key, value in endpoints.items()
                 if torch.is_tensor(value) and (key in explicit or key.startswith("batch_grasp_")
                    or "valid_mask" in key or key.startswith("dbg_mask") or key.startswith("B:"))}
+
+    def compare_endpoints(self, reference, values):
+        failures = []
+        mask_keys = {"batch_grasp_cdf_bins_angle_depth": "batch_grasp_cdf_valid_mask",
+                     "batch_grasp_width_angle_depth": "batch_grasp_width_valid_mask_angle_depth"}
+        for key in reference.keys() | values.keys():
+            if key not in reference or key not in values:
+                failures.append({"key": key, "reason": "missing endpoint"})
+                continue
+            a, b = reference[key], values[key]
+            if a.shape != b.shape:
+                failures.append({"key": key, "reason": "shape mismatch", "shapes": [list(a.shape), list(b.shape)]})
+                continue
+            mismatch = ~torch.isclose(a, b, atol=self.args.forward_atol, rtol=self.args.forward_rtol,
+                                     equal_nan=False) if a.is_floating_point() else a.ne(b)
+            if not bool(mismatch.any()):
+                continue
+            coordinates = torch.nonzero(mismatch, as_tuple=False)[:12]
+            flat_indices = torch.nonzero(mismatch.reshape(-1), as_tuple=False).reshape(-1)[:12]
+            row = {"key": key, "reason": "value mismatch", "mismatch_count": int(mismatch.sum()),
+                   "max_abs": float((a.float() - b.float()).abs().max()),
+                   "first_coordinates": coordinates.tolist(),
+                   "first_reference_values": a.reshape(-1)[flat_indices].tolist(),
+                   "first_route_values": b.reshape(-1)[flat_indices].tolist()}
+            mask_key = mask_keys.get(key)
+            if mask_key is not None and mask_key in reference and mask_key in values:
+                union_valid = reference[mask_key].bool() | values[mask_key].bool()
+                row.update(effective_mask=mask_key, valid_mismatch_count=int((mismatch & union_valid).sum()),
+                           invalid_mismatch_count=int((mismatch & ~union_valid).sum()),
+                           first_valid_coordinates=torch.nonzero(mismatch & union_valid, as_tuple=False)[:12].tolist())
+            failures.append(row)
+        return failures
+
+    def save_gradient_maps(self, endpoints, route, batch_id):
+        if not self.args.save_gradient_maps or batch_id != 0 or self.step != 0:
+            return
+        terms = self.losses(endpoints)
+        objectives = {"depth": terms["depth"] * self.weights["depth"],
+                      "task": sum(value * self.weights[key] for key, value in terms.items() if key != "depth")}
+        result = {"step": self.step, "route": route, "batch_id": batch_id,
+                  "rgb": endpoints["img"][0].detach().cpu(),
+                  "gt_m": endpoints["gt_depth_m"][0].detach().cpu(),
+                  "pred_m": endpoints["depth_net_pred"][0].detach().cpu(),
+                  "raw": endpoints["depth_head_raw_pred"][0].detach().cpu(),
+                  "depth_color_range_m": [0.0, 1.0], "gradients": {}}
+        for term, loss in objectives.items():
+            for key in ("depth_net_pred", "depth_head_raw_pred"):
+                target = endpoints[key]
+                grad = torch.autograd.grad(loss, target, retain_graph=True, allow_unused=True,
+                                           materialize_grads=False)[0] if loss.requires_grad and target.requires_grad else None
+                result["gradients"][f"{term}_wrt_{key}"] = None if grad is None else grad[0].detach().cpu()
+        torch.save(result, self.diag / f"gradient_maps_{route.replace(',', '-')}_initial.pt")
 
     def audit(self, count=None, routes=None):
         count = self.args.audit_batches if count is None else count
@@ -453,29 +571,34 @@ class Experiment:
             selected = np.linspace(0, len(stream.dataset) - 1, count * self.cfg.batch_size, dtype=int)
             indices = selected[batch_id * self.cfg.batch_size:(batch_id + 1) * self.cfg.batch_size].tolist()
             batch = self.original.collate_fn([stream.sample(index, epoch=0) for index in indices])
-            reference = None
+            # First forward establishes a reference without any backward. The
+            # first route below repeats this exact route/seed before switching
+            # detach flags, so CUDA label nondeterminism cannot masquerade as a
+            # route-dependent change. Mismatches still fail the strict gate.
+            self.model.set_depth_grad_routes(routes[0])
+            with self.diagnostic_context(train_mode=True, seed=stable_seed(self.args.seed, "audit", batch_id)):
+                reference_loss, reference_endpoints = self.forward(batch, capture=True)
+                reference = self.equality_tensors(reference_endpoints)
+                del reference_loss, reference_endpoints
+            with self.diagnostic_context(train_mode=True, seed=stable_seed(self.args.seed, "audit", batch_id)):
+                plain_loss, plain_endpoints = self.forward(batch, capture=False, diagnostics=False)
+                telemetry_failures = self.compare_endpoints(reference, self.equality_tensors(plain_endpoints))
+                all_pass &= not telemetry_failures
+                dd.append_jsonl(self.diag / "telemetry_equality.jsonl", {
+                    "step": self.step, "batch": batch_id, "route": routes[0],
+                    "passed": not telemetry_failures, "failures": telemetry_failures})
+                del plain_loss, plain_endpoints
             for route in routes:
                 self.model.set_depth_grad_routes(route)
                 with self.diagnostic_context(train_mode=True, seed=stable_seed(self.args.seed, "audit", batch_id)):
                     loss, endpoints = self.forward(batch, capture=True)
                     values = self.equality_tensors(endpoints)
-                    failures = []
-                    if reference is None:
-                        reference = values
-                    else:
-                        for key in reference.keys() | values.keys():
-                            if key not in reference or key not in values:
-                                failures.append({"key": key, "reason": "missing endpoint"})
-                                continue
-                            a, b = reference[key], values[key]
-                            equal = a.shape == b.shape and (torch.allclose(a, b, atol=self.args.forward_atol,
-                                      rtol=self.args.forward_rtol, equal_nan=False) if a.is_floating_point() else torch.equal(a, b))
-                            if not equal:
-                                failures.append({"key": key, "reason": "value mismatch",
-                                                 "max_abs": float((a.float() - b.float()).abs().max()) if a.shape == b.shape else None})
+                    failures = self.compare_endpoints(reference, values)
                     all_pass &= not failures
                     dd.append_jsonl(self.diag / "forward_equality.jsonl", {"step": self.step, "batch": batch_id,
-                        "indices": indices, "route": route, "compared": sorted(values), "passed": not failures,
+                        "indices": indices, "route": route, "reference_route": routes[0],
+                        "comparison": "same_route_repeat" if route == routes[0] else "route_switch",
+                        "compared": sorted(values), "passed": not failures,
                         "failures": failures, "atol": self.args.forward_atol, "rtol": self.args.forward_rtol})
                     observations = {"depth_net_pred": endpoints["depth_net_pred"],
                                     "depth_head_raw_pred": endpoints["depth_head_raw_pred"]}
@@ -513,6 +636,7 @@ class Experiment:
                         if route in route_nonzero and term != "depth" and status == "connected_nonzero":
                             route_nonzero[route] = True
                     self.directional_probe(endpoints, route, batch_id)
+                    self.save_gradient_maps(endpoints, route, batch_id)
                     # Route aliases and the final scalar loss also retain the
                     # graph. Release them before constructing the next route's
                     # forward, otherwise a one-batch audit can peak at 2 graphs.
@@ -524,7 +648,8 @@ class Experiment:
                 self.original.drop_unused_point_inputs(prepared)
                 prepared = self.original.move_batch_to_device(prepared, self.trainer.device, use_cdf=True)
                 prepared.update(cva_force_process_grasp_labels=True, cva_compute_diagnostics=True,
-                                geometry_compute_diagnostics=False, depth_grad_capture_routes=True)
+                                geometry_compute_diagnostics=False, depth_grad_capture_routes=True,
+                                depth_dynamics_diagnostics=True)
                 directional = run_directional_probe(self.model, prepared,
                     lambda ep: self.original.get_loss_economicgrasp(ep, use_cdf=True),
                     loss_weights=self.weights, batch_id=batch_id,
@@ -593,6 +718,7 @@ class Experiment:
                                "module_mode": "train" if mode else "eval", "is_training": mode,
                                "selection_policy": "native_stochastic_fixed_rng" if mode else "native_argmax",
                                "task_targets": "native matching, not fixed physical queries", "metrics": metrics,
+                               "identity_changes": self.probe_identity_metrics(item, mode, endpoints),
                                "native_loss": float(loss), "coverage": self.scalar_metrics(endpoints)}
                         dd.append_jsonl(self.diag / "fixed_probe.jsonl", json_safe(row))
                         if not mode and item["split"] == "train":
@@ -603,6 +729,14 @@ class Experiment:
                                         "raw": endpoints["depth_head_raw_pred"].detach().cpu(),
                                         "metric_color_range_m": [0.0, 1.0]}, self.diag / f"fixed_frame_{self.step:06d}.pt")
         self.record_event(train_eval_metrics)
+        self.contract["healthy_probe_completed"] = True
+        gate_path = self.diag / "p0_gate.json"
+        if gate_path.exists():
+            gate = json.loads(gate_path.read_text())
+            gate["healthy_probe_completed"] = True
+            gate["passed"] = bool(gate["route_checks_passed"] and gate.get("diagnostic_noninterference_passed"))
+            dd.write_json(gate_path, gate)
+        self.write_contract()
 
     def record_event(self, metrics):
         data = [entry["regions"]["foreground"]["std_ratio"] for entry in metrics
@@ -640,6 +774,7 @@ class Experiment:
                      "source_epoch": self.initial_epoch, "stream_epoch": self.stream.epoch}, "scaler_state": None,
                  "rng": dd.capture_rng_state(), "loader": self.stream.state_dict(), "step": self.step,
                  "seen_images": self.seen_images, "events": self.events, "locked_steps": sorted(self.locked_steps),
+                 "probe_previous": self.probe_previous,
                  "init_sha256": self.init_sha, "routes": self.model.get_depth_grad_routes(),
                  "cfg": vars(self.cfg), "arguments": vars(self.args),
                  "train_manifest_sha256": self.contract["data"]["train_manifest_sha256"],
@@ -683,6 +818,7 @@ class Experiment:
         self.stream.load_state_dict(state["loader"])
         self.step, self.seen_images = state["step"], state["seen_images"]
         self.events, self.locked_steps = state["events"], set(state["locked_steps"])
+        self.probe_previous = state.get("probe_previous", {})
         for name, module in self.model.named_modules():
             module.training = state["module_training"][name]
             if name in state["is_training"]:
@@ -749,7 +885,7 @@ class Experiment:
         if gate_path.exists():
             gate = json.loads(gate_path.read_text())
             gate["diagnostic_noninterference_passed"] = not errors
-            gate["passed"] = bool(not errors and gate["route_checks_passed"])
+            gate["passed"] = bool(not errors and gate["route_checks_passed"] and gate.get("healthy_probe_completed"))
             dd.write_json(gate_path, gate)
         if errors:
             raise RuntimeError("Diagnostic replay changed the next optimizer update")
@@ -850,6 +986,8 @@ def main(argv=None):
             experiment.train()
         elif not args.skip_initial_audit and args.resume_checkpoint:
             experiment.audit()
+        if args.mode == "audit":
+            experiment.probe()
     except BaseException as error:
         if experiment is not None:
             dd.write_json(experiment.diag / "failure.json", {"type": type(error).__name__, "message": str(error),

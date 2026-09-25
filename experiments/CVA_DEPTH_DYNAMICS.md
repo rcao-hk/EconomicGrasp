@@ -105,8 +105,12 @@ bash scripts/run_cva_depth_dynamics.sh --mode pair --run-id "$RUN" \
 ```
 
 The launcher explicitly resets AdamW at LR 1e-4 with zero weight decay and a
-constant schedule. These are recorded experimental choices; the source
-weights-only checkpoint does not provide its optimizer or LR history.
+constant schedule. These are recorded experimental choices. Subsequent reading
+of the original `log_train.txt` established a source base LR of 3e-4, 21-epoch
+cosine schedule, batch size 3 per DDP process. A sibling `checkpoint_15.tar`
+contains optimizer state at LR 5.6476529721189974e-5, but no RNG/loader state.
+The supplied epoch weight file remains the declared initialization; this run
+does not claim to reproduce the source optimization state or effective batch.
 Model/crop/pose/labels remain inherited from the source implementation and
 checkpoint. Full-state diagnostic snapshots support actual resume within a run.
 Each process writes its actual expanded command, configuration and paths.
@@ -115,3 +119,23 @@ Small-tensor route tests and five utility-invariant tests passed remotely at
 `52f1347` and `a89c4a8`, respectively. This establishes engineering invariants,
 not the real-model P0 or a mechanism result. Actual run evidence follows in the
 run's diagnostics directory and execution reports.
+
+## Preflight label nondeterminism
+
+At `1af62c1`, the first real model batch established all three route gradients
+and baseline disconnection, but strict forward equality failed on CDF/width
+target values. The label-only diagnostic at `4dd2a60` repeated matching ten
+times at identical query centers and view IDs. Both detach and all-open cases
+had 26,980 inverse-view destination collisions. Compared with the first repeat,
+up to 33/36 label entries differed. In this batch all changed entries were
+outside the union of effective supervision masks; valid labels, masks and
+nearest points stayed equal. This is not evidence explaining depth collapse.
+
+The cause is duplicate CUDA writes in the inverse scene-view mapping. Multiple
+scene views can have the same nearest object view, so assigning a scene index
+to each top-k slot with advanced indexing has competing writes. The diagnostic
+is retained at `20260926_labelcheck_seed0/diagnostics/P0/cdf_label_determinism.json`.
+The deterministic foundation fix uses the largest scene index as the explicit
+row-major last-writer convention. It preserves the single-representative
+protocol; it does not expand the set of supervised views. All experiment arms
+must start again under that fixed mapping and pass the full strict P0 gate.

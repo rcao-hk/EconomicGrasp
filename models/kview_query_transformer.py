@@ -866,12 +866,45 @@ class ViewConditionedAttentionGrouping(nn.Module):
         v = xyz[..., 1] / z * fy + cy
         return torch.stack([u, v], dim=-1)
 
-    def _clamp_vec_radius(self, vec: torch.Tensor, fallback: torch.Tensor, radius_px: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    @torch.no_grad()
+    def _record_depth_dynamics(stats, name, values, lower=None, upper=None):
+        """Accumulate detached exact counts, never averages of chunk averages.
+
+        Bounds distinguish strict clipping from equality at a clamp boundary.
+        Every ratio emitted by forward has the corresponding explicit count.
+        This opt-in dictionary lives only in the current forward, not the module.
+        """
+        if stats is None:
+            return
+        values = values.detach()
+        finite = torch.isfinite(values)
+        counts = {
+            "count": torch.tensor(values.numel(), device=values.device, dtype=torch.long),
+            "finite_count": finite.sum(), "nonfinite_count": (~finite).sum(),
+        }
+        if lower is not None:
+            counts["below_count"] = (finite & (values < lower)).sum()
+            counts["at_or_below_count"] = (finite & (values <= lower)).sum()
+        if upper is not None:
+            counts["above_count"] = (finite & (values > upper)).sum()
+            counts["at_or_above_count"] = (finite & (values >= upper)).sum()
+        bucket = stats.setdefault(name, {})
+        for key, value in counts.items():
+            bucket[key] = bucket.get(key, 0) + value
+
+    def _clamp_vec_radius(self, vec: torch.Tensor, fallback: torch.Tensor, radius_px: torch.Tensor,
+                          depth_dynamics_stats=None) -> torch.Tensor:
         eps = self.config.eps
         norm = torch.linalg.norm(vec, dim=-1, keepdim=True)
+        if depth_dynamics_stats is not None:
+            self._record_depth_dynamics(depth_dynamics_stats, "axis_projection_norm", norm, lower=eps)
         use_fallback = (~torch.isfinite(norm)) | (norm < eps)
         vec = torch.where(use_fallback, fallback, vec)
         norm = torch.linalg.norm(vec, dim=-1, keepdim=True).clamp_min(eps)
+        if depth_dynamics_stats is not None:
+            self._record_depth_dynamics(depth_dynamics_stats, "axis_radius", norm,
+                                        float(self.config.radius_px_min), float(self.config.radius_px_max))
         target = norm.clamp(float(self.config.radius_px_min), float(self.config.radius_px_max))
         # If the projection is nearly singular, use the depth-derived fallback radius.
         target = torch.where(use_fallback, radius_px.unsqueeze(-1), target)
@@ -886,6 +919,7 @@ class ViewConditionedAttentionGrouping(nn.Module):
         camera_K: torch.Tensor,
         H: int,
         W: int,
+        depth_dynamics_stats=None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Builds normalized grid [B,Q,P,2] and valid mask [B,Q,P].
 
@@ -901,11 +935,17 @@ class ViewConditionedAttentionGrouping(nn.Module):
         center_proj_uv = self._project_xyz_to_uv(seed_xyz, camera_K)
         center_proj_err = torch.linalg.norm(center_proj_uv - center_uv, dim=-1)  # [B,Q]
 
+        if depth_dynamics_stats is not None:
+            self._record_depth_dynamics(depth_dynamics_stats, "projection_center_z", seed_xyz[..., 2], lower=1e-6)
         z = seed_xyz[..., 2].clamp_min(1e-6)
         fx = camera_K[:, 0, 0].view(B, 1).to(dtype=dtype)
         fy = camera_K[:, 1, 1].view(B, 1).to(dtype=dtype)
         fmean = 0.5 * (fx + fy)
-        radius_px = (fmean * float(self.config.metric_radius) / z).clamp(
+        radius_unclamped = fmean * float(self.config.metric_radius) / z
+        if depth_dynamics_stats is not None:
+            self._record_depth_dynamics(depth_dynamics_stats, "fallback_radius", radius_unclamped,
+                                        float(self.config.radius_px_min), float(self.config.radius_px_max))
+        radius_px = radius_unclamped.clamp(
             float(self.config.radius_px_min),
             float(self.config.radius_px_max),
         )  # [B,Q]
@@ -929,8 +969,8 @@ class ViewConditionedAttentionGrouping(nn.Module):
         fallback_z = torch.zeros_like(vec_z)
         fallback_y[..., 0] = radius_px
         fallback_z[..., 1] = radius_px
-        vec_y = self._clamp_vec_radius(vec_y, fallback_y, radius_px)
-        vec_z = self._clamp_vec_radius(vec_z, fallback_z, radius_px)
+        vec_y = self._clamp_vec_radius(vec_y, fallback_y, radius_px, depth_dynamics_stats)
+        vec_z = self._clamp_vec_radius(vec_z, fallback_z, radius_px, depth_dynamics_stats)
 
         offsets = self.unit_offsets.to(device=device, dtype=dtype)  # [P,2]
         # local x offset follows projected gripper-y; local y offset follows projected gripper-z.
@@ -950,7 +990,11 @@ class ViewConditionedAttentionGrouping(nn.Module):
 
         x_norm = patch_uv[..., 0] / max(float(W - 1), 1.0) * 2.0 - 1.0
         y_norm = patch_uv[..., 1] / max(float(H - 1), 1.0) * 2.0 - 1.0
-        grid = torch.stack([x_norm, y_norm], dim=-1).clamp(-2.0, 2.0).contiguous()
+        grid_unclamped = torch.stack([x_norm, y_norm], dim=-1)
+        if depth_dynamics_stats is not None:
+            self._record_depth_dynamics(depth_dynamics_stats, "grid_coordinate", grid_unclamped, -2.0, 2.0)
+            self._record_depth_dynamics(depth_dynamics_stats, "sample_coordinate", grid_unclamped, -1.0, 1.0)
+        grid = grid_unclamped.clamp(-2.0, 2.0).contiguous()
         radius_dbg = 0.5 * (torch.linalg.norm(vec_y, dim=-1) + torch.linalg.norm(vec_z, dim=-1))
         return grid, valid, radius_dbg, patch_uv, center_uv, center_proj_uv, center_proj_err, vec_y, vec_z
 
@@ -974,6 +1018,7 @@ class ViewConditionedAttentionGrouping(nn.Module):
         graspness_map: Optional[torch.Tensor],
         valid: torch.Tensor,
         depth_grad_inputs: Optional[List[torch.Tensor]] = None,
+        depth_dynamics_stats=None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         B, Q, P, _ = grid.shape
         device = grid.device
@@ -992,6 +1037,9 @@ class ViewConditionedAttentionGrouping(nn.Module):
                 depth_grad_inputs.append(dmap)
             depth_patch = self._sample_map(dmap.to(dtype=dtype), grid).squeeze(-1)  # [B,Q,P]
             depth_delta = (depth_patch - seed_xyz[..., 2].unsqueeze(-1)) / max(float(self.config.depth_norm_scale), self.config.eps)
+            if depth_dynamics_stats is not None:
+                self._record_depth_dynamics(depth_dynamics_stats, "support_residual", depth_delta, -5.0, 5.0)
+                self._record_depth_dynamics(depth_dynamics_stats, "support_residual_valid", depth_delta[valid], -5.0, 5.0)
             depth_delta = torch.nan_to_num(depth_delta, nan=0.0, posinf=0.0, neginf=0.0).clamp(-5.0, 5.0)
         else:
             depth_delta = torch.zeros((B, Q, P), device=device, dtype=dtype)
@@ -1123,6 +1171,7 @@ class ViewConditionedAttentionGrouping(nn.Module):
         query = query + self.view_rot_embed(top_view_rot.reshape(B, Q, 9).float().to(query.dtype))
 
         max_q = max(int(self.config.grouping_max_queries_per_chunk), 1)
+        depth_dynamics_stats = {} if bool(end_points.get("depth_dynamics_diagnostics", False)) else None
         depth_grad_inputs = None
         if bool(end_points.get("depth_grad_capture_routes", False)):
             depth_grad_inputs = []
@@ -1176,6 +1225,7 @@ class ViewConditionedAttentionGrouping(nn.Module):
                 camera_K=camera_K,
                 H=H,
                 W=W,
+                depth_dynamics_stats=depth_dynamics_stats,
             )  # grid [B,qn,P,2]
 
             patch_feat = self._sample_map(feat_map, grid)  # [B,qn,P,Cfeat]
@@ -1187,6 +1237,7 @@ class ViewConditionedAttentionGrouping(nn.Module):
                 graspness_map=graspness_map,
                 valid=valid,
                 depth_grad_inputs=depth_grad_inputs,
+                depth_dynamics_stats=depth_dynamics_stats,
             )
             offsets = self.unit_offsets.to(device=feat_map.device, dtype=feat_map.dtype).view(1, 1, -1, 2)
             offsets = offsets.expand(B, qn, -1, -1)
@@ -1266,6 +1317,14 @@ class ViewConditionedAttentionGrouping(nn.Module):
 
         x = torch.cat(outputs, dim=1).transpose(1, 2).contiguous()  # [B,C,Q]
         group_features = self.out_proj(x)  # [B,out_dim,Q]
+        if depth_dynamics_stats is not None:
+            for name, counts in depth_dynamics_stats.items():
+                total = counts["count"].clamp_min(1).float()
+                for key, value in counts.items():
+                    end_points[f"D: Dynamics {name} {key}"] = value.detach().reshape(())
+                    if key != "count":
+                        ratio_name = key.removesuffix("_count") + "_fraction"
+                        end_points[f"D: Dynamics {name} {ratio_name}"] = (value.float() / total).detach().reshape(())
         self._add_debug(
             end_points,
             valid_sum, valid_count, radius_sum, radius_count, ent_sum, maxp_sum, attn_count,

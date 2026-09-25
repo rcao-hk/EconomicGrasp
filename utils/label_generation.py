@@ -987,6 +987,38 @@ def _align_topk_angle_labels(label_topk: torch.Tensor, top_view_index_trans: tor
     return aligned
 
 
+def _deterministic_top_view_scene(
+    view_inds: torch.Tensor,
+    top_view_index: torch.Tensor,
+) -> torch.Tensor:
+    """Invert scene->object view IDs with an explicit last-scene convention.
+
+    Nearest-view matching is not necessarily bijective. The old advanced-index
+    assignment wrote several scene IDs to the same [point, stored-view] slot,
+    producing nondeterministic CUDA labels. Select the largest matching scene
+    ID: this is the explicit row-major last-writer convention. Unmatched or
+    invalid stored object-view IDs stay -1. This keeps one representative per
+    stored view; it does not expand the supervised candidate set.
+
+    The temporary table is V x V (V=300), independent of the query/cache size.
+    Integer max reduction avoids conflicting indexed writes entirely.
+    """
+    if view_inds.ndim != 1 or view_inds.numel() == 0:
+        raise ValueError("view_inds must be a nonempty scene->object view vector")
+    if top_view_index.ndim != 2:
+        raise ValueError("top_view_index must have shape [points, stored_views]")
+    if view_inds.device != top_view_index.device:
+        raise ValueError("view_inds and top_view_index must be on the same device")
+    num_view = view_inds.numel()
+    scene_ids = torch.arange(num_view, device=view_inds.device, dtype=torch.long)
+    matches = scene_ids[:, None] == view_inds[None, :]
+    representative = torch.where(matches, scene_ids[None, :], -1).amax(dim=1)
+    valid = (top_view_index >= 0) & (top_view_index < num_view)
+    safe_index = top_view_index.long().clamp(0, num_view - 1)
+    result = representative[safe_index].to(dtype=top_view_index.dtype)
+    return result.masked_fill(~valid, -1)
+
+
 def _align_topk_angle_depth_labels(
     label_topk: torch.Tensor,
     top_view_index_trans: torch.Tensor,
@@ -1408,6 +1440,8 @@ def process_grasp_labels_cdf_width(end_points):
     batch_width = []
     batch_width_valid = []
     valid_points_total = seed_xyzs.new_zeros(())
+    dynamics_diagnostics = bool(end_points.get("depth_dynamics_diagnostics", False))
+    dynamics_rows = [] if dynamics_diagnostics else None
 
     for batch_i in range(batch_size):
         seed_xyz = seed_xyzs[batch_i]
@@ -1573,11 +1607,9 @@ def process_grasp_labels_cdf_width(end_points):
                 view_rot_scene, 0, view_inds
             )
 
-            top_view_scene = -torch.ones_like(top_view_index)
-            row_id, slot_id, scene_view_id = torch.where(
-                view_inds == top_view_index.unsqueeze(-1)
+            top_view_scene = _deterministic_top_view_scene(
+                view_inds, top_view_index
             )
-            top_view_scene[row_id, slot_id] = scene_view_id
 
             transformed_rot = torch.matmul(
                 pose[:3, :3], canonical_rot.reshape(-1, 3, 3)
@@ -1640,6 +1672,17 @@ def process_grasp_labels_cdf_width(end_points):
         cdf_pos = candidate_valid & (selected_cdf > 0)
         width_valid = candidate_valid & selected_width_valid
 
+        if dynamics_diagnostics:
+            # Observe the native assignment without recomputing or changing it.
+            # The owner/local pair identifies a point in the supplied per-frame
+            # object payload; it is meaningful across probes of that same frame.
+            dynamics_rows.append({
+                "nn_indices": nn_inds.detach(), "owner_indices": owner.detach(),
+                "local_point_indices": local_point.detach(),
+                "point_distance_m": point_dist.detach(),
+                "point_valid": point_valid.detach(), "view_valid": view_valid.detach(),
+            })
+
         batch_points.append(nearest_points)
         batch_views_rot.append(selected_view_rot)
         batch_view_graspness.append(selected_view_graspness)
@@ -1692,6 +1735,24 @@ def process_grasp_labels_cdf_width(end_points):
         )
     end_points["batch_grasp_cdf_thresholds"] = threshold_ref
     end_points["C: Valid Points"] = valid_points_total / float(batch_size)
+    if dynamics_diagnostics:
+        trace = end_points.setdefault("depth_dynamics_label_trace", [])
+        row = {key: torch.stack([item[key] for item in dynamics_rows], dim=0)
+               for key in dynamics_rows[0]}
+        row["pass_index"] = len(trace)
+        row["view_indices"] = pred_view_inds.detach().clone()
+        token_indices = end_points.get("token_sel_idx")
+        row["token_indices"] = (token_indices.detach().clone()
+                                if torch.is_tensor(token_indices) else None)
+        trace.append(row)
+        # Separate passes avoid confusing base-view and selected-query coverage.
+        for key in ("point_valid", "view_valid"):
+            count = row[key].sum()
+            total = row[key].numel()
+            prefix = f"D: Dynamics labels{row['pass_index']} {key}"
+            end_points[prefix + " count"] = count.detach().reshape(())
+            end_points[prefix + " total"] = count.new_tensor(total).reshape(())
+            end_points[prefix + " fraction"] = (count.float() / max(total, 1)).detach().reshape(())
 
     return torch.stack(batch_views_rot, dim=0), end_points
 

@@ -45,6 +45,52 @@ def flatten_metrics(record):
     return []
 
 
+def render_fixed_frames(root, output):
+    """One fixed frame, shared metric colour scales across arms and times."""
+    files = sorted(root.rglob("fixed_frame_*.pt"))
+    if not files:
+        return
+    import torch
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import Normalize
+    by_step = defaultdict(dict)
+    for path in files:
+        state = torch.load(path, map_location="cpu", weights_only=False)
+        by_step[int(state["step"])][path.parent.name] = state
+    for step, states in sorted(by_step.items()):
+        arms = [arm for arm in ("D0", "D1") if arm in states]
+        if not arms:
+            continue
+        first = states[arms[0]]
+        rgb = first["rgb"][0].float().numpy().transpose(1, 2, 0)
+        rgb = np.clip(rgb * np.array([.229, .224, .225]) + np.array([.485, .456, .406]), 0, 1)
+        gt = first["gt"].squeeze().float().numpy()
+        figure, axes = plt.subplots(1, 2 + 2 * len(arms), figsize=(4 * (2 + 2 * len(arms)), 4), constrained_layout=True)
+        axes[0].imshow(rgb)
+        axes[0].set_title("Fixed RGB frame")
+        depth_artist = axes[1].imshow(gt, cmap="viridis", norm=Normalize(0, 1))
+        axes[1].set_title("GT depth (m)")
+        error_artist = None
+        for i, arm in enumerate(arms):
+            value = states[arm]
+            if not torch.equal(first["gt"], value["gt"]) or not torch.equal(first["rgb"], value["rgb"]):
+                raise ValueError(f"Cannot pair different frames at update {step}: {arm}")
+            pred = value["pred"].squeeze().float().numpy()
+            axes[2 + i * 2].imshow(pred, cmap="viridis", norm=Normalize(0, 1))
+            axes[2 + i * 2].set_title(f"{arm} depth (m)")
+            error = np.where((gt >= .2) & (gt <= 1), pred - gt, np.nan)
+            error_artist = axes[3 + i * 2].imshow(error, cmap="coolwarm", norm=Normalize(-.1, .1))
+            axes[3 + i * 2].set_title(f"{arm} error (m)")
+        for axis in axes:
+            axis.axis("off")
+        figure.colorbar(depth_artist, ax=[axes[1], *[axes[2 + 2*i] for i in range(len(arms))]], shrink=.65)
+        figure.colorbar(error_artist, ax=[axes[3 + 2*i] for i in range(len(arms))], shrink=.65)
+        figure.suptitle(f"Successful optimizer updates: {step}; shared metre scales")
+        figure.savefig(output / f"paired_depth_step_{step:06d}.png", dpi=140)
+        plt.close(figure)
+
+
 def summarize(root, output, plots=True):
     output.mkdir(parents=True, exist_ok=True)
     grouped = defaultdict(list)
@@ -139,6 +185,7 @@ def summarize(root, output, plots=True):
         figures.mkdir(exist_ok=True)
         figure.savefig(figures / "depth_dynamics.png", dpi=160)
         plt.close(figure)
+        render_fixed_frames(root, figures)
     return {"rows": len(rows), "summary": str(csv_path), "report": str(output / "report.md")}
 
 
