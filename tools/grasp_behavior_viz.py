@@ -410,6 +410,64 @@ def _project_xyz(xyz: np.ndarray, K: np.ndarray) -> Tuple[np.ndarray, np.ndarray
     return uv, valid
 
 
+def save_grasp_scene_ply(path: str | Path, scene_points: Any,
+                         scene_colors: Optional[Any], grasps: Any,
+                         topk: int = 50, eval_scores: Optional[Any] = None,
+                         collision: Optional[Any] = None,
+                         gripper_points: int = 160) -> bool:
+    """Write scene points plus sampled GraspGroup meshes to one colored PLY.
+
+    Returns False when graspnetAPI/Open3D is unavailable; point-cloud-only PLY
+    should be written separately by the caller in that case.
+    """
+    try:
+        import open3d as o3d
+        from graspnetAPI.grasp import GraspGroup
+    except Exception:
+        return False
+    pts = np.asarray(scene_points, np.float32).reshape(-1, 3)
+    if scene_colors is None:
+        cols = np.full((len(pts), 3), .55, np.float32)
+    else:
+        cols = np.clip(np.asarray(scene_colors, np.float32).reshape(-1, 3), 0, 1)
+    cloud = o3d.geometry.PointCloud()
+    cloud.points = o3d.utility.Vector3dVector(pts)
+    cloud.colors = o3d.utility.Vector3dVector(cols)
+
+    g = np.asarray(to_numpy(grasps), np.float32).reshape(-1, 17)
+    if len(g):
+        order = np.argsort(-g[:, 0], kind="stable")[:min(int(topk), len(g))]
+        selected = g[order]
+        ev = None if eval_scores is None else np.asarray(eval_scores).reshape(-1)[order]
+        co = None if collision is None else np.asarray(collision).reshape(-1)[order]
+        gg = GraspGroup(selected.copy())
+        for i, geom in enumerate(gg.to_open3d_geometry_list()):
+            try:
+                sample = geom.sample_points_uniformly(number_of_points=int(gripper_points))
+            except Exception:
+                continue
+            if ev is None:
+                t = i / max(1, len(selected) - 1)
+                color = [float(t), float(.8 - .4 * t), float(1. - t)]
+            else:
+                score = float(ev[i])
+                bad = bool(co[i]) if co is not None else False
+                if bad or score <= 0:
+                    color = [.30, .30, .30]
+                elif score <= .4:
+                    color = [.15, .80, .20]
+                elif score <= .8:
+                    color = [1.00, .75, .10]
+                else:
+                    color = [1.00, .30, .10]
+            sample.paint_uniform_color(color)
+            cloud += sample
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    o3d.io.write_point_cloud(str(path), cloud, write_ascii=False)
+    return True
+
+
 def save_grasp_overlay(path: str | Path, rgb: np.ndarray, grasps: Any, K: Any,
                        title: str = "", topk: int = 50,
                        eval_scores: Optional[Any] = None,
