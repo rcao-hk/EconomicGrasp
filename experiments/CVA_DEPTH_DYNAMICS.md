@@ -64,9 +64,11 @@ The copy on the training host is
 4. P3/P4: path localization and intervention require observed reproducible
    failure. A negative gradient cosine alone is not a causal mechanism.
 
-Do not rename `test_seen` to validation. The supplied checkpoint's original
-training scenes must be checked before claiming any held-out validation split.
-Fixed train-frame depth probes are training diagnostics; native losses on
+The user explicitly designated `test_seen` as validation in this task. Select
+32 fixed frames from its 30 scenes, and retain `test_seen` as the source split
+in the contract. This is a research validation use of the benchmark test split;
+it must not later be presented as an untouched final test. Fixed train-frame
+depth probes are training diagnostics; native losses on
 fixed frames are not fixed physical-query/assignment probes. No official AP
 evaluation is part of the initial mechanism screen.
 
@@ -84,4 +86,32 @@ The historical preprocessing uses captured depth for the crop/workspace mask,
 and fused synthetic depth for supervision where configured. Record these uses
 separately from the RGB-only model geometry input.
 
-Runtime commands and measured results are added after verification.
+## Commands
+
+Use a new run ID for each new initialization/seed. The launcher starts one GPU
+for P0/P1 and two independent GPUs for D0/D1. It does not auto-start P3 or AP.
+
+```bash
+PY=/home/robotarm/miniconda3/envs/grasp/bin/python
+INIT=/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/init/stage1_epoch15.tar
+RUN=20260926_stage1_seed0
+bash scripts/run_cva_depth_dynamics.sh --mode audit --run-id "$RUN" \
+  --checkpoint "$INIT" --gpus 0 --python "$PY"
+bash scripts/run_cva_depth_dynamics.sh --mode pair --run-id "$RUN" \
+  --checkpoint "$INIT" --gpus 0,1 --max-steps 50 --python "$PY"
+# Only after reviewing smoke trajectories:
+bash scripts/run_cva_depth_dynamics.sh --mode pair --run-id "$RUN" \
+  --checkpoint "$INIT" --gpus 0,1 --max-steps 500 --resume --python "$PY"
+```
+
+The launcher explicitly resets AdamW at LR 1e-4 with zero weight decay and a
+constant schedule. These are recorded experimental choices; the source
+weights-only checkpoint does not provide its optimizer or LR history.
+Model/crop/pose/labels remain inherited from the source implementation and
+checkpoint. Full-state diagnostic snapshots support actual resume within a run.
+Each process writes its actual expanded command, configuration and paths.
+
+Small-tensor route tests and five utility-invariant tests passed remotely at
+`52f1347` and `a89c4a8`, respectively. This establishes engineering invariants,
+not the real-model P0 or a mechanism result. Actual run evidence follows in the
+run's diagnostics directory and execution reports.

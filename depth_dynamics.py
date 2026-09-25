@@ -137,7 +137,12 @@ def parameter_groups(model):
             group = "depth_film"
         elif clean.startswith("depth_net.depthnet.depth_head."):
             tail = clean[len("depth_net.depthnet.depth_head."):]
-            group = "depth_dpt." + tail.split(".")[0]
+            parts = tail.split(".")
+            # Keep each DPT scale/refinement stage visible rather than merging
+            # all scratch/refinenet layers into one large decoder bucket.
+            group = "depth_dpt." + ".".join(parts[:2] if parts[0] in
+                                             {"projects", "resize_layers", "readout_projects", "scratch"}
+                                             else parts[:1])
         elif clean.startswith("depth_net."):
             group = "depth_other"
         elif clean.startswith("proposal_head."):
