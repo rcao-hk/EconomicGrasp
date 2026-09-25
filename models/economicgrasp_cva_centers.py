@@ -77,7 +77,7 @@ def extract_depth_features(reference, batch):
 
 
 @torch.no_grad()
-def reference_candidates(reference, batch, pack, case, seed, offsets, query_limit=0):
+def reference_candidates(reference, batch, pack, case, seed, offsets, query_limit=0, return_end_points=False):
     """True joint replay: the perturbed depth reaches enhancer, seeds, ViewNet/CVA."""
     from models.economicgrasp_bip3d import pred_decode_center_view_angle, _cva_decode_query_indices
     active_depth = perturb_depth(pack[0], case, seed)
@@ -108,12 +108,18 @@ def reference_candidates(reference, batch, pack, case, seed, offsets, query_limi
         raise RuntimeError('Stage-1 produced out-of-range native centers')
     # Exact base token mapping, not image projection rounded back to a pixel.
     token_ids = ep['token_sel_idx'][0][qidx]
-    return {
+    bundle = {
         'actions': actions, 'valid': valid, 'native': native,
         'token_ids': token_ids, 'view_xyz': ep['grasp_top_view_xyz'][0][qidx],
         'angle_ids': angle_ids, 'depth_ids': depth_ids, 'query_ids': qidx,
         'zero': zero, 'total_stage1_queries': total,
-    }, active_depth
+    }
+    if return_end_points:
+        # Visualization/diagnostics only.  The default training/inference
+        # contract deliberately keeps the large Stage-1 endpoint dictionary
+        # out of the return path.
+        return bundle, active_depth, ep
+    return bundle, active_depth
 
 
 class CenterHypothesisCVA(nn.Module):
@@ -159,16 +165,23 @@ class CenterHypothesisCVA(nn.Module):
         if unexpected or any(not k.startswith('reference.') for k in missing):
             raise RuntimeError('Invalid learned checkpoint')
 
-    def encode_image(self, batch, pack, active_depth):
-        """Frozen backbone evaluated online; DPT adapter gets grasp gradients."""
+    def encode_image(self, batch, pack, active_depth, return_maps=False):
+        """Frozen backbone evaluated online; DPT adapter gets grasp gradients.
+
+        ``return_maps`` is an inspection-only path used by the shared behavior
+        visualizer.  It does not change the default E1/DCR forward contract.
+        """
         h, w = batch['img'].shape[-2:]
         raw, proposal_logits = self.image_adapter(pack[4], h//14, w//14)
-        enhanced, _ = self.enhancer(raw, depth_prob=None, depth_map=active_depth.detach(),
-                                    K=batch['K'], image_hw=(h, w), return_maps=False)
+        enhanced, spatial_aux = self.enhancer(
+            raw, depth_prob=None, depth_map=active_depth.detach(),
+            K=batch['K'], image_hw=(h, w), return_maps=bool(return_maps))
         feature = F.interpolate(enhanced, size=(h, w), mode='bilinear', align_corners=False)
+        if return_maps:
+            return feature, proposal_logits, raw, enhanced, spatial_aux
         return feature, proposal_logits
 
-    def score_bundle(self, feature, proposal_logits, batch, active_depth, bundle, return_features=False):
+    def score_bundle(self, feature, proposal_logits, batch, active_depth, bundle, return_features=False, debug_sink=None):
         from utils.label_generation import batch_viewpoint_params_to_matrix
         actions, valid = bundle['actions'], bundle['valid']
         c, q = valid.shape
@@ -182,15 +195,21 @@ class CenterHypothesisCVA(nn.Module):
         angles = torch.arange(a, device=view.device, dtype=view.dtype).view(1, 1, a).expand(c, q, a)
         rotations = batch_viewpoint_params_to_matrix(-view, angles.reshape(-1)*(np.pi/a)).reshape(1, -1, 3, 3)
         seeds = feature.flatten(2).gather(2, token[:, None].expand(1, feature.shape[1], -1))
+        local_ep = {}
         grouped = self.group(
             seed_features=seeds, token_sel_idx=token, seed_xyz=xyz, top_view_rot=rotations,
             feat_map=feature, depth_map=active_depth.detach(),
             objectness_logits=proposal_logits[:, :2], graspness_map=proposal_logits[:, 2:3],
-            camera_K=batch['K'], end_points={})
+            camera_K=batch['K'], end_points=local_ep)
         complete_action = safe[:, :, None].expand(c, q, a, 17).clone().reshape(-1, 17)
         complete_action[:, 4:13] = rotations.reshape(-1, 9)
         grouped = grouped + self.action_adapter(complete_action[:, 1:16]).T[None]
-        ep = self.decoder(grouped, {'kview_angle_query_base_q': c*q, 'kview_angle_query_num_angle': a})
+        ep = self.decoder(grouped, local_ep | {
+            'kview_angle_query_base_q': c*q,
+            'kview_angle_query_num_angle': a,
+        })
+        if debug_sink is not None:
+            debug_sink.update(ep)
         grid = ep['grasp_cdf_pred_angle_depth'][0].permute(1, 2, 3, 0)
         qi = torch.arange(c*q, device=grid.device)
         ai = bundle['angle_ids'].repeat(c)
