@@ -24,6 +24,8 @@ QUERY_LIMIT=${QUERY_LIMIT:-0}
 QUERY_CHUNK=${QUERY_CHUNK:-64}
 RANK_STRENGTH=${RANK_STRENGTH:-0}
 OVERWRITE=${OVERWRITE:-0}
+RUN_EVALUATOR=${RUN_EVALUATOR:-0}
+EVALUATOR_METHODS=${EVALUATOR_METHODS:-stage1,native}
 
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export MKL_NUM_THREADS=${MKL_NUM_THREADS:-1}
@@ -64,6 +66,7 @@ for s in "${!GPU_IDS[@]}"; do
     --query-limit "$QUERY_LIMIT"
     --query-chunk "$QUERY_CHUNK"
     --rank-strength "$RANK_STRENGTH"
+    --evaluator-methods "$EVALUATOR_METHODS"
     --shard-id "$s"
     --num-shards "${#GPU_IDS[@]}"
   )
@@ -71,6 +74,7 @@ for s in "${!GPU_IDS[@]}"; do
   [[ -n "$AIR_CHECKPOINT" ]] && args+=(--air-checkpoint "$AIR_CHECKPOINT")
   [[ -n "$OFFICIAL_ROOT" ]] && args+=(--official-root "$OFFICIAL_ROOT")
   [[ "$OVERWRITE" == 1 ]] && args+=(--overwrite)
+  [[ "$RUN_EVALUATOR" == 1 ]] && args+=(--run-evaluator)
   echo "[VIS] shard=$s gpu=${GPU_IDS[$s]}"
   setsid env CUDA_VISIBLE_DEVICES="${GPU_IDS[$s]}" "$PYTHON_BIN" -u "${args[@]}" \
     >"$VIS_ROOT/logs/shard_${s}.log" 2>&1 &
