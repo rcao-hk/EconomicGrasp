@@ -298,10 +298,16 @@ WORK_ROOT/
     test_similar/
     test_novel/
 
-  train/\n    action_only/\n    geo_pred/\n    img_point/
+  train/
+    action_only/
+    geo_pred/
+    img_point/
     img_region/
 
-  test/\n    action_only/{test_similar,test_novel}/\n    geo_pred/{test_similar,test_novel}/\n    img_point/{test_similar,test_novel}/
+  test/
+    action_only/{test_similar,test_novel}/
+    geo_pred/{test_similar,test_novel}/
+    img_point/{test_similar,test_novel}/
     img_region/{test_similar,test_novel}/
     comparison.csv
     comparison.json
@@ -315,7 +321,8 @@ A useful image representation should improve more than one global
 classification statistic.  The expected evidence pattern is:
 
 ```text
-img_region > geo_pred > action_only\non:
+img_region > geo_pred > action_only
+on:
   Novel utility Spearman
   Novel within-ray pairwise accuracy
   Novel same-ray Delta Utility / headroom recovery
