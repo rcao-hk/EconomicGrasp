@@ -197,6 +197,24 @@ class ResumeOutputSafetyTest(unittest.TestCase):
         self.assertEqual(snapshot, after)
         self.assertTrue(path.exists())
 
+    def test_rescue_cannot_silently_resume_as_ordinary_training(self):
+        args = SimpleNamespace(output=str(self.output), diagnostics_dir=str(self.diag),
+                               resume_checkpoint="rescue.pt", mode="train")
+        before = {str(p): p.read_bytes() for folder in (self.output, self.diag)
+                  for p in folder.rglob("*") if p.is_file()}
+        for branch in ("normal", "remove_view_fixed_clip"):
+            state = {"format_version": trainer.FORMAT_VERSION, "step": 100,
+                     "arguments": {"rescue_branch": branch}}
+            with patch.object(trainer, "torch", SimpleNamespace(load=lambda *a, **k: state), create=True):
+                with self.assertRaisesRegex(ValueError, "explicit --branch"):
+                    trainer.Experiment(args, [])
+            trainer.assert_rescue_resume_explicit(state, SimpleNamespace(mode="audit"))
+            trainer.assert_rescue_resume_explicit(state, SimpleNamespace(mode="train", rescue_branch="normal"))
+        trainer.assert_rescue_resume_explicit({"arguments": {}}, args)
+        after = {str(p): p.read_bytes() for folder in (self.output, self.diag)
+                 for p in folder.rglob("*") if p.is_file()}
+        self.assertEqual(before, after)
+
 
 if __name__ == "__main__":
     unittest.main()

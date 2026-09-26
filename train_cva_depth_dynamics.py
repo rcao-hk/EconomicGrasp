@@ -417,6 +417,14 @@ def select_probe_indices(dataset, count):
     return result
 
 
+def assert_rescue_resume_explicit(state, args):
+    if (state.get("arguments", {}).get("rescue_branch")
+            and getattr(args, "mode", "train") == "train"
+            and not getattr(args, "rescue_branch", None)):
+        raise ValueError("Rescue snapshot requires rescue_cva_depth_counterfactual.py with an explicit --branch; "
+                         "ordinary training would silently drop the gradient intervention protocol")
+
+
 class Experiment:
     def __init__(self, args, remaining):
         self.args = args
@@ -432,6 +440,7 @@ class Experiment:
             resume_state = torch.load(args.resume_checkpoint, map_location="cpu", weights_only=False)
             if resume_state.get("format_version") != FORMAT_VERSION or "step" not in resume_state:
                 raise ValueError("Resume requires a full dynamics checkpoint")
+            assert_rescue_resume_explicit(resume_state, args)
             self.resume_output_check = assert_resume_outputs_not_newer(self.output, self.diag, resume_state["step"])
         self.output.mkdir(parents=True, exist_ok=True)
         self.diag.mkdir(parents=True, exist_ok=True)
@@ -1009,6 +1018,7 @@ class Experiment:
         state = torch.load(path, map_location="cpu", weights_only=False) if state is None else state
         if state.get("format_version") != FORMAT_VERSION:
             raise ValueError("Resume requires a full dynamics checkpoint")
+        assert_rescue_resume_explicit(state, self.args)
         self.resume_output_check = assert_resume_outputs_not_newer(self.output, self.diag, state["step"])
         for key, current in (("init_sha256", self.init_sha), ("routes", self.model.get_depth_grad_routes()),
                              ("train_manifest_sha256", self.contract["data"]["train_manifest_sha256"])):
