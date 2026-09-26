@@ -562,6 +562,9 @@ class Experiment:
                 "tf32_matmul": torch.backends.cuda.matmul.allow_tf32, "amp": False,
                 "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
                 "deterministic_warn_only": torch.is_deterministic_algorithms_warn_only_enabled(),
+                "sdpa_backends": {"flash": torch.backends.cuda.flash_sdp_enabled(),
+                    "memory_efficient": torch.backends.cuda.mem_efficient_sdp_enabled(),
+                    "math": torch.backends.cuda.math_sdp_enabled()},
                 "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
                 "custom_cuda_backward_bitwise_determinism": "not guaranteed; measured replay tolerance recorded"},
             "model": {"class": type(self.model).__qualname__, "file": inspect.getfile(type(self.model)),
@@ -1494,6 +1497,11 @@ def main(argv=None):
     torch.backends.cudnn.allow_tf32 = False
     if args.deterministic_ops:
         torch.use_deterministic_algorithms(True, warn_only=True)
+        # warn_only still permits nondeterministic memory-efficient attention backward.
+        # Keep the same attention equation using the native math implementation.
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_math_sdp(True)
     if not torch.cuda.is_available():
         raise RuntimeError("Actual CVA diagnostics require the project CUDA/custom-op environment")
     experiment = None
