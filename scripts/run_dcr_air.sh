@@ -12,13 +12,13 @@ DCR_CHECKPOINT=${DCR_CHECKPOINT:-$DCR_BASE_ROOT/train/cdf/checkpoint_best.pt}
 DATASET_ROOT=${DATASET_ROOT:-/data/robotarm/dataset/graspnet}
 STAGE1_CKPT=${STAGE1_CKPT:-/data2/robotarm/result/grasp/rgbgrasp/log/economicgrasp_dpt_cva_cdf_distill_stage1/epoch_15_train_0.6009606198008898_val_1.1028128399874995.tar}
 
-GPUS=${GPUS:-0}
+GPUS=${GPUS:-0,1,2,3}
 TRAIN_GPU=${TRAIN_GPU:-}
 PHASES=${PHASES:-train,infer,eval,summary}
 SPLITS=${SPLITS:-test_seen,test_similar,test_novel}
 TEST_CASES=${TEST_CASES:-nominal,bias:-15,bias:15,bias:-25,bias:25,scale:-0.03,scale:0.03,smooth:5,smooth:10}
 SAMPLE_INTERVAL=${SAMPLE_INTERVAL:-0.1}
-EPOCHS=${EPOCHS:-6}
+EPOCHS=${EPOCHS:-12}
 LR=${LR:-0.0001}
 WEIGHT_DECAY=${WEIGHT_DECAY:-0.0001}
 ANCHOR_WEIGHT=${ANCHOR_WEIGHT:-0.01}
@@ -34,7 +34,7 @@ MAX_VAL_FRAMES=${MAX_VAL_FRAMES:-0}
 INFER_MAX_FRAMES=${INFER_MAX_FRAMES:-0}
 INFER_QUERIES=${INFER_QUERIES:-0}
 EVAL_METHODS=${EVAL_METHODS:-native,dcr_stage1,air_stage1}
-OFFICIAL_WORKERS=${OFFICIAL_WORKERS:-2}
+OFFICIAL_WORKERS=${OFFICIAL_WORKERS:-16}
 RESUME=${RESUME:-1}
 
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}

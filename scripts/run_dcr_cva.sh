@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN=${PYTHON_BIN:-python}
 E1_BASE_ROOT=${E1_BASE_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/e1e2_cva_10pct}
@@ -8,13 +9,13 @@ CACHE_ROOT=${CACHE_ROOT:-$E1_BASE_ROOT/action_cache}
 INIT_CHECKPOINT=${INIT_CHECKPOINT:-$E1_BASE_ROOT/train/E1/checkpoint_best.pt}
 DATASET_ROOT=${DATASET_ROOT:-/data/robotarm/dataset/graspnet}
 STAGE1_CKPT=${STAGE1_CKPT:-/data2/robotarm/result/grasp/rgbgrasp/log/economicgrasp_dpt_cva_cdf_distill_stage1/epoch_15_train_0.6009606198008898_val_1.1028128399874995.tar}
-GPUS=${GPUS:-0}
+GPUS=${GPUS:-0,1,2,3}
 LOSS_MODES=${LOSS_MODES:-cdf}
 PHASES=${PHASES:-train,infer,eval,summary}
 SPLITS=${SPLITS:-test_seen,test_similar,test_novel}
 TEST_CASES=${TEST_CASES:-nominal,bias:-20,bias:20}
 SAMPLE_INTERVAL=${SAMPLE_INTERVAL:-0.1}
-EPOCHS=${EPOCHS:-6}
+EPOCHS=${EPOCHS:-12}
 LR=${LR:-0.00001}
 RANK_LR=${RANK_LR:-0.0001}
 RANK_BOUND=${RANK_BOUND:-0.5}
@@ -34,8 +35,8 @@ INFER_MAX_FRAMES=${INFER_MAX_FRAMES:-0}
 INFER_QUERIES=${INFER_QUERIES:-0}
 # Optional E1 checkpoint for a no-training, zero-residual equivalence test.
 INFER_CHECKPOINT=${INFER_CHECKPOINT:-}
-EVAL_METHODS=${EVAL_METHODS:-local,stage1,anchored}
-OFFICIAL_WORKERS=${OFFICIAL_WORKERS:-2}
+EVAL_METHODS=${EVAL_METHODS:-stage1,anchored}
+OFFICIAL_WORKERS=${OFFICIAL_WORKERS:-12}
 RESUME=${RESUME:-1}
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export MKL_NUM_THREADS=${MKL_NUM_THREADS:-1}
