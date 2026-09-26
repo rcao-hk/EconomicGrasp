@@ -372,3 +372,91 @@ visual-geometry prior.
 
 Only after an image representation passes Rep-P1 should it be integrated into
 DCR/full grasp inference and evaluated with official GraspNet AP.
+
+## Full-K curve audit
+
+The selected-action CSVs hide the shape of the complete same-ray decision
+curve.  The full-K audit therefore scores **all seven fixed actions** for every
+query and stores the paired exact/predicted curves without re-running the
+CAD/DexNet evaluator.
+
+Run the latest checkpoints:
+
+```bash
+CHECKPOINT_KIND=latest \
+AUDIT_GPUS=0,1 \
+PHASES=full_k_audit \
+bash scripts/run_rep_p1.sh
+```
+
+Equivalent direct launcher:
+
+```bash
+CHECKPOINT_KIND=latest \
+AUDIT_GPUS=0,1 \
+bash scripts/run_rep_p1_full_k_audit.sh
+```
+
+Outputs are written to:
+
+```text
+WORK_ROOT/full_k_audit_latest/
+  compact_comparison.csv
+  deltas.csv
+  summary.csv
+  native_offset_accuracy.csv
+  argmax_confusion.csv
+  policy_selected_offset_stats.csv
+  advantage_deciles.csv
+  focus_harmful.csv
+  focus_beneficial.csv
+
+  test_similar/
+    curves.npz
+    audit_meta.json
+    ...
+  test_novel/
+    curves.npz
+    audit_meta.json
+    img_point_vs_img_region_disagreements.csv
+    ...
+```
+
+The canonical artifact is `curves.npz`.  For each aligned query it stores:
+
+```text
+exact_utility                  [N,7]
+friction                       [N,7]
+valid                          [N,7]
+pred_action_only               [N,7]
+pred_geo_pred                  [N,7]
+pred_img_point                 [N,7]
+pred_img_region                [N,7]
+oracle_k                       [N]
+raw_argmax_k_<variant>         [N]
+policy_selected_k_<variant>    [N]
+best_alt_advantage_<variant>   [N]
+```
+
+The audit separates **representation** from **intervention policy**:
+
+- `within_ray_spearman_mean`: per-query correlation between the complete
+  predicted and exact K-curves;
+- `native_centered_pair_accuracy`: whether each alternative is correctly
+  judged better/worse than the native center;
+- `native_offset_accuracy.csv`: the above sign test separately for
+  -40/-20/-10/+10/+20/+40 mm;
+- `endpoint_direction_accuracy`: whether the predicted -40 to +40 trend has
+  the same sign as the exact curve;
+- `raw_argmax_exact_oracle_match` and `raw_argmax_offset_mae_mm`: margin-free
+  localization of the best same-ray center;
+- `raw_argmax_boundary_rate` and `boundary_overreach_rate`: diagnose collapse
+  toward the +/-40 mm grid boundaries;
+- `advantage_deciles.csv`: tests whether larger predicted best-alternative
+  advantage actually corresponds to larger exact gain;
+- policy rescue/harm uses the checkpoint's Seen-selected margin and is treated
+  as secondary to the margin-free curve metrics.
+
+The main question is whether the image readers learn a genuine metric peak
+along the ray or only a signed/monotonic trend that pushes the argmax to one of
+the two grid boundaries.
