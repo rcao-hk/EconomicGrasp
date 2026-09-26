@@ -5,8 +5,7 @@ actions and exact CAD/DexNet labels mined by Rep-P0, and changes only the
 evidence representation used to predict action quality.
 
 Formal variants:
-  geo_pred   : Rep-P0 predicted-geometry descriptor + MLP.
-  img_point  : 13 action-aligned point samples from the frozen pre-enhancer
+  action_only: complete physical action only; controls action/dataset priors.\n  geo_pred   : Rep-P0 predicted-geometry descriptor + MLP.\n  img_point  : 13 action-aligned point samples from the frozen pre-enhancer
                image feature map.
   img_region : structured finger/closing/palm/approach region samples from the
                same frozen image feature map.
@@ -38,7 +37,7 @@ from rep_p0_geometry_common import (
 )
 
 REP_P1_VERSION = "rep_p1_action_conditioned_evidence_v1"
-REP_P1_VARIANTS = ("geo_pred", "img_point", "img_region")
+REP_P1_VARIANTS = ("action_only", "geo_pred", "img_point", "img_region")
 IMAGE_VARIANTS = ("img_point", "img_region")
 IMAGE_FEATURE_SOURCE = "stage1_proposal_head_pre_enhancer"
 POINT_KEYPOINTS = 13
@@ -376,6 +375,29 @@ class _ActionEncoder(nn.Module):
         return self.net(action_vector(actions) / self.scale.to(actions))
 
 
+class ActionOnlyProbe(nn.Module):
+    """Control probe: predict exact-action CDF from action parameters alone.
+
+    All evidence readers receive the explicit action, so this control quantifies
+    how much performance can be explained by action/depth priors without any
+    image or point-cloud observation.
+    """
+
+    def __init__(self, hidden: int = 256, dropout: float = 0.1):
+        super().__init__()
+        self.action_encoder = _ActionEncoder(hidden)
+        self.head = nn.Sequential(
+            nn.LayerNorm(hidden),
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, len(FRICTION_THRESHOLDS)),
+        )
+
+    def forward(self, actions: torch.Tensor) -> torch.Tensor:
+        return self.head(self.action_encoder(actions))
+
+
 class ActionPointImageProbe(nn.Module):
     """Standalone six-threshold scorer from 13 action-aligned image samples."""
 
@@ -506,9 +528,7 @@ def build_probe(
     hidden: int = 256,
     dropout: float = 0.1,
 ):
-    if variant == "geo_pred":
-        return GeometrySourceProbe(feature_dim, hidden, dropout)
-    if variant == "img_point":
+    if variant == "action_only":\n        return ActionOnlyProbe(hidden, dropout)\n    if variant == "geo_pred":\n        return GeometrySourceProbe(feature_dim, hidden, dropout)\n    if variant == "img_point":
         return ActionPointImageProbe(feature_dim, hidden, dropout)
     if variant == "img_region":
         return ActionRegionImageProbe(feature_dim, hidden, dropout)
