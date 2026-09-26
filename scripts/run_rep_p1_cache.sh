@@ -75,7 +75,7 @@ for raw_split in "${SPLIT_IDS[@]}"; do
       --progress_every "$PROGRESS_EVERY"
     )
     [[ "$RESUME" == 1 ]] && args+=(--resume)
-    [[ "$REPAIR_INVALID_CACHE" == 1 ]] && args+=(--repair_invalid_cache)
+    [[ "$RESUME" == 1 && "$REPAIR_INVALID_CACHE" == 1 ]] && args+=(--repair_invalid_cache)
     [[ "$OVERWRITE" == 1 ]] && args+=(--overwrite)
     echo "[REP-P1-CACHE] split=$split shard=$shard gpu=$gpu"
     CUDA_VISIBLE_DEVICES="$gpu" "$PYTHON_BIN" -u "${args[@]}" >"$log" 2>&1 &
