@@ -19,7 +19,6 @@ POSE_MODE=${POSE_MODE:-global_film}
 SEED_MODE=${SEED_MODE:-image_fps}
 EPOCHS=${EPOCHS:-20}
 BATCH_SIZE=${BATCH_SIZE:-1}
-GRAD_ACCUM=${GRAD_ACCUM:-4}
 LR=${LR:-0.0001}
 GEOMETRY_LR=${GEOMETRY_LR:-0.00001}
 WEIGHT_DECAY=${WEIGHT_DECAY:-0.0001}
@@ -106,7 +105,7 @@ for phase in "${STEPS[@]}"; do
         --dataset-root "$DATASET_ROOT" --output-root "$TRAIN_ROOT" \
         --init-checkpoint "$INIT_CHECKPOINT" --encoder "$ENCODER" \
         --pose-mode "$POSE_MODE" --seed-mode "$SEED_MODE" \
-        --epochs "$EPOCHS" --batch-size "$BATCH_SIZE" --grad-accum "$GRAD_ACCUM" \
+        --epochs "$EPOCHS" --batch-size "$BATCH_SIZE" \
         --lr "$LR" --geometry-lr "$GEOMETRY_LR" --weight-decay "$WEIGHT_DECAY" \
         --sample-fraction "$SAMPLE_FRACTION" --workers "$WORKERS" --eval-workers "$EVAL_WORKERS" \
         --m-point "$M_POINT" --group-chunk "$GROUP_CHUNK" --action-chunk "$ACTION_CHUNK" \
