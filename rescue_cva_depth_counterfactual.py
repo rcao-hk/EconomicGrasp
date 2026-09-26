@@ -41,6 +41,9 @@ def run(experiment, initial, options):
         raise ValueError("Expected FP32 trainable parameters and nonempty depth scope")
     initial["_replay_runtime"] = replay.capture_runtime(model)
     replay.restore_full_state(experiment, initial)
+    experiment.args.arm = "P4_" + options.branch
+    experiment.contract["arm"] = experiment.args.arm
+    experiment.contract["checkpoint"]["initialization"] = "full-state continuation from the rescue source; AdamW history retained"
     experiment.contract["rescue"] = {
         "branch": options.branch, "steps": options.steps, "start_step": initial["step"],
         "checkpoint": str(Path(options.checkpoint).resolve()),
