@@ -34,6 +34,114 @@ def strip_module(state):
     return {k.removeprefix("module."): v for k, v in state.items()}
 
 
+_OBJECT_PAYLOAD_KEYS = (
+    "object_poses_list",
+    "grasp_points_list",
+    "grasp_rotations_list",
+    "grasp_depth_list",
+    "grasp_widths_list",
+    "grasp_scores_list",
+    "view_graspness_list",
+    "top_view_index_list",
+    "grasp_collision_list",
+    "grasp_cdf_bins_list",
+    "grasp_widths_depth_list",
+    "grasp_width_valids_depth_list",
+)
+
+
+def filter_empty_grasp_objects(end_points):
+    """Drop object slots whose economic-grasp cache contains zero points.
+
+    GraspNet frame metadata can contain an object instance for which the
+    scene-level economic-grasp cache has no rows (pointid never equals that
+    object slot).  Main's CDF matcher treats this as fatal.  For online MGF
+    training we remove that object consistently from *all* aligned object-level
+    payloads before matching.  Non-empty objects and every per-object label
+    tensor are unchanged.
+
+    A frame in which every object is empty remains an error: silently creating
+    all-negative supervision would change the task semantics.
+    """
+    if "object_poses_list" not in end_points or "grasp_points_list" not in end_points:
+        return end_points, []
+
+    poses_batch = end_points["object_poses_list"]
+    points_batch = end_points["grasp_points_list"]
+    if not isinstance(poses_batch, (list, tuple)) or not isinstance(points_batch, (list, tuple)):
+        raise TypeError("object_poses_list and grasp_points_list must be batch lists")
+    if len(poses_batch) != len(points_batch):
+        raise RuntimeError(
+            "object_poses_list/grasp_points_list batch sizes differ: "
+            f"{len(poses_batch)} vs {len(points_batch)}"
+        )
+
+    out = dict(end_points)
+    # Copy outer containers so the dataloader batch is never mutated in-place.
+    present_keys = [
+        key for key in _OBJECT_PAYLOAD_KEYS
+        if key in end_points
+    ]
+    for key in present_keys:
+        value = end_points[key]
+        if not isinstance(value, (list, tuple)) or len(value) != len(poses_batch):
+            raise TypeError(
+                f"{key} must be a batch list of length {len(poses_batch)}, "
+                f"got {type(value).__name__}"
+            )
+        out[key] = list(value)
+
+    reports = []
+    for batch_i, (poses, points) in enumerate(zip(poses_batch, points_batch)):
+        n_obj = len(poses)
+        if len(points) != n_obj:
+            raise RuntimeError(
+                f"grasp_points_list[{batch_i}] has {len(points)} objects, "
+                f"expected {n_obj} from object_poses_list"
+            )
+        for key in present_keys:
+            if len(end_points[key][batch_i]) != n_obj:
+                raise RuntimeError(
+                    f"{key}[{batch_i}] has {len(end_points[key][batch_i])} "
+                    f"objects, expected {n_obj}"
+                )
+
+        keep = []
+        dropped = []
+        for obj_i, pts in enumerate(points):
+            if not torch.is_tensor(pts) or pts.dim() != 2 or pts.shape[-1] != 3:
+                raise ValueError(
+                    f"grasp_points_list[{batch_i}][{obj_i}] must be [P,3], "
+                    f"got {type(pts).__name__} "
+                    f"{tuple(pts.shape) if torch.is_tensor(pts) else ''}"
+                )
+            if pts.shape[0] > 0:
+                keep.append(obj_i)
+            else:
+                dropped.append(obj_i)
+
+        if not keep:
+            raise RuntimeError(
+                f"Batch sample {batch_i} has {n_obj} object labels but all "
+                "economic-grasp object caches are empty. Refusing to fabricate "
+                "grasp supervision for this frame."
+            )
+
+        if dropped:
+            for key in present_keys:
+                seq = end_points[key][batch_i]
+                out[key][batch_i] = [seq[i] for i in keep]
+        reports.append(
+            {
+                "batch_index": batch_i,
+                "objects_before": n_obj,
+                "objects_after": len(keep),
+                "dropped_object_slots": dropped,
+            }
+        )
+    return out, reports
+
+
 def build_candidate_actions(end_points, rotation_fn, max_width=0.1):
     """Exactly match main pred_decode_center_view_angle's physical convention.
 
@@ -159,10 +267,18 @@ class EconomicGraspMetricField(nn.Module):
         # Validation gets labels but deterministic eval proposals; inference
         # supplies no annotation payload, so no GT-dependent prediction branch.
         end_points = dict(batch)
-        end_points["cva_force_process_grasp_labels"] = "object_poses_list" in batch
+        filter_report = []
+        if "object_poses_list" in end_points:
+            end_points, filter_report = filter_empty_grasp_objects(end_points)
+        end_points["cva_force_process_grasp_labels"] = "object_poses_list" in end_points
         end_points["cva_compute_diagnostics"] = False
         try:
             ep = self.base(end_points)
+            dropped = sum(len(row["dropped_object_slots"]) for row in filter_report)
+            ep["D: MGF Empty Objects Dropped"] = ep["xyz_graspable"].new_tensor(
+                float(dropped)
+            ).reshape(())
+            ep["mgf_empty_object_filter_report"] = filter_report
             if self._depth_pack is None or self._proposal_feature is None:
                 raise RuntimeError("Required base feature hooks were not executed")
             depth, _, metric_feat, raw, feats, _ = self._depth_pack
