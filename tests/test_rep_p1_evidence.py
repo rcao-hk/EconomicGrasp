@@ -3,7 +3,9 @@ import torch
 from rep_p1_common import (
     REGION_POINT_COUNTS,
     REGION_POINTS,
-    ActionOnlyProbe,\n    ActionPointImageProbe,\n    ActionRegionImageProbe,
+    ActionOnlyProbe,
+    ActionPointImageProbe,
+    ActionRegionImageProbe,
     action_point_keypoints_camera,
     action_region_points_camera,
     pairwise_rank_loss,
