@@ -123,7 +123,7 @@ P0 gate，分别在 GPU 2/3 运行；终点是检查同类几何退化，不能�
 
 旧 NumPy 的 NPZ membership 会实际读取解压数组。`aca81f7` 将两个存在性检查改用
 archive key 元数据；真实四帧 ABBA 对照的 16 次样本和 collate 全值/hash/RNG 完全一致，
-每样本 NPZ 读取从 22 次降到 11 次，两个合成归回测试也通过。
+每样本 NPZ 读取从 22 次降到 11 次，两个合成回归测试也通过。
 共享机器上的平均 getitem 时间旧/新为 3.922/5.213 秒，中位数为 2.954/2.403 秒；
 受 I/O/并发影响，本次没有证实平均速度提升。主线及路径对照继续使用原 `aa4ffd2`。
 原始核查见 [npz_abba_aca81f7.json](depth_dynamics_results_20260926/npz_abba_aca81f7.json)。

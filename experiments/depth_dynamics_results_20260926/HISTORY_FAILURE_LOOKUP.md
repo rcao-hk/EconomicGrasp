@@ -36,6 +36,6 @@
 ## 来源定位
 
 - **S1**：`D:/Research/Paper/RGB-Only Grasp/ECONOMICGRASP_CVA_CDF_DEPTH_DETACH_DYNAMICS_CODEX_PLAN_20260925.md`，行 69–90、209–218、372–375。
-- **S2**：本地 Git 对象 `6d13486b8aa960d7542e85bfc9598ffa02673de3:DEPTH_GEOMETRY_EXPERIMENTS.md`；原字节副本 [`history_sources/DEPTH_GEOMETRY_EXPERIMENTS_6d13486.md`](history_sources/DEPTH_GEOMETRY_EXPERIMENTS_6d13486.md)，行 3–5、116–118。副本由本地 `git show` 导出，未访问网络。
+- **S2**：本地 Git 对象 `6d13486b8aa960d7542e85bfc9598ffa02673de3:DEPTH_GEOMETRY_EXPERIMENTS.md`；[该 commit 的原文](https://github.com/rcao-hk/EconomicGrasp/blob/6d13486b8aa960d7542e85bfc9598ffa02673de3/DEPTH_GEOMETRY_EXPERIMENTS.md)，行 3–5、116–118。本次从本地 `git show` 读取，未依赖网页缓存。
 - **S3**：`D:/Research/Paper/RGB-Only Grasp/EconomicGrasp/experiments/CVA_DEPTH_DYNAMICS.md`，行 38–51、96、107–115。
 - **S4**：`D:/Research/Paper/RGB-Only Grasp/EconomicGrasp/experiments/CVA_DEPTH_DYNAMICS_EXECUTION_20260926.md`，读取版本 `d6e9c735f9ec2ae151a09e3d6bf247ca965ff7ed`，行 7–20、49–73。
