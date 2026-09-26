@@ -167,6 +167,17 @@ archive key 元数据；真实四帧 ABBA 对照的 16 次样本和 collate 全�
 
 ## 产物与判读范围
 
+为满足重复 seed 的空间预算，已把完成的 E-only、Q-only 六个时刻的完整状态各复制一份到
+gpu04（10.30.7.119）`/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/`。
+12 个文件均逐项核对 SHA256 与大小；训练机保留初始/终点，step 100/200/300/400 的八份
+中间状态转为在 gpu04 归档，并在原位置写入 `.archive.json` 指针，共释放 5,485,569,088 bytes。
+没有移动正在使用的 D0/D1、QC 或救援状态。归档映射与校验见
+[completed_path_checkpoints_verified_archive.json](depth_dynamics_results_20260926/completed_path_checkpoints_verified_archive.json)。
+
+重复 seed 先执行独立 P0；seed 1 的 `20260926_stage1_replica_seed1` 已在 GPU 4 启动。
+GPU 4 首次单张量预热遇到 CUDA driver initialization failed，随后审计进程成功构造真实模型；
+训练仍须等待该 seed 的正式 gate。尚未把重复 seed 的任何结果列为已通过。
+
 完整产物保存在训练服务器：
 
 - `/data/robotarm/result/grasp/rgbgrasp/experiment/cva_depth_dynamics/20260926_labelcheck_seed0/diagnostics/P0/`
