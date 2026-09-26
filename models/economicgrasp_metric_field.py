@@ -50,6 +50,30 @@ _OBJECT_PAYLOAD_KEYS = (
 )
 
 
+def assert_object_payloads_cpu(end_points):
+    """Fail early if DDP/input handling moved variable grasp caches to CUDA."""
+    for key in _OBJECT_PAYLOAD_KEYS:
+        if key not in end_points:
+            continue
+        value = end_points[key]
+        if not isinstance(value, (list, tuple)):
+            raise TypeError(f"{key} must be a batch list, got {type(value).__name__}")
+        for batch_i, per_sample in enumerate(value):
+            if not isinstance(per_sample, (list, tuple)):
+                raise TypeError(
+                    f"{key}[{batch_i}] must be an object list, "
+                    f"got {type(per_sample).__name__}"
+                )
+            for obj_i, tensor in enumerate(per_sample):
+                if torch.is_tensor(tensor) and tensor.device.type != "cpu":
+                    raise RuntimeError(
+                        f"{key}[{batch_i}][{obj_i}] must remain CPU-resident "
+                        f"for online label matching; got device={tensor.device}. "
+                        "Do not use DDP(device_ids=[local]) with the full batch "
+                        "dict; dense inputs are moved explicitly by move_batch()."
+                    )
+
+
 def filter_empty_grasp_objects(end_points):
     """Drop object slots whose economic-grasp cache contains zero points.
 
@@ -270,6 +294,7 @@ class EconomicGraspMetricField(nn.Module):
         filter_report = []
         if "object_poses_list" in end_points:
             end_points, filter_report = filter_empty_grasp_objects(end_points)
+            assert_object_payloads_cpu(end_points)
         end_points["cva_force_process_grasp_labels"] = "object_poses_list" in end_points
         end_points["cva_compute_diagnostics"] = False
         try:
