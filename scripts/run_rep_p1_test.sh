@@ -11,7 +11,7 @@ IMAGE_CACHE_ROOT=${IMAGE_CACHE_ROOT:-${WORK_ROOT}/image_cache}
 TRAIN_ROOT=${TRAIN_ROOT:-${WORK_ROOT}/train}
 TEST_ROOT=${TEST_ROOT:-${WORK_ROOT}/test}
 
-VARIANTS=${VARIANTS:-geo_pred,img_point,img_region}
+VARIANTS=${VARIANTS:-action_only,geo_pred,img_point,img_region}
 SPLITS=${SPLITS:-test_similar,test_novel}
 TEST_GPUS=${TEST_GPUS:-0,1,2,3,4,5}
 MAX_FRAMES=${MAX_FRAMES:-0}
