@@ -208,6 +208,16 @@ def test_empty_object_payloads_are_filtered_consistently():
     assert len(batch["grasp_points_list"][0]) == 2
 
 
+def test_object_payload_cpu_contract_rejects_non_cpu_tensor():
+    m = wrapper_module()
+    batch = {
+        "object_poses_list": [[torch.eye(4)[:3]]],
+        "grasp_points_list": [[torch.empty(1, 3, device="meta")]],
+    }
+    with pytest.raises(RuntimeError, match="must remain CPU-resident"):
+        m.assert_object_payloads_cpu(batch)
+
+
 def test_all_empty_object_payloads_still_fail():
     m = wrapper_module()
     batch = {
