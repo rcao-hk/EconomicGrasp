@@ -329,5 +329,7 @@ def metric_field_loss(ep, config, *, profile_weight=1., profile_mean_weight=10.,
     total = task + geometric
     stats = {"loss": total, "task_loss": task, "geometry_loss": geometric,
              "cdf": cdf, "base_cdf": base_cdf, "width": width, "objectness": obj,
-             "graspness": gra, "view": view, **geom}
+             "graspness": gra, "view": view,
+             "empty_objects_dropped": ep["D: MGF Empty Objects Dropped"].detach(),
+             **geom}
     return total, stats
