@@ -58,7 +58,12 @@ def paired_image(path, p0_root, image_root, p0):
     return load_image_frame(ipath, p0)
 
 
-def score_frame(model, variant, p0, image, device, mean=None, std=None):\n    if variant == "action_only":\n        actions = torch.from_numpy(p0["actions"]).to(device)\n        logits = model(actions)\n        diag = {}\n    elif variant == "geo_pred":\n        K, Q, Fdim = p0["feat_pred"].shape
+def score_frame(model, variant, p0, image, device, mean=None, std=None):
+    if variant == "action_only":
+        actions = torch.from_numpy(p0["actions"]).to(device)
+        logits = model(actions)
+        diag = {}
+    elif variant == "geo_pred":\n        K, Q, Fdim = p0["feat_pred"].shape
         x = torch.from_numpy(
             normalize(p0["feat_pred"], mean, std)
         ).to(device)
@@ -89,7 +94,9 @@ def write_csv(path: Path, rows):
 def main():
     args = parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    # Keep optimizer/checkpoint payload on host memory; only model weights are copied to GPU.\n    ckpt = torch.load(args.checkpoint, map_location="cpu")\n    if ckpt.get("version") != REP_P1_VERSION:
+    # Keep optimizer/checkpoint payload on host memory; only model weights are copied to GPU.
+    ckpt = torch.load(args.checkpoint, map_location="cpu")
+    if ckpt.get("version") != REP_P1_VERSION:
         raise RuntimeError(
             f"Unsupported Rep-P1 checkpoint version {ckpt.get('version')!r}"
         )
