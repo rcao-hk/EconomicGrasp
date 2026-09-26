@@ -371,6 +371,7 @@ def render_fixed_frames(root, output):
         by_step[int(state["step"])][path.parent.name] = state
     for step, states in sorted(by_step.items()):
         arms = [arm for arm in ("D0", "D1") if arm in states]
+        arms += sorted(set(states) - set(arms))
         if not arms:
             continue
         first = states[arms[0]]
