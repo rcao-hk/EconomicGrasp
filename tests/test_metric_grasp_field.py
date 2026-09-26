@@ -212,6 +212,17 @@ def test_cli_help_does_not_import_main_cuda_dependencies(script):
     assert "usage:" in p.stdout
 
 
+def test_training_cli_has_no_gradient_accumulation_option():
+    p = subprocess.run(
+        [sys.executable, str(ROOT/"train_metric_grasp_field.py"), "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert p.returncode == 0, p.stderr
+    assert "--batch-size" in p.stdout
+    assert "--grad-accum" not in p.stdout
+
+
 def test_atomic_json_and_digest(tmp_path):
     payload = {"version": "test", "sampling": sampled_indices(256, .1)}
     atomic_json(tmp_path/"protocol.json", payload)
