@@ -42,6 +42,21 @@ Training and testing fail if this digest does not match the Rep-P0 cache.
 
 ## Formal variants
 
+### P1-A: `action_only`
+
+A necessary prior-control:
+
+```text
+explicit physical grasp action (R,t,w,h,d)
+-> MLP
+-> six-threshold exact-action CDF
+```
+
+Every Rep-P1 evidence reader receives the explicit action.  P1-A therefore
+measures how much exact-action quality can be predicted from action/depth and
+dataset priors alone.  Image evidence must improve over this control before its
+gain can be attributed to visual evidence.
+
 ### P1-G: `geo_pred`
 
 The predicted-geometry baseline from Rep-P0:
@@ -283,14 +298,10 @@ WORK_ROOT/
     test_similar/
     test_novel/
 
-  train/
-    geo_pred/
-    img_point/
+  train/\n    action_only/\n    geo_pred/\n    img_point/
     img_region/
 
-  test/
-    geo_pred/{test_similar,test_novel}/
-    img_point/{test_similar,test_novel}/
+  test/\n    action_only/{test_similar,test_novel}/\n    geo_pred/{test_similar,test_novel}/\n    img_point/{test_similar,test_novel}/
     img_region/{test_similar,test_novel}/
     comparison.csv
     comparison.json
@@ -304,15 +315,14 @@ A useful image representation should improve more than one global
 classification statistic.  The expected evidence pattern is:
 
 ```text
-img_region > geo_pred
-on:
+img_region > geo_pred > action_only\non:
   Novel utility Spearman
   Novel within-ray pairwise accuracy
   Novel same-ray Delta Utility / headroom recovery
   Novel high-native-score Top-10 rescue-harm balance
 ```
 
-`img_point` is the weak image baseline.  If `img_point` fails but
+`action_only` is the prior-control and `img_point` is the weak image baseline.  If `img_point` fails but
 `img_region` succeeds, the conclusion is that sparse point probing is
 insufficient and spatial action regions matter.
 
