@@ -177,6 +177,47 @@ def test_out_of_view_support_has_no_nan():
     assert torch.isfinite(out).all()
 
 
+def test_empty_object_payloads_are_filtered_consistently():
+    m = wrapper_module()
+    # Object slot 1 is present in frame metadata but has no economic-grasp rows.
+    batch = {
+        "object_poses_list": [[torch.eye(4)[:3], torch.eye(4)[:3]]],
+        "grasp_points_list": [[torch.ones(2, 3), torch.empty(0, 3)]],
+        "grasp_rotations_list": [[torch.ones(2, 4), torch.empty(0, 4)]],
+        "grasp_depth_list": [[torch.ones(2), torch.empty(0)]],
+        "grasp_widths_list": [[torch.ones(2), torch.empty(0)]],
+        "grasp_scores_list": [[torch.ones(2), torch.empty(0)]],
+        "view_graspness_list": [[torch.ones(2, 300), torch.empty(0, 300)]],
+        "top_view_index_list": [[torch.ones(2, 5, dtype=torch.long), torch.empty(0, 5, dtype=torch.long)]],
+        "grasp_collision_list": [[torch.ones(2), torch.empty(0)]],
+        "grasp_cdf_bins_list": [[torch.ones(2, 5, 12, 4, dtype=torch.uint8), torch.empty(0, 5, 12, 4, dtype=torch.uint8)]],
+        "grasp_widths_depth_list": [[torch.ones(2, 5, 12, 4), torch.empty(0, 5, 12, 4)]],
+        "grasp_width_valids_depth_list": [[torch.ones(2, 5, 12, 4, dtype=torch.bool), torch.empty(0, 5, 12, 4, dtype=torch.bool)]],
+    }
+    out, report = m.filter_empty_grasp_objects(batch)
+    assert report == [{
+        "batch_index": 0,
+        "objects_before": 2,
+        "objects_after": 1,
+        "dropped_object_slots": [1],
+    }]
+    for key in m._OBJECT_PAYLOAD_KEYS:
+        assert len(out[key][0]) == 1
+    # Caller-owned batch must not be mutated.
+    assert len(batch["object_poses_list"][0]) == 2
+    assert len(batch["grasp_points_list"][0]) == 2
+
+
+def test_all_empty_object_payloads_still_fail():
+    m = wrapper_module()
+    batch = {
+        "object_poses_list": [[torch.eye(4)[:3]]],
+        "grasp_points_list": [[torch.empty(0, 3)]],
+    }
+    with pytest.raises(RuntimeError, match="all economic-grasp object caches are empty"):
+        m.filter_empty_grasp_objects(batch)
+
+
 def test_candidate_actions_match_main_decode_width_and_insertion():
     m = wrapper_module()
     ep = {"xyz_graspable": torch.tensor([[[0., 0., .6]]], requires_grad=True),
