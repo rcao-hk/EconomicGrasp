@@ -295,6 +295,67 @@ def render_training_and_audits(data, figures):
     return generated
 
 
+def render_local_geometry(measured, output):
+    """Retain signed local geometry on common axes, with a factored legend."""
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.ticker import MaxNLocator
+
+    arms = sorted({arm for arm, _, _ in measured})
+    splits = sorted({split for _, split, _ in measured})
+    modes = sorted({mode for _, _, mode in measured})
+    palette = plt.get_cmap("tab10")
+    known_colors = {"P0": "#777777", "D0": "#0072B2", "D1": "#D55E00"}
+    colors = {arm: known_colors.get(arm, palette(index % 10)) for index, arm in enumerate(arms)}
+    line_options = ("-", "--", "-.", ":")
+    split_styles = {split: line_options[index % len(line_options)] for index, split in enumerate(splits)}
+    if "train" in split_styles:
+        split_styles["train"] = "-"
+        for index, split in enumerate(value for value in splits if value != "train"):
+            split_styles[split] = line_options[1 + index % (len(line_options) - 1)]
+    mode_markers = {mode: {"train": "^", "eval": "o"}.get(mode, ("s", "D", "v")[index % 3])
+                    for index, mode in enumerate(modes)}
+    figure, axes = plt.subplots(2, 2, figsize=(11, 7.5))
+    panels = (("local_slope", "Local depth-difference slope", "Slope (dimensionless)"),
+              ("local_correlation", "Local depth-difference correlation", "Pearson correlation"),
+              ("foreground_mae_m", "Foreground depth MAE", "MAE (m)"),
+              ("foreground_bias_m", "Foreground depth bias", "Prediction minus GT (m)"))
+    for ax, (metric, title, ylabel) in zip(axes.flat, panels):
+        ax.axhline(0., color="#777777", linewidth=.8, linestyle=":", zorder=0)
+        if metric in ("local_slope", "local_correlation"):
+            ax.axhline(1., color="#aaaaaa", linewidth=.8, linestyle=":", zorder=0)
+        has_values = False
+        for (arm, split, mode), trajectory in sorted(measured.items()):
+            points = [(row["step"], row.get(metric)) for row in trajectory]
+            if any(finite(value) for _, value in points):
+                has_values = True
+                ax.plot([step for step, _ in points],
+                        [value if finite(value) else math.nan for _, value in points],
+                        color=colors[arm], linestyle=split_styles[split], marker=mode_markers[mode],
+                        markersize=4, linewidth=1.25, alpha=.85)
+        ax.set(title=title, xlabel="Successful optimizer updates", ylabel=ylabel)
+        ax.grid(alpha=.15)
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=6))
+        if metric == "local_correlation":
+            ax.set_ylim(-1.05, 1.05)
+        elif metric == "foreground_mae_m":
+            ax.set_ylim(bottom=0.)
+        if not has_values:
+            ax.text(.5, .5, "No finite measurements", ha="center", transform=ax.transAxes)
+    handles = [Line2D([], [], color=colors[arm], linewidth=2, label=f"Arm: {arm}") for arm in arms]
+    handles += [Line2D([], [], color="#444444", linestyle=split_styles[split], label=f"Split: {split}")
+                for split in splits]
+    handles += [Line2D([], [], color="#444444", linestyle="none", marker=mode_markers[mode],
+                       markersize=5, label=f"Mode: {mode}") for mode in modes]
+    figure.legend(handles=handles, loc="lower center", ncol=3, frameon=False, fontsize=8)
+    figure.suptitle("Fixed-frame local geometry and foreground depth\n"
+                   "Imagewise means; fixed same-instance pairs; dotted references at 0 and identity slope/correlation 1",
+                   fontsize=11, y=.98)
+    figure.subplots_adjust(left=.09, right=.98, top=.86, bottom=.20, wspace=.30, hspace=.47)
+    figure.savefig(output / "local_geometry.png", dpi=160)
+    plt.close(figure)
+
+
 def render_fixed_frames(root, output):
     """One fixed frame, shared metric colour scales across arms and times."""
     files = sorted(root.rglob("fixed_frame_*.pt"))
@@ -556,9 +617,15 @@ def summarize(root, output, plots=True):
                      "bias_m": avg(x.get("bias") for x in valid),
                      "mean_image_std_ratio": avg(x.get("std_ratio") for x in valid),
                      "below_min_fraction": avg(x.get("below_min_fraction") for x in valid),
+                     "foreground_mae_m": avg(x.get("mae") for x in foreground),
+                     "foreground_bias_m": avg(x.get("bias") for x in foreground),
+                     "foreground_pred_std_m": avg(x.get("pred_std") for x in foreground),
+                     "foreground_gt_std_m": avg(x.get("gt_std") for x in foreground),
+                     "foreground_mean_image_std_ratio": avg(x.get("std_ratio") for x in foreground),
                      "flat_image_fraction": len(flat) / len(eligible) if eligible else None,
                      "local_contrast_ratio": avg(x.get("contrast_ratio") for x in local),
                      "local_slope": avg(x.get("slope") for x in local),
+                     "local_correlation": avg(x.get("correlation") for x in local),
                      "local_difference_mae_m": avg(x.get("difference_mae") for x in local),
                      "sigmoid_derivative_mean": avg(im.get("raw", {}).get("sigmoid_derivative_mean") for im in images)})
     csv_path = output / "summary.csv"
@@ -609,6 +676,11 @@ def summarize(root, output, plots=True):
                "Artifact paths and scale parameters are recorded in gradient_spatial_metadata.json.",
                "- Probe coverage is averaged per fixed frame. Identity changes compare the same frame/mode to its previous probe; "
                "aligned-slot changes can include changed queries, whereas same-identity NN changes condition on matching query IDs.",
+               "- Depth summaries are means of finite per-image metrics. Existing MAE/bias/std-ratio columns retain their "
+               "GT-valid-region meaning; foreground_* columns use the foreground region. Predicted/GT standard deviations "
+               "and MAE/bias are in metres. Local slope, correlation and difference MAE use the saved fixed same-instance pairs; "
+               "signed slope/correlation reveal inversions that contrast magnitude alone cannot identify. "
+               "local_geometry.png uses common axes across arms/splits/modes, with no per-frame normalization.",
                "- Reproduction: interpret only the measured initialization, route, data protocol and update budget.",
                "- Necessary/sufficient path: not established by these summary statistics.",
                "- Mechanism: requires a matched failure plus pre-failure actual-update interventions.",
@@ -649,6 +721,8 @@ def summarize(root, output, plots=True):
         figure.savefig(figures / "depth_dynamics.png", dpi=160)
         plt.close(figure)
         generated.append("depth_dynamics.png")
+        render_local_geometry(measured, figures)
+        generated.append("local_geometry.png")
         render_fixed_frames(root, figures)
     return {"rows": len(rows), "training_rows": len(auxiliary["training"]),
             "gradient_rows": len(auxiliary["gradients"]), "figures": generated,
