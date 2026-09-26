@@ -14,6 +14,9 @@ for raw_phase in "${STEP_IDS[@]}"; do
     train)
       bash "$ROOT_DIR/scripts/run_rep_p1_train.sh"
       ;;
+    audit|full_k_audit)
+      bash "$ROOT_DIR/scripts/run_rep_p1_full_k_audit.sh"
+      ;;
     test|summary)
       if [[ "$phase" == "test" ]]; then
         bash "$ROOT_DIR/scripts/run_rep_p1_test.sh"
