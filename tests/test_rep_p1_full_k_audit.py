@@ -24,7 +24,7 @@ def test_exact_oracle_falls_back_to_native_when_no_better_candidate():
 def test_policy_selection_uses_best_alt_plus_margin():
     pred = np.asarray([
         [0.2, 0.5, 0.9],
-        [0.8, 0.5, 0.7],
+        [0.79, 0.5, 0.7],
     ], dtype=np.float32)
     valid = np.ones_like(pred, dtype=bool)
     zero = 1
@@ -32,9 +32,9 @@ def test_policy_selection_uses_best_alt_plus_margin():
         pred, valid, zero, margin=0.3
     )
     np.testing.assert_array_equal(best_alt, np.asarray([2, 0], dtype=np.int16))
-    # Floating-point 0.9-0.5 is strictly > 0.3; 0.8-0.5 is also > 0.3.
-    np.testing.assert_array_equal(selected, np.asarray([2, 0], dtype=np.int16))
-    np.testing.assert_allclose(advantage, np.asarray([0.4, 0.3]), atol=1e-6)
+    # First query exceeds the margin; second query does not and must stay.
+    np.testing.assert_array_equal(selected, np.asarray([2, 1], dtype=np.int16))
+    np.testing.assert_allclose(advantage, np.asarray([0.4, 0.29]), atol=1e-6)
 
 
 def test_raw_argmax_respects_validity():
