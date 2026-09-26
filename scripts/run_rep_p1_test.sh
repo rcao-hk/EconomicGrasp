@@ -9,7 +9,26 @@ P0_CACHE_ROOT=${P0_CACHE_ROOT:-${P0_WORK_ROOT}/cache}
 WORK_ROOT=${WORK_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/rep_p1_action_evidence}
 IMAGE_CACHE_ROOT=${IMAGE_CACHE_ROOT:-${WORK_ROOT}/image_cache}
 TRAIN_ROOT=${TRAIN_ROOT:-${WORK_ROOT}/train}
-TEST_ROOT=${TEST_ROOT:-${WORK_ROOT}/test}
+
+# Which training checkpoint to evaluate.  Keep "best" as the backwards-
+# compatible default; use CHECKPOINT_KIND=latest for representation-dynamics
+# diagnosis without overwriting the formal best-checkpoint test results.
+CHECKPOINT_KIND=${CHECKPOINT_KIND:-best}
+case "$CHECKPOINT_KIND" in
+  best|latest) ;;
+  *)
+    echo "CHECKPOINT_KIND must be best or latest, got: $CHECKPOINT_KIND" >&2
+    exit 2
+    ;;
+esac
+
+if [[ -z "${TEST_ROOT:-}" ]]; then
+  if [[ "$CHECKPOINT_KIND" == "latest" ]]; then
+    TEST_ROOT="${WORK_ROOT}/test_latest"
+  else
+    TEST_ROOT="${WORK_ROOT}/test"
+  fi
+fi
 
 VARIANTS=${VARIANTS:-action_only,geo_pred,img_point,img_region}
 SPLITS=${SPLITS:-test_similar,test_novel}
@@ -48,14 +67,14 @@ slot=0
 for raw_variant in "${VARIANT_IDS[@]}"; do
   variant="$(echo "$raw_variant" | xargs)"
   [[ -n "$variant" ]] || continue
-  ckpt="$TRAIN_ROOT/$variant/checkpoint_best.tar"
+  ckpt="$TRAIN_ROOT/$variant/checkpoint_${CHECKPOINT_KIND}.tar"
   [[ -f "$ckpt" ]] || { echo "Missing checkpoint: $ckpt" >&2; exit 2; }
   for raw_split in "${SPLIT_IDS[@]}"; do
     split="$(echo "$raw_split" | xargs)"
     [[ -d "$P0_CACHE_ROOT/$split" ]] || {
       echo "Missing P0 split cache: $P0_CACHE_ROOT/$split" >&2; exit 2;
     }
-    if [[ "$variant" != "geo_pred" ]]; then
+    if [[ "$variant" == "img_point" || "$variant" == "img_region" ]]; then
       [[ -d "$IMAGE_CACHE_ROOT/$split" ]] || {
         echo "Missing Rep-P1 image cache: $IMAGE_CACHE_ROOT/$split" >&2; exit 2;
       }
@@ -74,7 +93,7 @@ for raw_variant in "${VARIANT_IDS[@]}"; do
       --progress_every "$PROGRESS_EVERY"
     )
     [[ "$SAVE_PER_QUERY" == 1 ]] && args+=(--save_per_query)
-    echo "[REP-P1-TEST] variant=$variant split=$split gpu=$gpu"
+    echo "[REP-P1-TEST] checkpoint=$CHECKPOINT_KIND variant=$variant split=$split gpu=$gpu"
     CUDA_VISIBLE_DEVICES="$gpu" "$PYTHON_BIN" -u "${args[@]}" >"$out/test.log" 2>&1 &
     PIDS+=("$!")
     NAMES+=("$variant/$split")
@@ -89,4 +108,4 @@ done
 
 "$PYTHON_BIN" "$ROOT_DIR/summarize_rep_p1.py"   --test_root "$TEST_ROOT"   --output_dir "$TEST_ROOT"   --variants "$VARIANTS"   --splits "$SPLITS"
 
-echo "[REP-P1-TEST] completed: $TEST_ROOT"
+echo "[REP-P1-TEST] checkpoint=$CHECKPOINT_KIND completed: $TEST_ROOT"
