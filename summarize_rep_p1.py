@@ -13,8 +13,7 @@ def parse_args():
     p.add_argument("--test_root", required=True)
     p.add_argument("--output_dir", required=True)
     p.add_argument(
-        "--variants", default="geo_pred,img_point,img_region"
-    )
+        "--variants", default="action_only,geo_pred,img_point,img_region"\n    )
     p.add_argument("--splits", default="test_similar,test_novel")
     p.add_argument("--alignment_tol", type=float, default=1e-7)
     return p.parse_args()
@@ -100,34 +99,42 @@ def main():
                             f"{split}/{section}/{key}: {a} vs {b}"
                         )
 
-    # Deltas against the predicted-geometry baseline.
+    # Deltas against both action-only and predicted-geometry baselines.
+    metric_keys = (
+        "candidate_spearman",
+        "candidate_success08_auroc",
+        "candidate_success08_auprc",
+        "within_ray_pairwise_accuracy",
+        "utility_gain",
+        "headroom_recovery",
+        "success08_gain",
+        "rescue08",
+        "harm08",
+        "top10_utility_gain",
+        "top10_headroom_recovery",
+        "top10_success08_gain",
+        "top10_rescue08",
+        "top10_harm08",
+    )
     for row in rows:
-        base = next(
-            (
-                x for x in rows
-                if x["variant"] == "geo_pred" and x["split"] == row["split"]
-            ),
-            None,
-        )
-        if base is None:
-            continue
-        for key in (
-            "candidate_spearman",
-            "candidate_success08_auroc",
-            "candidate_success08_auprc",
-            "within_ray_pairwise_accuracy",
-            "utility_gain",
-            "headroom_recovery",
-            "success08_gain",
-            "rescue08",
-            "harm08",
-            "top10_utility_gain",
-            "top10_headroom_recovery",
-            "top10_success08_gain",
-            "top10_rescue08",
-            "top10_harm08",
+        for baseline_variant, tag in (
+            ("action_only", "action"),
+            ("geo_pred", "geo"),
         ):
-            row[f"delta_vs_geo_{key}"] = float(row[key]) - float(base[key])
+            base = next(
+                (
+                    x for x in rows
+                    if x["variant"] == baseline_variant
+                    and x["split"] == row["split"]
+                ),
+                None,
+            )
+            if base is None:
+                continue
+            for key in metric_keys:
+                row[f"delta_vs_{tag}_{key}"] = (
+                    float(row[key]) - float(base[key])
+                )
 
     write_csv(out / "comparison.csv", rows)
     (out / "comparison.json").write_text(
