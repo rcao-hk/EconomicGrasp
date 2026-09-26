@@ -119,7 +119,7 @@ is selected using Seen field-CDF BCE. Coverage is logged. This is a practical
 training criterion, not proof of final AP superiority. Similar/Novel never choose
 checkpoints or thresholds. `checkpoint_latest.pt` and `checkpoint_best.pt` are
 both saved. Resume is epoch-boundary only and verifies code, checkpoint, data
-schedule, seed, architecture, optimizer and world-size contracts.
+schedule, seed, architecture, optimizer, batch size and world-size contracts.
 
 ## Prerequisites and start
 
@@ -158,7 +158,7 @@ only the smoke query count and must not be carried into formal 1,024-query resul
 ```bash
 WORK_ROOT=/data2/robotarm/result/grasp/rgbgrasp/dav2_mgf_smoke \
 GPUS=0 INFER_GPUS=0 \
-EPOCHS=1 M_POINT=64 BATCH_SIZE=1 GRAD_ACCUM=1 \
+EPOCHS=1 M_POINT=64 BATCH_SIZE=1 \
 MAX_TRAIN_FRAMES=4 MAX_VAL_FRAMES=4 INFER_MAX_FRAMES=4 \
 PHASES=train,infer \
 bash scripts/run_metric_grasp_field.sh
@@ -172,13 +172,16 @@ and truncated inference schedules as formal AP runs.
 
 ```bash
 WORK_ROOT=/data2/robotarm/result/grasp/rgbgrasp/dav2_metric_grasp_field_10pct \
-GPUS=0,1,2,3,4,5 BATCH_SIZE=1 GRAD_ACCUM=4 EPOCHS=20 \
+GPUS=0,1,2,3,4,5 BATCH_SIZE=1 EPOCHS=20 \
 PHASES=train,infer,eval \
 bash scripts/run_metric_grasp_field.sh
 ```
 
-This uses DDP for ONE model, not one variant per GPU. Default effective batch is
-24 frames/optimizer update except the final accumulation group. Each inference
+This uses DDP for ONE model, not one variant per GPU. There is no gradient
+accumulation: every DataLoader batch produces exactly one optimizer update.
+Effective batch size is therefore `BATCH_SIZE x number_of_training_GPUs` (default
+`1 x 6 = 6`). Increase only `BATCH_SIZE` if a larger effective batch is desired
+and GPU memory permits it. Learning-rate scaling is not automatic. Each inference
 split is sharded over the available inference GPUs. Heavy frozen features are
 computed online every batch; there is no disk feature cache.
 
