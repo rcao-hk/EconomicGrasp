@@ -1,0 +1,12 @@
+{
+  "D0_vs_QC_no_E_step0": {
+    "rng": true,
+    "loader": true,
+    "model_state_dict": true,
+    "optimizer_state_dict": true
+  },
+  "D0_vs_D1_step1500": {
+    "rng": true,
+    "loader": true
+  }
+}

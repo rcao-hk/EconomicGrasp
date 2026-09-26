@@ -163,8 +163,18 @@ QC_no_E 完成 500 步，验证 MAE 4.190952 mm、前景 MAE 7.894006 mm、局�
 
 seed 1/2 的八批 P0 均通过预先锁定的 calibrated gate，strict replay 仍为 false。
 两 seed 都保留了 raw route/数值检查记录。seed 1 的 D0/D1 500 步配对已启动，
-seed 2 的 D0 先在空闲 GPU 5 启动；其 D1 待 GPU 4 的正常短段重复结束后启动，
-两组预算/初始状态/数据配置会一致，启动时刻无需相同。全部复制训练使用 `aa4ffd2`。
+seed 2 的 D0 先在空闲 GPU 5 启动，D1 已在正常短段重复结束后于 GPU 4 启动。
+两组预算/初始状态/数据配置一致，启动时刻无需相同。全部复制训练使用 `aa4ffd2`。
+seed 1/2 的确认预算预先固定为 500 updates，报告完整每 100 步轨迹和 500 步终点；
+不依据各组曲线事后选择终点。500 窗口来自 seed 0 的发现，因此 seed 0 是发现组、
+seed 1/2 是后续复核。三者共享同一个 Stage-1 权重初始化，变化的是训练数据顺序与 RNG，
+不能称为三个独立模型初始化。后续若复核局部移除，使用相同 step 400→500 窗口。
+gate 见 [seed1_p0_gate.json](depth_dynamics_results_20260926/seed1_p0_gate.json)、
+[seed2_p0_gate.json](depth_dynamics_results_20260926/seed2_p0_gate.json)。
+
+QC 的完整表见 [QC_no_E_500_summary.csv](depth_dynamics_results_20260926/QC_no_E_500_summary.csv)。
+其初始化与 D0 的 model/optimizer/RNG/loader 精确相同；主线 1500 步的 D0/D1 RNG/loader
+也相同，见 [pairing_QC0_main1500.json](depth_dynamics_results_20260926/pairing_QC0_main1500.json)。
 
 ## 八批有限差分与标签读取核查
 
@@ -192,6 +202,12 @@ gpu04（10.30.7.119）`/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynam
 中间状态转为在 gpu04 归档，并在原位置写入 `.archive.json` 指针，共释放 5,485,569,088 bytes。
 没有移动正在使用的 D0/D1、QC 或救援状态。归档映射与校验见
 [completed_path_checkpoints_verified_archive.json](depth_dynamics_results_20260926/completed_path_checkpoints_verified_archive.json)。
+
+随后 D0/D1 的早期 `geometry_review_at_500` 共十份状态也已完整复制并校验到同一归档根目录，
+见 [geometry_review_verified_archive.json](depth_dynamics_results_20260926/geometry_review_verified_archive.json)。
+其中 D0@100/200/300/400 与 D1@100/200/300 七份旧状态转为归档读取，原位置有恢复指针，
+释放 4,799,873,848 bytes；D1@400 留在训练机供历史重放，D0/D1@500 和当前滚动状态均保留。
+实际转移列表见 [geometry_review_relocation.json](depth_dynamics_results_20260926/geometry_review_relocation.json)。
 
 重复 seed 先执行独立 P0；seed 1 的 `20260926_stage1_replica_seed1` 已在 GPU 4 启动。
 GPU 4 首次单张量预热遇到 CUDA driver initialization failed，随后审计进程成功构造真实模型；

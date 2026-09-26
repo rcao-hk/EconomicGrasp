@@ -1,0 +1,34 @@
+{
+  "P1": "raw+weighted audits on fixed train/user-designated validation batches; directional CSV records scope",
+  "P1_complete_mechanism": false,
+  "baseline_disconnected_depth_connected": true,
+  "calibrated_limits": {
+    "gradient_atol": 1e-06,
+    "gradient_rtol": 1e-05,
+    "locked_before_run": true,
+    "numerical_floor": 1e-06,
+    "optimizer_atol": 1e-06,
+    "optimizer_rtol": 1e-05,
+    "parameter_abs_cap": 1e-05,
+    "parameter_rtol": 0.0,
+    "plain_repeat_multiplier": 2.0
+  },
+  "diagnostic_noninterference_calibrated_passed": true,
+  "diagnostic_noninterference_passed": true,
+  "diagnostic_noninterference_strict_passed": false,
+  "forward_equality": true,
+  "git_head": "aa4ffd20ee52f0a60f776c1c3b90d048ef7fa216",
+  "healthy_probe_completed": true,
+  "init_sha256": "0cb8cd54bd5eef44a81c8d8de6969003377224d41a84b2002ba662bb8ce0c69c",
+  "passed": true,
+  "replay_policy": "calibrated",
+  "resolved_config_sha256": "4018c0b016746f7a57ba6e519d35a8a05d9fd707ec8deb8e5d10a8ff1f0503c7",
+  "route_checks_passed": true,
+  "route_connected_nonzero": {
+    "all": true,
+    "gse": true,
+    "seed_xyz": true,
+    "support": true
+  },
+  "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}
