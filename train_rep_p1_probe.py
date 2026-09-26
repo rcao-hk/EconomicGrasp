@@ -5,7 +5,10 @@ All variants use exactly the same Rep-P0 K=7 physical actions and exact-action
 labels.  No candidate generation, CAD evaluation, or grasp decoding occurs in
 this script.
 
-Formal comparison:\n  action_only: explicit physical action only; controls action/dataset priors.\n  geo_pred   : predicted-depth geometry descriptor baseline.\n  img_point  : sparse 13-point action-aligned image readout.
+Formal comparison:
+  action_only: explicit physical action only; controls action/dataset priors.
+  geo_pred   : predicted-depth geometry descriptor baseline.
+  img_point  : sparse 13-point action-aligned image readout.
   img_region : structured region-level action-aligned image readout.
 
 All probes optimize the same six-threshold exact-action CDF objective plus the
@@ -103,11 +106,22 @@ def paired_image(path, p0_root, image_root, p0):
     return load_image_frame(ipath, p0)
 
 
-def infer_feature_dim(variant, first_path, p0_root, image_root):\n    p0 = load_p0_frame(first_path, need_geo=(variant == "geo_pred"))\n    if variant == "action_only":\n        return 15\n    if variant == "geo_pred":\n        return int(p0["feat_pred"].shape[-1])\n    img = paired_image(first_path, p0_root, image_root, p0)
+def infer_feature_dim(variant, first_path, p0_root, image_root):
+    p0 = load_p0_frame(first_path, need_geo=(variant == "geo_pred"))
+    if variant == "action_only":
+        return 15
+    if variant == "geo_pred":
+        return int(p0["feat_pred"].shape[-1])
+    img = paired_image(first_path, p0_root, image_root, p0)
     return int(img["pre_feature"].shape[0])
 
 
-def score_frame(model, variant, p0, image, device, mean=None, std=None):\n    if variant == "action_only":\n        actions = torch.from_numpy(p0["actions"]).to(device)\n        logits = model(actions)\n        diagnostics = {}\n    elif variant == "geo_pred":\n        K, Q, Fdim = p0["feat_pred"].shape
+def score_frame(model, variant, p0, image, device, mean=None, std=None):
+    if variant == "action_only":
+        actions = torch.from_numpy(p0["actions"]).to(device)
+        logits = model(actions)
+        diagnostics = {}
+    elif variant == "geo_pred":\n        K, Q, Fdim = p0["feat_pred"].shape
         x = torch.from_numpy(
             normalize(p0["feat_pred"], mean, std)
         ).to(device)
