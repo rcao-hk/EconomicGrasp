@@ -6,7 +6,6 @@ profile head train on geometry losses; grasp losses cannot enter either branch.
 """
 import argparse
 from datetime import timedelta
-from contextlib import nullcontext
 from dataclasses import asdict
 import json
 import math
@@ -38,7 +37,6 @@ def parser():
     p.add_argument("--seed-mode", choices=("image_fps", "point_fps"), default="image_fps")
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=1, help="Per GPU")
-    p.add_argument("--grad-accum", type=int, default=4)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--geometry-lr", type=float, default=1e-5)
     p.add_argument("--weight-decay", type=float, default=1e-4)
@@ -148,8 +146,8 @@ def validate(model, loader, device, loss_fn, kwargs):
 
 def main():
     args = parser().parse_args()
-    if min(args.epochs, args.batch_size, args.grad_accum, args.log_every, args.m_point) < 1:
-        raise ValueError("Epoch/batch/accum/log/query counts must be positive")
+    if min(args.epochs, args.batch_size, args.log_every, args.m_point) < 1:
+        raise ValueError("Epoch/batch/log/query counts must be positive")
     if min(args.max_steps, args.max_train_frames, args.max_val_frames, args.workers, args.eval_workers) < 0:
         raise ValueError("Frame/step/worker counts cannot be negative")
     if min(args.lr, args.geometry_lr) <= 0 or min(args.weight_decay, args.profile_weight,
@@ -194,7 +192,8 @@ def main():
         "dav2_sha256": sha256_file(official), "loss_weights": loss_kwargs,
         "optimizer": {"task_lr": args.lr, "geometry_lr": args.geometry_lr,
                       "weight_decay": args.weight_decay, "batch_per_gpu": args.batch_size,
-                      "world_size": world, "grad_accum": args.grad_accum, "amp": args.amp},
+                      "world_size": world, "effective_batch": args.batch_size * world,
+                      "amp": args.amp},
         "partial_run": bool(args.max_train_frames or args.max_val_frames or args.max_steps),
         "max_steps": args.max_steps, "seed": args.seed,
         "dataset_root": str(Path(args.dataset_root).resolve()),
@@ -276,28 +275,23 @@ def main():
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
         sums, count = {}, 0
-        optimizer.zero_grad(set_to_none=True)
         t0 = time.monotonic()
         for step, raw in enumerate(loader):
             if step >= total_batches:
                 break
             batch = move_batch(raw, device)
-            boundary = (step+1) % args.grad_accum == 0 or step+1 == total_batches
-            group_start = (step//args.grad_accum)*args.grad_accum
-            group_size = min(args.grad_accum, total_batches-group_start)
-            sync = train_model.no_sync() if world > 1 and not boundary else nullcontext()
-            with sync:
-                with torch.autocast("cuda", enabled=args.amp):
-                    ep = train_model(batch)
-                    loss, stats = metric_field_loss(ep, config, **loss_kwargs)
-                values = scalar_stats(stats)
-                scaler.scale(loss/group_size).backward()
-            if boundary:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(task_params + geom_params, 5., error_if_nonfinite=True)
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad(set_to_none=True)
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast("cuda", enabled=args.amp):
+                ep = train_model(batch)
+                loss, stats = metric_field_loss(ep, config, **loss_kwargs)
+            values = scalar_stats(stats)
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                task_params + geom_params, 5., error_if_nonfinite=True
+            )
+            scaler.step(optimizer)
+            scaler.update()
             b = len(batch["img"])
             for k, v in values.items():
                 sums[k] = sums.get(k, 0.) + b*v
