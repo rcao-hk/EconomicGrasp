@@ -79,7 +79,8 @@ forward、匹配、其他 task 梯度和 Adam 历史。移除分支先算**自�
 
 在这次配对续训中，移除组终点的 MAE、前景误差及局部几何优于正常组，且保留了其他
 任务梯度。此处比三个单步结果多了短轨迹证据；仍不是所有初始化和 seed 的一般结论。
-两组均无预定义 constant-depth 事件，sigmoid 导数均约 0.244，未出现边界饱和。
+两组均无预定义 constant-depth 事件；固定 probe 的 GT-valid 区域内 sigmoid 导数均约
+0.244，未观察到边界饱和。该范围不能替代所有像素或任意训练批的判断。
 完整 24 行 train/eval、train/test_seen 表见 [summary.csv](P4_rescue_seed0/summary.csv)，
 [局部几何图](P4_rescue_seed0/local_geometry.png) 已检查。
 

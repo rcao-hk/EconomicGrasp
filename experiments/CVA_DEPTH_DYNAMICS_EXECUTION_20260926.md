@@ -209,9 +209,9 @@ gpu04（10.30.7.119）`/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynam
 释放 4,799,873,848 bytes；D1@400 留在训练机供历史重放，D0/D1@500 和当前滚动状态均保留。
 实际转移列表见 [geometry_review_relocation.json](depth_dynamics_results_20260926/geometry_review_relocation.json)。
 
-重复 seed 先执行独立 P0；seed 1 的 `20260926_stage1_replica_seed1` 已在 GPU 4 启动。
-GPU 4 首次单张量预热遇到 CUDA driver initialization failed，随后审计进程成功构造真实模型；
-训练仍须等待该 seed 的正式 gate。尚未把重复 seed 的任何结果列为已通过。
+重复 seed 先执行独立 P0。seed 1 的 GPU 4 首次单张量预热遇到 CUDA driver
+initialization failed，随后审计进程成功构造真实模型；两个 seed 的正式 gate 均通过后，
+才启动相应复制训练。训练终点尚在等待，不将 gate 通过混作机制复核完成。
 
 完整产物保存在训练服务器：
 
