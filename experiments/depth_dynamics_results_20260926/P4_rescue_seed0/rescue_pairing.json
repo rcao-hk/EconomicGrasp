@@ -1,0 +1,44 @@
+{
+  "checks": {
+    "both_completed": true,
+    "exactly_100_updates": true,
+    "initial_state_hashes_equal": true,
+    "all_batch_hashes_equal": true,
+    "all_loader_states_equal": true,
+    "resolved_config_equal_except_log_dir": true
+  },
+  "source_state": {
+    "loader": "bfb72dbbee7e3a2e50055f44c26d3d5746850c85d3fe6d4ab1e4b3f4ac9761d0",
+    "model_state_dict": "fb618ccae7a80909c3e5041bad65b26e3d4a90f2c6590258dae2afd1896b88b6",
+    "optimizer_state_dict": "42d39390c9999394a7511c125289d57d94604211eb1e2f31ef6c53799e7c20b8",
+    "rng": "bf5a36b9c7013b9d36ccc8f7e609f18ec9455377b8d8fefa3703429af567a7bb",
+    "routes": "00668bb6db692dcfe15f4552ec44564b1d181d89653e743e1247c9bd8b10d580"
+  },
+  "source_checkpoint": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/D1/geometry_review_at_500/step_000400.pt",
+  "source_checkpoint_sha256": "98915c4a3cfb29bc597e50992dbcce5357dea259c301d0b1f365b12ed8e6c278",
+  "code": {
+    "branch": "",
+    "head": "c15fecb0bc7c1df4b46ae93f1ad7961827fa6940",
+    "status": "?? checkpoints",
+    "tracked_diff": "",
+    "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "step401": {
+    "normal": {
+      "loss": 1.346243143081665,
+      "full_global_grad_preclip": 6.884824275970459,
+      "clip_coefficient": 0.1452469676733017,
+      "batch_sha256": "54fcbcf880c4d4f569fc31aa095ddeb0de80779cf0da054b6fc8f006ac4da81f"
+    },
+    "remove_view_fixed_clip": {
+      "loss": 1.346243143081665,
+      "full_global_grad_preclip": 6.884824275970459,
+      "clip_coefficient": 0.1452469676733017,
+      "batch_sha256": "54fcbcf880c4d4f569fc31aa095ddeb0de80779cf0da054b6fc8f006ac4da81f"
+    }
+  },
+  "source_files": {
+    "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_rescue_view_seed0/normal/diagnostics/rescue_steps.jsonl": "d825558d95869cce9b0cd75edeced0137048d47e858c4ea00e38c08e85949887",
+    "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_rescue_view_seed0/remove_view_fixed_clip/diagnostics/rescue_steps.jsonl": "ec7317127fa76dbd1ea5356c0a321888e2de1fbbef926fe3d3fc8c3ccf9313b0"
+  }
+}
