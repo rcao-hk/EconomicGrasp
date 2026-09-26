@@ -305,6 +305,19 @@ To save held-out per-query diagnosis:
 SAVE_PER_QUERY=1 PHASES=test bash scripts/run_rep_p1.sh
 ```
 
+To test the final training epoch instead of the validation-selected checkpoint:
+
+```bash
+CHECKPOINT_KIND=latest \
+PHASES=test \
+bash scripts/run_rep_p1.sh
+```
+
+Latest-checkpoint results are written to `WORK_ROOT/test_latest/` by default,
+so the formal best-checkpoint results under `WORK_ROOT/test/` are preserved.
+Set `TEST_ROOT=...` explicitly to override this output location.
+
+
 ## Output layout
 
 ```text
