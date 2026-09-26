@@ -3,8 +3,7 @@ import torch
 from rep_p1_common import (
     REGION_POINT_COUNTS,
     REGION_POINTS,
-    ActionPointImageProbe,
-    ActionRegionImageProbe,
+    ActionOnlyProbe,\n    ActionPointImageProbe,\n    ActionRegionImageProbe,
     action_point_keypoints_camera,
     action_region_points_camera,
     pairwise_rank_loss,
@@ -51,6 +50,15 @@ def test_region_reader_uses_declared_structured_regions():
     counts = [int((rid == i).sum()) for i in range(len(REGION_POINT_COUNTS))]
     assert tuple(counts) == tuple(REGION_POINT_COUNTS)
 
+
+
+
+def test_action_only_control_outputs_six_threshold_logits():
+    a = _actions()
+    model = ActionOnlyProbe(hidden=16, dropout=0.0)
+    logits = model(a)
+    assert logits.shape == (*a.shape[:2], 6)
+    assert torch.isfinite(logits).all()
 
 def test_image_probes_predict_six_threshold_logits_and_backpropagate():
     torch.manual_seed(0)
