@@ -106,5 +106,8 @@ for i in "${!PIDS[@]}"; do
 done
 PIDS=(); NAMES=()
 
-"$PYTHON_BIN" "$ROOT_DIR/tools/merge_grasp_behavior_viz.py" --root "$OUTPUT_ROOT"
+(
+  cd "$ROOT_DIR"
+  "$PYTHON_BIN" -m tools.merge_grasp_behavior_viz --root "$OUTPUT_ROOT"
+)
 echo "[GRASP-VIZ] complete: $OUTPUT_ROOT/index.html"
