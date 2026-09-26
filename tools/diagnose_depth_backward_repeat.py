@@ -26,6 +26,16 @@ def main():
         torch.backends.cuda.enable_math_sdp(True)
     experiment = run.Experiment(args, remaining)
     captured, handles = {}, []
+    samples = []
+    original_grid_sample = torch.nn.functional.grid_sample
+
+    def capture_sample(x, grid, **kwargs):
+        output = original_grid_sample(x, grid, **kwargs)
+        if output.requires_grad:
+            samples.append((x, grid, kwargs, output))
+        return output
+
+    torch.nn.functional.grid_sample = capture_sample
 
     def hook(name):
         def capture(module, inputs, output):
@@ -63,7 +73,26 @@ def main():
             result["terms"][term] = rows
             print(term, {k: v for k, v in rows.items() if v.get("exact") is False}, flush=True)
         dd.write_json(experiment.diag / "same_graph_backward_repeat.json", result)
+        sampling = []
+        for index, (x, grid, kwargs, output) in enumerate(samples):
+            upstream = torch.autograd.grad(loss, output, retain_graph=True, allow_unused=True)[0]
+            if upstream is None:
+                continue
+            row = {"index": index, "input_shape": list(x.shape), "grid_shape": list(grid.shape), "backends": {}}
+            for cudnn in (True, False):
+                with torch.backends.cudnn.flags(enabled=cudnn, deterministic=True, benchmark=False, allow_tf32=False):
+                    a, b = x.detach().requires_grad_(), grid.detach().requires_grad_()
+                    sampled = original_grid_sample(a, b, **kwargs)
+                    first = torch.autograd.grad(sampled, (a, b), upstream, retain_graph=True)
+                    second = torch.autograd.grad(sampled, (a, b), upstream)
+                    row["backends"][str(cudnn)] = {"grad_fn": type(sampled.grad_fn).__name__,
+                        "forward_max_difference": float((sampled-output).abs().max()),
+                        "repeat_max_differences": [float((p-q).abs().max()) for p, q in zip(first, second)]}
+            sampling.append(row)
+            print("grid_sample", row, flush=True)
+        dd.write_json(experiment.diag / "grid_sample_backward_repeat.json", sampling)
     finally:
+        torch.nn.functional.grid_sample = original_grid_sample
         for handle in handles:
             handle.remove()
         experiment.trainer.close()
