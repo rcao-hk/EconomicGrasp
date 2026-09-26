@@ -8,7 +8,7 @@ import json
 import math
 from collections import defaultdict
 from pathlib import Path
-from statistics import mean
+from statistics import mean, pstdev
 
 
 def read_jsonl(path):
@@ -596,6 +596,7 @@ def summarize(root, output, plots=True):
         write_table(output / (name + ".csv"), values)
     grouped = defaultdict(list)
     sources = []
+    per_image = []
     for path in sorted(root.rglob("fixed_probe.jsonl")):
         sources.append(str(path.resolve()))
         for record in read_jsonl(path):
@@ -603,19 +604,40 @@ def summarize(root, output, plots=True):
             arm = record.get("arm", path.parent.name)
             split = record.get("split", "unspecified")
             mode = record.get("mode", record.get("module_mode", record.get("measurement_mode", "unspecified")))
-            grouped[(arm, split, mode, step)].extend(flatten_metrics(record))
+            metrics = flatten_metrics(record)
+            grouped[(arm, split, mode, step)].extend(metrics)
+            for metric in metrics:
+                image_row = {"arm": arm, "split": split, "mode": mode, "step": step,
+                             "index": record.get("index"), "scene": record.get("scene"), "frame": record.get("frame")}
+                for region, values in metric.get("regions", {}).items():
+                    for name, value in values.items():
+                        if not isinstance(value, (dict, list)):
+                            image_row[f"{region}_{name}"] = value
+                        elif isinstance(value, dict):
+                            image_row.update({f"{region}_{name}_{k}": v for k, v in value.items()})
+                for scope in ("local", "raw"):
+                    image_row.update({f"{scope}_{k}": v for k, v in metric.get(scope, {}).items()
+                                      if not isinstance(v, (dict, list))})
+                per_image.append(image_row)
+    write_table(output / "per_image.csv", per_image)
+    events = {str(path.resolve()): read_jsonl(path) for path in sorted(root.rglob("events.jsonl"))}
+    (output / "events.json").write_text(json.dumps(events, indent=2), encoding="utf-8")
     rows = []
     for (arm, split, mode, step), images in sorted(grouped.items()):
         valid = [im.get("regions", {}).get("valid", {}) for im in images]
         local = [im.get("local", {}) for im in images]
         foreground = [im.get("regions", {}).get("foreground", {}) for im in images]
-        eligible = [x for x in foreground if finite(x.get("gt_std")) and x["gt_std"] > .005]
+        eligible = [x for x in foreground if x.get("count", 0) >= 2 and finite(x.get("gt_std")) and x["gt_std"] > .005]
+        image_means = [x["pred_mean"] for x in valid if finite(x.get("pred_mean"))]
+        foreground_means = [x["pred_mean"] for x in foreground if finite(x.get("pred_mean"))]
         flat = [x for x in eligible if finite(x.get("std_ratio")) and x["std_ratio"] < .1]
         rows.append({"arm": arm, "split": split, "mode": mode, "step": step,
                      "image_count": len(images), "eligible_image_count": len(eligible),
                      "mae_m": avg(x.get("mae") for x in valid),
                      "bias_m": avg(x.get("bias") for x in valid),
                      "mean_image_std_ratio": avg(x.get("std_ratio") for x in valid),
+                     "between_image_pred_mean_population_std_m": pstdev(image_means) if image_means else None,
+                     "between_image_foreground_mean_population_std_m": pstdev(foreground_means) if foreground_means else None,
                      "below_min_fraction": avg(x.get("below_min_fraction") for x in valid),
                      "foreground_mae_m": avg(x.get("mae") for x in foreground),
                      "foreground_bias_m": avg(x.get("bias") for x in foreground),

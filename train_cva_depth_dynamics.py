@@ -22,6 +22,7 @@ import re
 import subprocess
 import sys
 import time
+import depth_init
 
 
 LOSS_KEYS = {
@@ -43,8 +44,14 @@ def parse_args(argv=None):
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Unrecognized options are forwarded to utils.arguments (e.g. "
                "--dataset_root, --batch_size, --learning_rate, loss weights).")
-    parser.add_argument("--mode", choices=("audit", "train"), default="audit")
-    parser.add_argument("--init_checkpoint", required=True)
+    parser.add_argument("--mode", choices=("initialize", "audit", "train"), default="audit")
+    parser.add_argument("--init_checkpoint", default="", help="Warm weights or explicitly documented early source.")
+    parser.add_argument("--init_mode", choices=("warm", "current_standard_cold", "early"), default="warm")
+    parser.add_argument("--architecture_checkpoint", default="", help="Cold/early constructor metadata only; weights are NOT loaded.")
+    parser.add_argument("--canonical_init", default="", help="Create once in initialize mode; immutable shared weights in audit/train.")
+    parser.add_argument("--early_recipe", default="", help="JSON source SHA256, description and explicit include_prefixes.")
+    parser.add_argument("--depth_gradient_policy", choices=("normal", "remove_view_reclip", "view_noop"), default="normal")
+    parser.add_argument("--probe_schedule", choices=("legacy", "cold"), default="legacy")
     parser.add_argument("--output", required=True, help="One NEW arm directory, or existing directory with --resume_checkpoint.")
     parser.add_argument("--diagnostics_dir", help="Arm-specific diagnostic directory; default OUTPUT/diagnostics.")
     parser.add_argument("--arm", default="D0")
@@ -77,6 +84,22 @@ def parse_args(argv=None):
     parser.add_argument("--verify_diagnostic_step", action="store_true",
                         help="Verify one real optimizer update is identical with/without a diagnostic replay.")
     args, remaining = parser.parse_known_args(argv)
+    if args.mode == "initialize":
+        if not args.canonical_init or args.resume_checkpoint:
+            parser.error("initialize requires a new --canonical_init and forbids resume")
+        if Path(args.canonical_init).exists():
+            parser.error("Canonical initialization already exists")
+    if not args.canonical_init or args.mode == "initialize":
+        if args.init_mode == "warm" and not args.init_checkpoint:
+            parser.error("warm requires --init_checkpoint or an existing --canonical_init")
+        if args.init_mode != "warm" and not args.architecture_checkpoint:
+            parser.error("cold/early creation requires --architecture_checkpoint (metadata only)")
+        if args.init_mode == "early" and (not args.init_checkpoint or not args.early_recipe):
+            parser.error("early requires --init_checkpoint and --early_recipe")
+    if args.init_mode != "warm" and args.mode != "initialize" and not args.canonical_init:
+        parser.error("cold/early arms must reuse --canonical_init")
+    if args.depth_gradient_policy != "normal" and args.routes != "all":
+        parser.error("Selective view policy requires all E/Q/C routes open")
     for name in ("max_steps", "audit_batches", "probe_interval", "checkpoint_interval", "train_probe_frames"):
         if getattr(args, name) <= 0:
             parser.error(f"--{name} must be positive")
@@ -94,6 +117,12 @@ def parse_args(argv=None):
         if value.split("=", 1)[0] in forbidden:
             parser.error(f"{value} conflicts with the diagnostic contract")
     return args, remaining
+
+
+def probe_due(step, args):
+    if args.probe_schedule == "cold":
+        return step in (0, 10, 25, 50, 100) or (100 < step <= 1000 and step % 50 == 0) or (step > 1000 and step % 100 == 0)
+    return step % args.probe_interval == 0
 
 
 def json_safe(value):
@@ -442,11 +471,12 @@ class Experiment:
                 raise ValueError("Resume requires a full dynamics checkpoint")
             assert_rescue_resume_explicit(resume_state, args)
             self.resume_output_check = assert_resume_outputs_not_newer(self.output, self.diag, resume_state["step"])
+            depth_init.assert_resume_settings(resume_state, args)
         self.output.mkdir(parents=True, exist_ok=True)
         self.diag.mkdir(parents=True, exist_ok=True)
         self.checkpoint_dir = self.output / "checkpoints"
         self.checkpoint_dir.mkdir(exist_ok=True)
-        self.source = torch.load(args.init_checkpoint, map_location="cpu", weights_only=False)
+        self.source, initialization, source_path = depth_init.read_source(args, dd.sha256_file)
         required = {"distill_stage": 1, "seed_selection_mode": "image_fps", "geometry_depth_source": "pred"}
         for key, value in required.items():
             if self.source.get(key) != value:
@@ -492,14 +522,20 @@ class Experiment:
                                  f"actual={getattr(self.model, key, None)!r}")
         if not hasattr(self.model, "set_depth_grad_routes"):
             raise RuntimeError("Model lacks the E/Q/C gradient route controls")
-        result = self.model.load_state_dict(self.source["model_state_dict"], strict=True)
+        loading = depth_init.apply_source(self.model, initialization)
+        canonical_manifest = None
+        if args.mode == "initialize":
+            initialization["training_rng_state"] = dd.capture_rng_state()
+            canonical_manifest = depth_init.save_canonical(self.model, args, self.source, initialization,
+                                                          loading, dd.sha256_file)
         self.model.set_depth_grad_routes(args.routes)
         self.groups = dd.parameter_groups(self.model)
+        self.depth_gradient_scope = depth_init.depth_scope(self.groups)
         self.stream = DeterministicStream(self.trainer.TRAIN_DATASET, self.cfg.batch_size, args.seed,
                                           original.collate_fn, dd.capture_rng_state, dd.restore_rng_state)
         self.weights = {key: float(getattr(self.cfg, attr)) for key, attr in WEIGHT_KEYS.items()}
         self.step, self.seen_images = 0, 0
-        self.initial_epoch = int(self.source.get("epoch", 0))
+        self.initial_epoch = int(initialization.get("provenance", {}).get("source_epoch", 0))
         self.events = {"initial_flat": None, "first_anomaly": None, "first_threshold": None,
                        "confirmed_event": None, "consecutive_thresholds": 0,
                        "event_state_version": EVENT_STATE_VERSION}
@@ -511,7 +547,7 @@ class Experiment:
             self.trainer.TRAIN_DATASET, args.train_probe_frames)]
         self.probe_specs += [("validation_test_seen", index) for index in select_probe_indices(
             self.trainer.TEST_DATASET, args.heldout_test_probe_frames)]
-        self.init_sha = dd.sha256_file(args.init_checkpoint)
+        self.init_sha = dd.sha256_file(args.canonical_init if args.canonical_init else source_path)
         self.contract = {
             "format_version": FORMAT_VERSION, "mode": args.mode, "arm": args.arm,
             "arguments": vars(args), "resolved_config": vars(self.cfg), "git": git_info(),
@@ -526,11 +562,14 @@ class Experiment:
                 "custom_cuda_backward_bitwise_determinism": "not guaranteed; measured replay tolerance recorded"},
             "model": {"class": type(self.model).__qualname__, "file": inspect.getfile(type(self.model)),
                       "pose_depth_mode": self.model.pose_depth_mode, "routes": self.model.get_depth_grad_routes()},
-            "checkpoint": {"path": str(Path(args.init_checkpoint).resolve()), "sha256": self.init_sha,
+            "checkpoint": {"path": str(Path(args.canonical_init or source_path).resolve()), "sha256": self.init_sha,
                            "metadata": {k: v for k, v in self.source.items() if k not in ("model_state_dict", "optimizer_state_dict")},
                            "initialization": "weights-only restart; AdamW reset identically for both arms",
-                           "source_has_optimizer": "optimizer_state_dict" in self.source,
-                           "missing_keys": result.missing_keys, "unexpected_keys": result.unexpected_keys},
+                           "source_has_optimizer": initialization.get("provenance", {}).get("source_has_optimizer", False),
+                           "init_mode": args.init_mode, "provenance": initialization.get("provenance"),
+                           "canonical_manifest": canonical_manifest,
+                           "missing_keys": loading["missing_keys"], "unexpected_keys": loading["unexpected_keys"],
+                           "skipped_keys": loading["skipped_keys"]},
             "parameters": dd.parameter_contract(self.model, self.optimizer),
             "inputs": {"model_geometry": "RGB predicted metric depth", "pose": inherited,
                        "K": "intrinsics cropped/resized by original dataset",
@@ -547,6 +586,8 @@ class Experiment:
                      "depth_denominator": "all image pixels including invalid pixels",
                      "native_reductions": "existing get_loss_cdf; CDF mean over thresholds, each over valid samples; width valid mean"},
             "optimization": {"algorithm": "AdamW", "clip_norm": args.clip_norm,
+                             "depth_gradient_policy": args.depth_gradient_policy,
+                             "depth_gradient_scope": [name for name, _ in self.depth_gradient_scope],
                              "schedule": args.lr_schedule, "scheduler_state": "derived source_epoch + stream.epoch",
                              "source_epoch": self.initial_epoch, "scaler": None},
             "events": {"std_ratio_threshold": 0.1, "eligible_gt_std_min_m": 0.005,
@@ -576,9 +617,11 @@ class Experiment:
             raise ValueError("Optimizer parameter coverage failed")
         if any(p.requires_grad for _, p in self.groups.get("dino", [])):
             raise ValueError("Primary paired experiment requires frozen DINO")
-        self.probe_cache = self.make_probe_cache()
+        self.probe_cache = [] if args.mode == "initialize" else self.make_probe_cache()
         self.contract["probe_manifest"] = [{k: v for k, v in item.items() if k in ("split", "index", "scene", "frame")}
                                            for item in self.probe_cache]
+        if args.canonical_init:
+            dd.restore_rng_state(initialization["training_rng_state"])
         self.init_rng = dd.capture_rng_state()
         if args.resume_checkpoint:
             self.resume(args.resume_checkpoint, state=resume_state)
@@ -1032,6 +1075,7 @@ class Experiment:
         for key in ("seed", "arm", "clip_norm", "lr_schedule", "train_probe_frames", "heldout_test_probe_frames"):
             if state["arguments"][key] != vars(self.args)[key]:
                 raise ValueError(f"Resume diagnostic setting mismatch: {key}")
+        depth_init.assert_resume_settings(state, self.args)
         if state["arguments"].get("replay_policy", "strict") != self.args.replay_policy:
             raise ValueError("Resume diagnostic setting mismatch: replay_policy")
         self.model.load_state_dict(state["model_state_dict"], strict=True)
@@ -1145,7 +1189,10 @@ class Experiment:
 
         outcomes = []
         try:
-            for branch, with_diagnostics in (("no_audit_A", False), ("no_audit_B", False), ("with_audit", True)):
+            branches = [("no_audit_A", False), ("no_audit_B", False), ("with_audit", True)]
+            if self.args.probe_schedule == "cold" and self.args.routes == "all":
+                branches.append(("view_noop", False))
+            for branch, with_diagnostics in branches:
                 restore_initial()
                 self.model.train()
                 for module in self.model.modules():
@@ -1179,7 +1226,8 @@ class Experiment:
                 forward_losses = {key: float(value.detach()) for key, value in self.losses(endpoints).items()}
                 forward_losses["total"] = float(loss.detach())
                 del forward_values
-                loss.backward()
+                depth_init.backward_with_policy(loss, self.losses(endpoints)["view"] * self.weights["view"],
+                    self.depth_gradient_scope, "view_noop" if branch == "view_noop" else "normal", self.model.parameters())
                 preclip = gradient_copy()
                 grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_norm,
                                                                  error_if_nonfinite=True))
@@ -1237,9 +1285,10 @@ class Experiment:
                     "model_tensor_differences": model_differences, "preclip_gradient_differences": gradient_differences,
                     "changed_model_tensor_context": context}
 
-        comparisons = {"no_audit_repeat": compare_branches(outcomes[0], outcomes[1]),
-                       "audit_vs_reference": compare_branches(outcomes[0], outcomes[2]),
-                       "audit_vs_repeat": compare_branches(outcomes[1], outcomes[2])}
+        comparison_pairs = {"no_audit_repeat": (0, 1), "audit_vs_reference": (0, 2), "audit_vs_repeat": (1, 2)}
+        if len(outcomes) == 4:
+            comparison_pairs.update(view_noop_vs_reference=(0, 3), view_noop_vs_repeat=(1, 3))
+        comparisons = {name: compare_branches(outcomes[a], outcomes[b]) for name, (a, b) in comparison_pairs.items()}
         errors = [f"{name}: {error}" for name, comparison in comparisons.items() for error in comparison["errors"]]
 
         # These constants were locked before this run, following the independent
@@ -1266,9 +1315,7 @@ class Experiment:
         l2_envelope = limits["plain_repeat_multiplier"] * baseline["l2"] + limits["numerical_floor"]
         calibrated_errors = []
         calibrated_checks = {}
-        for name, (reference_index, other_index) in {
-            "no_audit_repeat": (0, 1), "audit_vs_reference": (0, 2), "audit_vs_repeat": (1, 2)
-        }.items():
+        for name, (reference_index, other_index) in comparison_pairs.items():
             reference, other = outcomes[reference_index], outcomes[other_index]
             comparison = comparisons[name]
             guard_errors = []
@@ -1343,6 +1390,7 @@ class Experiment:
             raise RuntimeError(f"Diagnostic replay failed the explicit {self.args.replay_policy} policy")
 
     def train(self):
+        from replay_cva_depth_counterfactual import digest
         self.model.train()
         for module in self.model.modules():
             if hasattr(module, "is_training"):
@@ -1357,18 +1405,35 @@ class Experiment:
             if self.args.lr_schedule == "source_cosine":
                 self.trainer.adjust_learning_rate(min(epoch, self.cfg.max_epoch))
             self.optimizer.zero_grad(set_to_none=True)
+            pairing = None
+            if self.args.probe_schedule == "cold":
+                pairing = {"step": self.step + 1, "batch_indices": indices,
+                           "batch_sha256": digest(batch), "loader": self.stream.state_dict(),
+                           "rng_before_sha256": digest(dd.capture_rng_state())}
             loss, endpoints = self.forward(batch)
-            loss.backward()
+            policy_metrics = depth_init.backward_with_policy(loss, self.losses(endpoints)["view"] * self.weights["view"],
+                self.depth_gradient_scope, self.args.depth_gradient_policy, self.model.parameters())
             group_before = {name: math.sqrt(sum(float(parameter.grad.detach().float().square().sum())
                 for _, parameter in group if parameter.grad is not None)) for name, group in self.groups.items()}
             norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_norm, error_if_nonfinite=True))
             clip_coef = min(1.0, self.args.clip_norm / (norm + 1e-6))
             should_log = (self.step + 1) % (10 if self.step < 100 else 50) == 0 or self.step == 0
+            if self.args.probe_schedule == "cold":
+                should_log = (self.step + 1) % 10 == 0 or self.step == 0
             before = {name: parameter.detach().clone() for name, parameter in self.model.named_parameters()
                       if parameter.requires_grad} if should_log else None
             self.optimizer.step()
             self.step += 1
             self.seen_images += len(indices)
+            if pairing is not None:
+                pairing["rng_after_sha256"] = digest(dd.capture_rng_state())
+                dd.append_jsonl(self.diag / "pairing_steps.jsonl", pairing)
+                if self.step <= 100:
+                    dd.append_jsonl(self.diag / "early_steps.jsonl", json_safe({"step": self.step,
+                        "metrics_scope": "actual training batch, GT-valid; not the fixed foreground event",
+                        "depth": dd.depth_metrics(endpoints["depth_net_pred"].detach().cpu(), batch["gt_depth_m"],
+                                                  raw=endpoints["depth_head_raw_pred"].detach().cpu()),
+                        "coverage": self.scalar_metrics(endpoints)}))
             if should_log:
                 update_norms = {name: math.sqrt(sum(float((parameter.detach() - before[pname]).float().square().sum())
                     for pname, parameter in group if pname in before)) for name, group in self.groups.items()}
@@ -1378,19 +1443,29 @@ class Experiment:
                     "loss": float(loss.detach()), "raw_losses": raw_losses,
                     "weighted_losses": {key: value * self.weights[key] for key, value in raw_losses.items()},
                     "coverage": self.scalar_metrics(endpoints), "global_grad_preclip": norm,
+                    "gradient_policy": self.args.depth_gradient_policy, "gradient_policy_metrics": policy_metrics,
                     "clip_coefficient": clip_coef, "group_grad_preclip": group_before,
                     "group_grad_postclip": {key: value * clip_coef for key, value in group_before.items()},
                     "actual_parameter_update_norm": update_norms, "lr": [group["lr"] for group in self.optimizer.param_groups],
                     "step_skipped": False, "elapsed_s": time.perf_counter() - started})
                 print(f"[train] arm={self.args.arm} step={self.step}/{self.args.max_steps} loss={float(loss):.6g} grad={norm:.4g}", flush=True)
             del loss, endpoints, before
-            if self.step % self.args.probe_interval == 0 or self.step == self.args.max_steps:
+            if probe_due(self.step, self.args) or self.step == self.args.max_steps:
                 self.probe()
             if self.args.audit_interval and self.step % self.args.audit_interval == 0:
                 self.audit(count=1, routes=[self.args.routes])
             event_tag = "first_threshold" if self.events["first_threshold"] == self.step else (
                 "confirmed_event" if self.events["confirmed_event"] == self.step else "rolling")
-            if self.step % self.args.checkpoint_interval == 0 or event_tag != "rolling" or self.step == self.args.max_steps:
+            if self.args.probe_schedule == "cold":
+                for name in ("first_nonflat_step", "nonflat_confirmed_step", "first_anomaly", "first_threshold", "confirmed_event"):
+                    if self.events.get(name) == self.step:
+                        self.locked_steps.update([self.step, *[row["step"] for row in self.manifest[-6:]]])
+                if self.step in (50, 200, 500, 2000, 5000, 10000):
+                    self.locked_steps.add(self.step)
+                save_due = probe_due(self.step, self.args)
+            else:
+                save_due = self.step % self.args.checkpoint_interval == 0
+            if save_due or event_tag != "rolling" or self.step == self.args.max_steps:
                 self.checkpoint("final" if self.step == self.args.max_steps else event_tag)
             # Keep paired requested budgets; a confirmed event is reported, not used
             # to stop one arm early. Launcher decides a matched extension <=200 steps.
@@ -1415,6 +1490,10 @@ def main(argv=None):
     experiment = None
     try:
         experiment = Experiment(args, remaining)
+        if args.mode == "initialize":
+            manifest = experiment.contract["checkpoint"]["canonical_manifest"]
+            print(json.dumps({k: manifest[k] for k in ("path", "sha256", "init_mode", "seed")}), flush=True)
+            return
         if args.skip_initial_audit:
             prior = json.loads(Path(args.audit_contract).read_text())
             if not prior.get("passed") or prior["init_sha256"] != experiment.init_sha:
@@ -1450,6 +1529,10 @@ def main(argv=None):
             experiment.probe()
     except BaseException as error:
         if experiment is not None:
+            if isinstance(error, FloatingPointError):
+                torch.save(dd.snapshot_state(experiment.model, experiment.optimizer,
+                    loader=experiment.stream.state_dict(), failed_step=experiment.step,
+                    error=str(error), forensic_only=True), experiment.output / "failure_state.pt")
             dd.write_json(experiment.diag / "failure.json", {"type": type(error).__name__, "message": str(error),
                           "step": experiment.step, "time": time.time()})
         raise
