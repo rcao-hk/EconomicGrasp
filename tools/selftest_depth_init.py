@@ -42,6 +42,31 @@ class InitializationContract(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec("torch"), "project torch environment required")
 class GradientPolicy(unittest.TestCase):
+    def test_deterministic_sampling_preserves_bilinear_values_and_derivatives(self):
+        import torch
+        from models.kview_query_transformer import ViewConditionedAttentionGrouping
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA sampling check requires project GPU")
+        previous = (torch.are_deterministic_algorithms_enabled(), torch.is_deterministic_algorithms_warn_only_enabled())
+        try:
+            torch.manual_seed(0)
+            torch.use_deterministic_algorithms(True, warn_only=True)
+            x = torch.randn(1, 3, 16, 16, device="cuda", requires_grad=True)
+            grid = (torch.rand(1, 4, 32, 2, device="cuda") * 4 - 2).requires_grad_()
+            value = ViewConditionedAttentionGrouping._sample_map(None, x, grid)
+            upstream = torch.randn_like(value)
+            first = torch.autograd.grad(value, (x, grid), upstream, retain_graph=True)
+            second = torch.autograd.grad(value, (x, grid), upstream)
+            self.assertTrue(all(torch.equal(a, b) for a, b in zip(first, second)))
+            cx, cg = x.detach().cpu().double().requires_grad_(), grid.detach().cpu().double().requires_grad_()
+            reference = torch.nn.functional.grid_sample(cx, cg, align_corners=True).permute(0, 2, 3, 1)
+            gradients = torch.autograd.grad(reference, (cx, cg), upstream.cpu().double())
+            torch.testing.assert_close(value.cpu().double(), reference, rtol=3e-5, atol=1e-5)
+            for actual, expected in zip(first, gradients):
+                torch.testing.assert_close(actual.cpu().double(), expected, rtol=3e-5, atol=5e-5)
+        finally:
+            torch.use_deterministic_algorithms(previous[0], warn_only=previous[1])
+
     def test_cold_source_does_not_load_task_weights(self):
         import torch
         model = torch.nn.Linear(2, 1)

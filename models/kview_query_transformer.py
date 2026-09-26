@@ -1000,6 +1000,12 @@ class ViewConditionedAttentionGrouping(nn.Module):
 
     def _sample_map(self, x: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
         """x [B,C,H,W], grid [B,Q,P,2] -> [B,Q,P,C]."""
+        if torch.are_deterministic_algorithms_enabled():
+            # CUDA/cuDNN grid sampling uses atomic input-gradient accumulation.
+            # The installed PyTorch decomposition uses deterministic indexed ops.
+            from torch._decomp.decompositions import grid_sampler_2d
+            sampled = grid_sampler_2d(x, grid, 0, 0, True)
+            return sampled.permute(0, 2, 3, 1).contiguous()
         sampled = F.grid_sample(
             x,
             grid,
