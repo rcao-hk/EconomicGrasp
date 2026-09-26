@@ -10,8 +10,8 @@ WORK_ROOT=${WORK_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/rep_p1_action_evide
 IMAGE_CACHE_ROOT=${IMAGE_CACHE_ROOT:-${WORK_ROOT}/image_cache}
 TRAIN_ROOT=${TRAIN_ROOT:-${WORK_ROOT}/train}
 
-VARIANTS=${VARIANTS:-geo_pred,img_point,img_region}
-TRAIN_GPUS=${TRAIN_GPUS:-0,1,2}
+VARIANTS=${VARIANTS:-action_only,geo_pred,img_point,img_region}
+TRAIN_GPUS=${TRAIN_GPUS:-0,1,2,3}
 EPOCHS=${EPOCHS:-20}
 LR=${LR:-1e-4}
 WEIGHT_DECAY=${WEIGHT_DECAY:-1e-4}
