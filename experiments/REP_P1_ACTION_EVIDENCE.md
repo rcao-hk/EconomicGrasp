@@ -264,16 +264,33 @@ pytest -q   tests/test_rep_p0_geometry.py   tests/test_rep_p1_evidence.py
 Use a separate work root:
 
 ```bash
-P0_WORK_ROOT=/data2/robotarm/result/grasp/rgbgrasp/rep_p0_geometry_sources_5mm WORK_ROOT=/data2/robotarm/result/grasp/rgbgrasp/rep_p1_action_evidence_smoke CACHE_GPUS=0 TRAIN_GPUS=0 TEST_GPUS=0 MAX_SAMPLES_PER_SHARD=4 MAX_TRAIN_FRAMES=4 MAX_VAL_FRAMES=4 MAX_FRAMES=4 EPOCHS=1 PHASES=cache,train,test bash scripts/run_rep_p1.sh
+P0_WORK_ROOT=/data2/robotarm/result/grasp/rgbgrasp/rep_p0_geometry_sources_5mm \
+WORK_ROOT=/data2/robotarm/result/grasp/rgbgrasp/rep_p1_action_evidence_smoke \
+CACHE_GPUS=0 \
+TRAIN_GPUS=0 \
+TEST_GPUS=0 \
+MAX_SAMPLES_PER_SHARD=4 \
+MAX_TRAIN_FRAMES=4 \
+MAX_VAL_FRAMES=4 \
+MAX_FRAMES=4 \
+EPOCHS=1 \
+PHASES=cache,train,test \
+bash scripts/run_rep_p1.sh
 ```
 
-For smoke, if all three variants are requested on one GPU they run in waves,
+For smoke, if all four variants are requested on one GPU they run in waves,
 not simultaneously.
 
 ## Formal run
 
 ```bash
-P0_WORK_ROOT=/data2/robotarm/result/grasp/rgbgrasp/rep_p0_geometry_sources_5mm WORK_ROOT=/data2/robotarm/result/grasp/rgbgrasp/rep_p1_action_evidence CACHE_GPUS=0,1,2,3,4,5 TRAIN_GPUS=0,1,2 TEST_GPUS=0,1,2,3,4,5 PHASES=cache,train,test bash scripts/run_rep_p1.sh
+P0_WORK_ROOT=/data2/robotarm/result/grasp/rgbgrasp/rep_p0_geometry_sources_5mm \
+WORK_ROOT=/data2/robotarm/result/grasp/rgbgrasp/rep_p1_action_evidence \
+CACHE_GPUS=0,1,2,3,4,5 \
+TRAIN_GPUS=0,1,2,3 \
+TEST_GPUS=0,1,2,3,4,5 \
+PHASES=cache,train,test \
+bash scripts/run_rep_p1.sh
 ```
 
 To reuse a complete image cache:
@@ -329,7 +346,7 @@ on:
   Novel high-native-score Top-10 rescue-harm balance
 ```
 
-`action_only` is the prior-control and `img_point` is the weak image baseline.  If `img_point` fails but
+`action_only` is the prior-control and `img_point` is the weak image baseline.\nIf `img_point` fails but
 `img_region` succeeds, the conclusion is that sparse point probing is
 insufficient and spatial action regions matter.
 
