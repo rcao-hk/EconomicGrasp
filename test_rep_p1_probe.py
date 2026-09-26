@@ -63,7 +63,8 @@ def score_frame(model, variant, p0, image, device, mean=None, std=None):
         actions = torch.from_numpy(p0["actions"]).to(device)
         logits = model(actions)
         diag = {}
-    elif variant == "geo_pred":\n        K, Q, Fdim = p0["feat_pred"].shape
+    elif variant == "geo_pred":
+        K, Q, Fdim = p0["feat_pred"].shape
         x = torch.from_numpy(
             normalize(p0["feat_pred"], mean, std)
         ).to(device)
