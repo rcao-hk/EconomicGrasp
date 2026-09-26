@@ -177,8 +177,14 @@ PHASES=train,infer,eval \
 bash scripts/run_metric_grasp_field.sh
 ```
 
-This uses DDP for ONE model, not one variant per GPU. There is no gradient
-accumulation: every DataLoader batch produces exactly one optimizer update.
+This uses DDP for ONE model, not one variant per GPU. DDP is intentionally
+constructed with `device_ids=None`: dense tensors are moved explicitly to each
+rank's GPU by `move_batch()`, while variable-length object-level CDF/width/view
+annotation tensors must remain CPU-resident until the online matcher selects the
+needed rows. Using `DDP(device_ids=[local])` here is incorrect because PyTorch
+recursively moves the full nested input structure to CUDA before `forward()`.
+
+There is no gradient accumulation: every DataLoader batch produces exactly one optimizer update.
 Effective batch size is therefore `BATCH_SIZE x number_of_training_GPUs` (default
 `1 x 6 = 6`). Increase only `BATCH_SIZE` if a larger effective batch is desired
 and GPU memory permits it. Learning-rate scaling is not automatic. Each inference
