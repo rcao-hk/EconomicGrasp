@@ -192,6 +192,32 @@ class CounterfactualStepTest(unittest.TestCase):
         with self.assertRaises((ValueError, RuntimeError, KeyError)):
             replay.install_gradients(self.exp.model, self.total, {"not_a_parameter": torch.tensor(1.)})
 
+    def test_repeated_subtraction_matches_retained_loss_with_full_clip(self):
+        # Short rescue uses full-objective clipping but removes only the current
+        # view derivative; old Adam moments must survive across all updates.
+        a = nn.Linear(1, 1, bias=False, dtype=torch.float64)
+        a.weight.data.fill_(0.3)
+        b = copy.deepcopy(a)
+        optimizers = [torch.optim.AdamW(model.parameters(), lr=.01) for model in (a, b)]
+        for step in range(50):
+            full_norm = None
+            for model, optimizer in zip((a, b), optimizers):
+                optimizer.zero_grad(set_to_none=True)
+                retained = (model.weight - .7).square().sum()
+                view = (model.weight + .5).square().sum()
+                if model is a:
+                    target, = torch.autograd.grad(view, [model.weight], retain_graph=True)
+                    (retained + view).backward()
+                    full_norm = model.weight.grad.norm().clone()
+                    captured = {"weight": model.weight.grad.clone()}
+                    replay.install_gradients(model, captured, {"weight": target})
+                else:
+                    retained.backward()
+                replay.apply_clip(model, .1, float((.1 / (full_norm + 1e-6)).clamp(max=1.)))
+                optimizer.step()
+            torch.testing.assert_close(a.weight, b.weight, rtol=1e-12, atol=1e-12)
+        self.assertEqual(int(optimizers[0].state[a.weight]["step"]), 50)
+
     def test_full_restore_after_interrupted_branch(self):
         expected_rng = self.state["rng"]
         try:
