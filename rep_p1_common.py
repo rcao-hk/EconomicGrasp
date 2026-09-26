@@ -5,7 +5,9 @@ actions and exact CAD/DexNet labels mined by Rep-P0, and changes only the
 evidence representation used to predict action quality.
 
 Formal variants:
-  action_only: complete physical action only; controls action/dataset priors.\n  geo_pred   : Rep-P0 predicted-geometry descriptor + MLP.\n  img_point  : 13 action-aligned point samples from the frozen pre-enhancer
+  action_only: complete physical action only; controls action/dataset priors.
+  geo_pred   : Rep-P0 predicted-geometry descriptor + MLP.
+  img_point  : 13 action-aligned point samples from the frozen pre-enhancer
                image feature map.
   img_region : structured finger/closing/palm/approach region samples from the
                same frozen image feature map.
@@ -528,7 +530,11 @@ def build_probe(
     hidden: int = 256,
     dropout: float = 0.1,
 ):
-    if variant == "action_only":\n        return ActionOnlyProbe(hidden, dropout)\n    if variant == "geo_pred":\n        return GeometrySourceProbe(feature_dim, hidden, dropout)\n    if variant == "img_point":
+    if variant == "action_only":
+        return ActionOnlyProbe(hidden, dropout)
+    if variant == "geo_pred":
+        return GeometrySourceProbe(feature_dim, hidden, dropout)
+    if variant == "img_point":
         return ActionPointImageProbe(feature_dim, hidden, dropout)
     if variant == "img_region":
         return ActionRegionImageProbe(feature_dim, hidden, dropout)
