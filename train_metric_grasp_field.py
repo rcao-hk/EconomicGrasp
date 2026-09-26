@@ -267,8 +267,19 @@ def main():
         restore_rng(ck["rng_by_rank"][rank])
         generator.set_state(ck["loader_rng_by_rank"][rank])
         del ck
-    train_model = DDP(model, device_ids=[local], find_unused_parameters=True,
-                      broadcast_buffers=False) if world > 1 else model
+    # IMPORTANT: device_ids=None is intentional. Dense inputs are already moved
+    # to this rank's CUDA device by move_batch(), while variable-length
+    # object-level grasp annotation tensors must remain CPU-resident for
+    # process_grasp_labels_cdf_width(), which transfers only selected rows.
+    # DDP(device_ids=[local]) recursively moves the entire nested input dict to
+    # CUDA before module.forward(), violating that label-matcher contract.
+    train_model = DDP(
+        model,
+        device_ids=None,
+        output_device=None,
+        find_unused_parameters=True,
+        broadcast_buffers=False,
+    ) if world > 1 else model
     total_batches = min(len(loader), args.max_steps) if args.max_steps else len(loader)
     for epoch in range(start, args.epochs):
         model.train()
