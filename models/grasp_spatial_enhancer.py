@@ -916,6 +916,7 @@ class GraspSpatialEnhancer(nn.Module):
         return_maps: bool = False,
         img: Optional[torch.Tensor] = None,
         vis_prefix: Optional[str] = None,
+        capture_depth_grad: bool = False,
         ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         assert feat_2d.dim() == 4, f"feat_2d should be BCHW, got {feat_2d.shape}"
 
@@ -1016,6 +1017,10 @@ class GraspSpatialEnhancer(nn.Module):
             "D: GSE gate_mean": gate.detach().mean(),
             "D: GSE delta_abs": delta.detach().abs().mean(),
         }
+        if capture_depth_grad:
+            # Explicit replay-only observation point after E's stop-gradient.
+            # Do not retain .grad or store the graph on the module instance.
+            aux["depth_grad_gse_input"] = mean_z
 
         if return_maps:
             if prob is not None:

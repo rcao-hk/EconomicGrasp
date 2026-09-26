@@ -1,0 +1,126 @@
+{
+  "status": "all_files_verified",
+  "utc": "2026-09-26T02:40:40.538803+00:00",
+  "files": [
+    {
+      "arm": "E_only",
+      "file": "step_000000.pt",
+      "sha256": "671c593ab08dce94133790dc8587966cdd164b5ee038719a5cf1f538632529fb",
+      "bytes": 463731224,
+      "original": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/E_only/checkpoints/step_000000.pt",
+      "archive": "/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/E_only_checkpoints/step_000000.pt",
+      "archive_host": "hkclrgpuf04",
+      "verified_sha256": "671c593ab08dce94133790dc8587966cdd164b5ee038719a5cf1f538632529fb"
+    },
+    {
+      "arm": "E_only",
+      "file": "step_000100.pt",
+      "sha256": "cb4309727ef131c60526f21960f49186e1ea7705c47ece00b73fd29c35675d09",
+      "bytes": 685696136,
+      "original": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/E_only/checkpoints/step_000100.pt",
+      "archive": "/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/E_only_checkpoints/step_000100.pt",
+      "archive_host": "hkclrgpuf04",
+      "verified_sha256": "cb4309727ef131c60526f21960f49186e1ea7705c47ece00b73fd29c35675d09"
+    },
+    {
+      "arm": "E_only",
+      "file": "step_000200.pt",
+      "sha256": "0c309bf10cf277af5391c08c5f32f7d6d4774ceec093540af2de20570b16712e",
+      "bytes": 685696136,
+      "original": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/E_only/checkpoints/step_000200.pt",
+      "archive": "/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/E_only_checkpoints/step_000200.pt",
+      "archive_host": "hkclrgpuf04",
+      "verified_sha256": "0c309bf10cf277af5391c08c5f32f7d6d4774ceec093540af2de20570b16712e"
+    },
+    {
+      "arm": "E_only",
+      "file": "step_000300.pt",
+      "sha256": "1caf063a11775889e19de6b5137201b02f339909ca9c29f14db004a41c5417bc",
+      "bytes": 685696136,
+      "original": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/E_only/checkpoints/step_000300.pt",
+      "archive": "/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/E_only_checkpoints/step_000300.pt",
+      "archive_host": "hkclrgpuf04",
+      "verified_sha256": "1caf063a11775889e19de6b5137201b02f339909ca9c29f14db004a41c5417bc"
+    },
+    {
+      "arm": "E_only",
+      "file": "step_000400.pt",
+      "sha256": "9543036bbf5fa225525af058662bc5cc2c6cd25b3ff2acf381e9a4a7b9f7f01d",
+      "bytes": 685696136,
+      "original": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/E_only/checkpoints/step_000400.pt",
+      "archive": "/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/E_only_checkpoints/step_000400.pt",
+      "archive_host": "hkclrgpuf04",
+      "verified_sha256": "9543036bbf5fa225525af058662bc5cc2c6cd25b3ff2acf381e9a4a7b9f7f01d"
+    },
+    {
+      "arm": "E_only",
+      "file": "step_000500.pt",
+      "sha256": "dcbe99fd1df945210ce53b291f341da44384928cee0fce7026e16b321795f0f0",
+      "bytes": 685696136,
+      "original": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/E_only/checkpoints/step_000500.pt",
+      "archive": "/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/E_only_checkpoints/step_000500.pt",
+      "archive_host": "hkclrgpuf04",
+      "verified_sha256": "dcbe99fd1df945210ce53b291f341da44384928cee0fce7026e16b321795f0f0"
+    },
+    {
+      "arm": "Q_only",
+      "file": "step_000000.pt",
+      "sha256": "b59302d4b4106b79d1d212708aff78d7488f083970bb4c5161d0d0d2673550b5",
+      "bytes": 463731224,
+      "original": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/Q_only/checkpoints/step_000000.pt",
+      "archive": "/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/Q_only_checkpoints/step_000000.pt",
+      "archive_host": "hkclrgpuf04",
+      "verified_sha256": "b59302d4b4106b79d1d212708aff78d7488f083970bb4c5161d0d0d2673550b5"
+    },
+    {
+      "arm": "Q_only",
+      "file": "step_000100.pt",
+      "sha256": "1f44d9f1381228fdc463c1110048504c5701a27c7d47805057d74cf6da1b53ac",
+      "bytes": 685696136,
+      "original": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/Q_only/checkpoints/step_000100.pt",
+      "archive": "/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/Q_only_checkpoints/step_000100.pt",
+      "archive_host": "hkclrgpuf04",
+      "verified_sha256": "1f44d9f1381228fdc463c1110048504c5701a27c7d47805057d74cf6da1b53ac"
+    },
+    {
+      "arm": "Q_only",
+      "file": "step_000200.pt",
+      "sha256": "12388bcb1b0cb5210fa194ec69d0031f0d76bf1ebd23e72654d577ead4b535a1",
+      "bytes": 685696136,
+      "original": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/Q_only/checkpoints/step_000200.pt",
+      "archive": "/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/Q_only_checkpoints/step_000200.pt",
+      "archive_host": "hkclrgpuf04",
+      "verified_sha256": "12388bcb1b0cb5210fa194ec69d0031f0d76bf1ebd23e72654d577ead4b535a1"
+    },
+    {
+      "arm": "Q_only",
+      "file": "step_000300.pt",
+      "sha256": "5502632fd7b8ae733940cedd8f07477f55d0e906b5c81f4c0d0bb980578c78a3",
+      "bytes": 685696136,
+      "original": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/Q_only/checkpoints/step_000300.pt",
+      "archive": "/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/Q_only_checkpoints/step_000300.pt",
+      "archive_host": "hkclrgpuf04",
+      "verified_sha256": "5502632fd7b8ae733940cedd8f07477f55d0e906b5c81f4c0d0bb980578c78a3"
+    },
+    {
+      "arm": "Q_only",
+      "file": "step_000400.pt",
+      "sha256": "5c0152deed6ffeec921a30bee5407cde7c7a446ced30b47caf6e6ea2fcddd9a1",
+      "bytes": 685696136,
+      "original": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/Q_only/checkpoints/step_000400.pt",
+      "archive": "/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/Q_only_checkpoints/step_000400.pt",
+      "archive_host": "hkclrgpuf04",
+      "verified_sha256": "5c0152deed6ffeec921a30bee5407cde7c7a446ced30b47caf6e6ea2fcddd9a1"
+    },
+    {
+      "arm": "Q_only",
+      "file": "step_000500.pt",
+      "sha256": "06f16c94bb85dc944a147ec47c0682423ae26ae50a832ab4718d430c8bcd608c",
+      "bytes": 685696136,
+      "original": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/Q_only/checkpoints/step_000500.pt",
+      "archive": "/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/Q_only_checkpoints/step_000500.pt",
+      "archive_host": "hkclrgpuf04",
+      "verified_sha256": "06f16c94bb85dc944a147ec47c0682423ae26ae50a832ab4718d430c8bcd608c"
+    }
+  ]
+}

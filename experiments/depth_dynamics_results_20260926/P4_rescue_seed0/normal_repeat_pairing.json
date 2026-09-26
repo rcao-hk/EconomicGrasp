@@ -1,0 +1,58 @@
+{
+  "checks": {
+    "both_100_updates": true,
+    "same_initial_state": true,
+    "all_batch_hashes_equal": true,
+    "all_loader_states_equal": true
+  },
+  "states": [
+    {
+      "source": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_rescue_view_seed0/normal/diagnostics",
+      "step": 400,
+      "validation_mae_m": 0.009332819594419561,
+      "foreground_mae_m": 0.02023278083652258,
+      "local_slope": 0.4464796461181229,
+      "probe_sha256": "5f149dfa8b8f2abde430b6da2539a5d9b2902d9a1e5a635fc9602d9b106879f6"
+    },
+    {
+      "source": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_rescue_view_seed0/normal/diagnostics",
+      "step": 450,
+      "validation_mae_m": 0.011570202856091782,
+      "foreground_mae_m": 0.019997037743451074,
+      "local_slope": 0.6804126354975966,
+      "probe_sha256": "5f149dfa8b8f2abde430b6da2539a5d9b2902d9a1e5a635fc9602d9b106879f6"
+    },
+    {
+      "source": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_rescue_view_seed0/normal/diagnostics",
+      "step": 500,
+      "validation_mae_m": 0.013546466449042782,
+      "foreground_mae_m": 0.026639699994120747,
+      "local_slope": 0.2413932245192192,
+      "probe_sha256": "5f149dfa8b8f2abde430b6da2539a5d9b2902d9a1e5a635fc9602d9b106879f6"
+    },
+    {
+      "source": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_rescue_repeat_seed0/normal/diagnostics",
+      "step": 400,
+      "validation_mae_m": 0.009332819594419561,
+      "foreground_mae_m": 0.02023278083652258,
+      "local_slope": 0.4464796461181229,
+      "probe_sha256": "f24f5e5ea18f6a03b98055e38124d741228eab93293bf9f42af31b70cb6e9f10"
+    },
+    {
+      "source": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_rescue_repeat_seed0/normal/diagnostics",
+      "step": 450,
+      "validation_mae_m": 0.01124620770860929,
+      "foreground_mae_m": 0.020523480809060857,
+      "local_slope": 0.7026192723151871,
+      "probe_sha256": "f24f5e5ea18f6a03b98055e38124d741228eab93293bf9f42af31b70cb6e9f10"
+    },
+    {
+      "source": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_rescue_repeat_seed0/normal/diagnostics",
+      "step": 500,
+      "validation_mae_m": 0.016135053301695734,
+      "foreground_mae_m": 0.025296400126535445,
+      "local_slope": 0.35849025295465364,
+      "probe_sha256": "f24f5e5ea18f6a03b98055e38124d741228eab93293bf9f42af31b70cb6e9f10"
+    }
+  ]
+}

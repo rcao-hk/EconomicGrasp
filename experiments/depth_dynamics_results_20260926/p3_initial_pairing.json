@@ -1,0 +1,23 @@
+{
+  "source_initial_arm": "D0",
+  "arms": {
+    "D1": {
+      "model_state_dict": true,
+      "optimizer_state_dict": true,
+      "rng": true,
+      "loader": true
+    },
+    "E_only": {
+      "model_state_dict": true,
+      "optimizer_state_dict": true,
+      "rng": true,
+      "loader": true
+    },
+    "Q_only": {
+      "model_state_dict": true,
+      "optimizer_state_dict": true,
+      "rng": true,
+      "loader": true
+    }
+  }
+}

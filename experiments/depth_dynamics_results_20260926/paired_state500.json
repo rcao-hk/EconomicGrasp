@@ -1,0 +1,47 @@
+{
+  "step": 500,
+  "experiment_head": "aa4ffd20ee52f0a60f776c1c3b90d048ef7fa216",
+  "arms": {
+    "D0": {
+      "checkpoint": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/D0/checkpoints/step_000500.pt",
+      "sha256": "38ff6f13b7027a180b18503c3c8b97b4f6b2fae846b7b745064b46e2c01d8362",
+      "seen_images": 500,
+      "events": {
+        "initial_flat": false,
+        "first_anomaly": null,
+        "first_threshold": null,
+        "confirmed_event": null,
+        "consecutive_thresholds": 0
+      },
+      "validation_frames": 32,
+      "validation_MAE_mm": 4.000971530331299,
+      "fg_std_ratio": 0.982643976538272,
+      "local_slope": 0.6217447124579931,
+      "local_contrast": 0.9858029226981928
+    },
+    "D1": {
+      "checkpoint": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/D1/checkpoints/step_000500.pt",
+      "sha256": "d910f8f675d7d4adb371877d83c342ea23fac68a02d8ae43c895eb3826f765e9",
+      "seen_images": 500,
+      "events": {
+        "initial_flat": false,
+        "first_anomaly": null,
+        "first_threshold": null,
+        "confirmed_event": null,
+        "consecutive_thresholds": 0
+      },
+      "validation_frames": 32,
+      "validation_MAE_mm": 34.80600379407406,
+      "fg_std_ratio": 1.3776723309798498,
+      "local_slope": -0.7135201526616624,
+      "local_contrast": 2.379390014289824
+    }
+  },
+  "paired_state_exact": {
+    "rng": true,
+    "loader": true,
+    "module_training": true,
+    "is_training": true
+  },
+  "recorded_steps_and_sample_indices_exact": true
+}

@@ -1,0 +1,134 @@
+[
+  {
+    "path": "D:\\Research\\Paper\\RGB-Only Grasp\\results\\cva_depth_dynamics_20260926\\counterfactual_step200.json",
+    "sha256": "337190874028d6a33a2c5ce6ac0afa969476ec67e3d62570d7ff62b55b019ae0",
+    "source_checkpoint": {
+      "init_sha256": "0cb8cd54bd5eef44a81c8d8de6969003377224d41a84b2002ba662bb8ce0c69c",
+      "path": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/D1/geometry_review_at_500/step_000200.pt",
+      "seen_images": 200,
+      "sha256": "2a0edadcf87fb387028050e36d91bb9821bcd8ff3454cc66e1559ae231d12208",
+      "step": 200,
+      "stored_git": null
+    },
+    "git": {
+      "branch": "",
+      "head": "1c397a1b2aabbd051b6db388992e143b75fcda82",
+      "status": "?? checkpoints",
+      "tracked_diff": "",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "executed_source_sha256": {
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/dataset/cdf_label_adapter.py": "e2aeeb158c08753de606bb5f4121a58b2f10a62f0c205a3fcf5329783e4276a1",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/depth_dynamics.py": "88201a1b903f57c6927da26e2426872b1733c609f7c34d0762447deb79e894b9",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/models/economicgrasp_bip3d.py": "5bafe1a72b205789fbc7c9a195175d9f6a0f4295f3bec15496a1493afe92a70d",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/models/economicgrasp_depth.py": "acbd101dbe8bba7529b65b6a3b86f47323fb0f173d22c6c84d38b9afeefd20fc",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/models/economicgrasp_dpt_distill.py": "5a17b6bc8ce7fc5cc3929ea8ecdf64208210a03577565f63db6302651faa9b77",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/models/grasp_spatial_enhancer.py": "647ef11d730cfa11dae8e5bd9186b343a45348a4b919e63663959bc99240dd83",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/models/kview_query_transformer.py": "b9145fec50e6fc3c5513541902d045fe2df7bf7c6b664b23053d299f7dce091f",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/replay_cva_depth_counterfactual.py": "7d01ce01fd7934d09ce77f15cd6401b7883ff227a076195ca1fdd047e5a05184",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/train_cva_depth_dynamics.py": "91cfbf7d6201181441452b9893af8613042d97022b53346634f8836015a53d62",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/utils/label_generation.py": "1648f7da2b7a3aacc2fcd4e94e1acf9114a3e94bee7072b16f83e8cf3533e993"
+    },
+    "controls": {
+      "normal_repeat_exact_state_match": true,
+      "identical_pre_update_state_all_branches": true,
+      "fixed_clip_non_depth_updates_exactly_match_normal": true,
+      "source_state_unmodified": true,
+      "restored_checkpoint_model_exact": true,
+      "restored_checkpoint_optimizer_exact": true,
+      "restored_checkpoint_rng_exact": true,
+      "restored_loader_exact": true,
+      "restored_runtime_exact": true,
+      "restored_routes_exact": true,
+      "cleared_parameter_gradients": true
+    }
+  },
+  {
+    "path": "D:\\Research\\Paper\\RGB-Only Grasp\\results\\cva_depth_dynamics_20260926\\counterfactual_step300.json",
+    "sha256": "2e54777ce9e47c56ec7979a7b2ffae482d068278097e5e5a9532dc1572b6b61a",
+    "source_checkpoint": {
+      "init_sha256": "0cb8cd54bd5eef44a81c8d8de6969003377224d41a84b2002ba662bb8ce0c69c",
+      "path": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/D1/geometry_review_at_500/step_000300.pt",
+      "seen_images": 300,
+      "sha256": "ae2eb6bd09bbcc6bed55dbea8e124433660ef3d288358af9226418814ee2294c",
+      "step": 300,
+      "stored_git": null
+    },
+    "git": {
+      "branch": "",
+      "head": "1c397a1b2aabbd051b6db388992e143b75fcda82",
+      "status": "?? checkpoints",
+      "tracked_diff": "",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "executed_source_sha256": {
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/dataset/cdf_label_adapter.py": "e2aeeb158c08753de606bb5f4121a58b2f10a62f0c205a3fcf5329783e4276a1",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/depth_dynamics.py": "88201a1b903f57c6927da26e2426872b1733c609f7c34d0762447deb79e894b9",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/models/economicgrasp_bip3d.py": "5bafe1a72b205789fbc7c9a195175d9f6a0f4295f3bec15496a1493afe92a70d",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/models/economicgrasp_depth.py": "acbd101dbe8bba7529b65b6a3b86f47323fb0f173d22c6c84d38b9afeefd20fc",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/models/economicgrasp_dpt_distill.py": "5a17b6bc8ce7fc5cc3929ea8ecdf64208210a03577565f63db6302651faa9b77",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/models/grasp_spatial_enhancer.py": "647ef11d730cfa11dae8e5bd9186b343a45348a4b919e63663959bc99240dd83",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/models/kview_query_transformer.py": "b9145fec50e6fc3c5513541902d045fe2df7bf7c6b664b23053d299f7dce091f",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/replay_cva_depth_counterfactual.py": "7d01ce01fd7934d09ce77f15cd6401b7883ff227a076195ca1fdd047e5a05184",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/train_cva_depth_dynamics.py": "91cfbf7d6201181441452b9893af8613042d97022b53346634f8836015a53d62",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/utils/label_generation.py": "1648f7da2b7a3aacc2fcd4e94e1acf9114a3e94bee7072b16f83e8cf3533e993"
+    },
+    "controls": {
+      "normal_repeat_exact_state_match": true,
+      "identical_pre_update_state_all_branches": true,
+      "fixed_clip_non_depth_updates_exactly_match_normal": true,
+      "source_state_unmodified": true,
+      "restored_checkpoint_model_exact": true,
+      "restored_checkpoint_optimizer_exact": true,
+      "restored_checkpoint_rng_exact": true,
+      "restored_loader_exact": true,
+      "restored_runtime_exact": true,
+      "restored_routes_exact": true,
+      "cleared_parameter_gradients": true
+    }
+  },
+  {
+    "path": "D:\\Research\\Paper\\RGB-Only Grasp\\results\\cva_depth_dynamics_20260926\\counterfactual_step400.json",
+    "sha256": "4594623eafa26c905ba58fa01f168bbbd07f3b0473c77407d2a635cae6ef4d0d",
+    "source_checkpoint": {
+      "init_sha256": "0cb8cd54bd5eef44a81c8d8de6969003377224d41a84b2002ba662bb8ce0c69c",
+      "path": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/D1/geometry_review_at_500/step_000400.pt",
+      "seen_images": 400,
+      "sha256": "98915c4a3cfb29bc597e50992dbcce5357dea259c301d0b1f365b12ed8e6c278",
+      "step": 400,
+      "stored_git": null
+    },
+    "git": {
+      "branch": "",
+      "head": "1c397a1b2aabbd051b6db388992e143b75fcda82",
+      "status": "?? checkpoints",
+      "tracked_diff": "",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "executed_source_sha256": {
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/dataset/cdf_label_adapter.py": "e2aeeb158c08753de606bb5f4121a58b2f10a62f0c205a3fcf5329783e4276a1",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/depth_dynamics.py": "88201a1b903f57c6927da26e2426872b1733c609f7c34d0762447deb79e894b9",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/models/economicgrasp_bip3d.py": "5bafe1a72b205789fbc7c9a195175d9f6a0f4295f3bec15496a1493afe92a70d",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/models/economicgrasp_depth.py": "acbd101dbe8bba7529b65b6a3b86f47323fb0f173d22c6c84d38b9afeefd20fc",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/models/economicgrasp_dpt_distill.py": "5a17b6bc8ce7fc5cc3929ea8ecdf64208210a03577565f63db6302651faa9b77",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/models/grasp_spatial_enhancer.py": "647ef11d730cfa11dae8e5bd9186b343a45348a4b919e63663959bc99240dd83",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/models/kview_query_transformer.py": "b9145fec50e6fc3c5513541902d045fe2df7bf7c6b664b23053d299f7dce091f",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/replay_cva_depth_counterfactual.py": "7d01ce01fd7934d09ce77f15cd6401b7883ff227a076195ca1fdd047e5a05184",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/train_cva_depth_dynamics.py": "91cfbf7d6201181441452b9893af8613042d97022b53346634f8836015a53d62",
+      "/home/robotarm/EconomicGrasp-depth-loadercheck/utils/label_generation.py": "1648f7da2b7a3aacc2fcd4e94e1acf9114a3e94bee7072b16f83e8cf3533e993"
+    },
+    "controls": {
+      "normal_repeat_exact_state_match": true,
+      "identical_pre_update_state_all_branches": true,
+      "fixed_clip_non_depth_updates_exactly_match_normal": true,
+      "source_state_unmodified": true,
+      "restored_checkpoint_model_exact": true,
+      "restored_checkpoint_optimizer_exact": true,
+      "restored_checkpoint_rng_exact": true,
+      "restored_loader_exact": true,
+      "restored_runtime_exact": true,
+      "restored_routes_exact": true,
+      "cleared_parameter_gradients": true
+    }
+  }
+]

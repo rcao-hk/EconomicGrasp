@@ -1,0 +1,75 @@
+{
+  "relocated": [
+    {
+      "arm": "D0",
+      "file": "step_000100.pt",
+      "sha256": "f5906c67ddc29de3be7cd34ef788120ffef548ac0a9a489ffd1537b5785d9dc2",
+      "bytes": 685696264,
+      "original": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/D0/geometry_review_at_500/step_000100.pt",
+      "archive": "/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/D0_geometry_review_at_500/step_000100.pt",
+      "archive_host": "10.30.7.119",
+      "verified_sha256": "f5906c67ddc29de3be7cd34ef788120ffef548ac0a9a489ffd1537b5785d9dc2"
+    },
+    {
+      "arm": "D0",
+      "file": "step_000200.pt",
+      "sha256": "8c812d653b1cc94e710658f36f5cda6ec9e4a5449e4333f9a2dedd5ae9eaf95a",
+      "bytes": 685696264,
+      "original": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/D0/geometry_review_at_500/step_000200.pt",
+      "archive": "/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/D0_geometry_review_at_500/step_000200.pt",
+      "archive_host": "10.30.7.119",
+      "verified_sha256": "8c812d653b1cc94e710658f36f5cda6ec9e4a5449e4333f9a2dedd5ae9eaf95a"
+    },
+    {
+      "arm": "D0",
+      "file": "step_000300.pt",
+      "sha256": "12e3e43eea071048c7758c6ce42192c8f303cf79969f07858a71546dd55d4eb5",
+      "bytes": 685696264,
+      "original": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/D0/geometry_review_at_500/step_000300.pt",
+      "archive": "/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/D0_geometry_review_at_500/step_000300.pt",
+      "archive_host": "10.30.7.119",
+      "verified_sha256": "12e3e43eea071048c7758c6ce42192c8f303cf79969f07858a71546dd55d4eb5"
+    },
+    {
+      "arm": "D0",
+      "file": "step_000400.pt",
+      "sha256": "2d44462dee03217d745262b08bb3a40e498fe671cf814aa9d36e0619cef14760",
+      "bytes": 685696264,
+      "original": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/D0/geometry_review_at_500/step_000400.pt",
+      "archive": "/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/D0_geometry_review_at_500/step_000400.pt",
+      "archive_host": "10.30.7.119",
+      "verified_sha256": "2d44462dee03217d745262b08bb3a40e498fe671cf814aa9d36e0619cef14760"
+    },
+    {
+      "arm": "D1",
+      "file": "step_000100.pt",
+      "sha256": "2a13da639a8a877aa1158b39bb72209a2f8c278da047037ec9cb6a1645fdec3d",
+      "bytes": 685696264,
+      "original": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/D1/geometry_review_at_500/step_000100.pt",
+      "archive": "/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/D1_geometry_review_at_500/step_000100.pt",
+      "archive_host": "10.30.7.119",
+      "verified_sha256": "2a13da639a8a877aa1158b39bb72209a2f8c278da047037ec9cb6a1645fdec3d"
+    },
+    {
+      "arm": "D1",
+      "file": "step_000200.pt",
+      "sha256": "2a0edadcf87fb387028050e36d91bb9821bcd8ff3454cc66e1559ae231d12208",
+      "bytes": 685696264,
+      "original": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/D1/geometry_review_at_500/step_000200.pt",
+      "archive": "/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/D1_geometry_review_at_500/step_000200.pt",
+      "archive_host": "10.30.7.119",
+      "verified_sha256": "2a0edadcf87fb387028050e36d91bb9821bcd8ff3454cc66e1559ae231d12208"
+    },
+    {
+      "arm": "D1",
+      "file": "step_000300.pt",
+      "sha256": "ae2eb6bd09bbcc6bed55dbea8e124433660ef3d288358af9226418814ee2294c",
+      "bytes": 685696264,
+      "original": "/data/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics/20260926_stage1_calibrated_seed0/D1/geometry_review_at_500/step_000300.pt",
+      "archive": "/data2/robotarm/result/grasp/rgbgrasp/log/cva_depth_dynamics_archive_20260926/D1_geometry_review_at_500/step_000300.pt",
+      "archive_host": "10.30.7.119",
+      "verified_sha256": "ae2eb6bd09bbcc6bed55dbea8e124433660ef3d288358af9226418814ee2294c"
+    }
+  ],
+  "D1_step400_retained_for_replay": true
+}

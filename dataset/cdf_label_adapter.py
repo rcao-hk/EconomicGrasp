@@ -132,9 +132,13 @@ class CVAExtendedLabelAdapter(Dataset):
             else self._LEGACY_KEYS
         )
         with np.load(path, allow_pickle=False) as labels:
+            # Older NumPy NpzFile inherits Mapping.__contains__, which reads
+            # and decompresses the complete array for ``key in labels``.
+            # Presence is an archive-metadata check; actual reads stay below.
+            available_keys = set(labels.files)
             missing = [
                 key for key in required
-                if key not in labels
+                if key not in available_keys
             ]
             if missing:
                 mode = (
@@ -356,9 +360,10 @@ class CVAExtendedLabelAdapter(Dataset):
             else self._LEGACY_KEYS
         )
         with np.load(path, allow_pickle=False) as labels:
+            available_keys = set(labels.files)
             missing = [
                 key for key in required
-                if key not in labels
+                if key not in available_keys
             ]
             if missing:
                 mode = "CDF" if self.use_cdf else "legacy explicit-angle"

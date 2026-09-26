@@ -1,0 +1,14 @@
+[
+  {
+    "source": "/data/robotarm/result/grasp/rgbgrasp/experiment/cva_depth_dynamics/20260926_stage1_calibrated_seed0/diagnostics/D0/fixed_probe.jsonl",
+    "selection": "step<=500",
+    "canonical_selected_rows_sha256": "d72b851bd94ce101dcdfd874a6e92abd4197d6b39368603ad22cf42fd2897a62",
+    "record_count": 672
+  },
+  {
+    "source": "/data/robotarm/result/grasp/rgbgrasp/experiment/cva_depth_dynamics/20260926_stage1_calibrated_seed0/diagnostics/D1/fixed_probe.jsonl",
+    "selection": "step<=500",
+    "canonical_selected_rows_sha256": "5c630878ba7d2c6ce5d69306404df68059996cb670445dbdcb593ee9de120dce",
+    "record_count": 672
+  }
+]
