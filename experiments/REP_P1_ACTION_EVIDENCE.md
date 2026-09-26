@@ -346,7 +346,8 @@ on:
   Novel high-native-score Top-10 rescue-harm balance
 ```
 
-`action_only` is the prior-control and `img_point` is the weak image baseline.\nIf `img_point` fails but
+`action_only` is the prior-control and `img_point` is the weak image baseline.
+If `img_point` fails but
 `img_region` succeeds, the conclusion is that sparse point probing is
 insufficient and spatial action regions matter.
 
