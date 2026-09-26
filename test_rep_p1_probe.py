@@ -91,8 +91,7 @@ def write_csv(path: Path, rows):
 def main():
     args = parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    ckpt = torch.load(args.checkpoint, map_location=device)
-    if ckpt.get("version") != REP_P1_VERSION:
+    # Keep optimizer/checkpoint payload on host memory; only model weights are copied to GPU.\n    ckpt = torch.load(args.checkpoint, map_location="cpu")\n    if ckpt.get("version") != REP_P1_VERSION:
         raise RuntimeError(
             f"Unsupported Rep-P1 checkpoint version {ckpt.get('version')!r}"
         )
