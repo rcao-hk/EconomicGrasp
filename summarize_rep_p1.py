@@ -13,7 +13,8 @@ def parse_args():
     p.add_argument("--test_root", required=True)
     p.add_argument("--output_dir", required=True)
     p.add_argument(
-        "--variants", default="action_only,geo_pred,img_point,img_region"\n    )
+        "--variants", default="action_only,geo_pred,img_point,img_region"
+    )
     p.add_argument("--splits", default="test_similar,test_novel")
     p.add_argument("--alignment_tol", type=float, default=1e-7)
     return p.parse_args()
