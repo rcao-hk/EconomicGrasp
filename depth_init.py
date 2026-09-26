@@ -15,8 +15,9 @@ ARCHITECTURE_KEYS = (
 
 
 def assert_resume_settings(state, args):
-    for key, default in (("init_mode", "warm"), ("depth_gradient_policy", "normal"), ("probe_schedule", "legacy")):
-        if state["arguments"].get(key, default) != getattr(args, key):
+    for key, default in (("init_mode", "warm"), ("depth_gradient_policy", "normal"), ("probe_schedule", "legacy"),
+                         ("deterministic_ops", False)):
+        if state["arguments"].get(key, default) != getattr(args, key, default):
             raise ValueError(f"Resume diagnostic setting mismatch: {key}")
 
 

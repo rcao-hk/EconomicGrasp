@@ -52,6 +52,8 @@ def parse_args(argv=None):
     parser.add_argument("--early_recipe", default="", help="JSON source SHA256, description and explicit include_prefixes.")
     parser.add_argument("--depth_gradient_policy", choices=("normal", "remove_view_reclip", "view_noop"), default="normal")
     parser.add_argument("--probe_schedule", choices=("legacy", "cold"), default="legacy")
+    parser.add_argument("--deterministic_ops", action="store_true",
+                        help="Prefer deterministic PyTorch kernels; warn for unsupported CUDA/custom operations.")
     parser.add_argument("--output", required=True, help="One NEW arm directory, or existing directory with --resume_checkpoint.")
     parser.add_argument("--diagnostics_dir", help="Arm-specific diagnostic directory; default OUTPUT/diagnostics.")
     parser.add_argument("--arm", default="D0")
@@ -559,6 +561,8 @@ class Experiment:
                 "cudnn_benchmark": torch.backends.cudnn.benchmark,
                 "tf32_matmul": torch.backends.cuda.matmul.allow_tf32, "amp": False,
                 "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+                "deterministic_warn_only": torch.is_deterministic_algorithms_warn_only_enabled(),
+                "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
                 "custom_cuda_backward_bitwise_determinism": "not guaranteed; measured replay tolerance recorded"},
             "model": {"class": type(self.model).__qualname__, "file": inspect.getfile(type(self.model)),
                       "pose_depth_mode": self.model.pose_depth_mode, "routes": self.model.get_depth_grad_routes()},
@@ -934,6 +938,7 @@ class Experiment:
             config = {key: value for key, value in vars(self.cfg).items() if key not in ("log_dir",)}
             gate = {"passed": False, "route_checks_passed": self.contract["p0_passed"],
                     "replay_policy": self.args.replay_policy,
+                    "deterministic_ops": self.args.deterministic_ops,
                     "diagnostic_noninterference_passed": None, "init_sha256": self.init_sha,
                     "resolved_config_sha256": hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest(),
                     "git_head": self.contract["git"]["head"],
@@ -1478,6 +1483,8 @@ def main(argv=None):
     global torch, np, dd, ORIGINAL_COMMAND
     ORIGINAL_COMMAND = [sys.executable, *sys.argv]
     args, remaining = parse_args(argv)
+    if args.deterministic_ops:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     import torch
     import numpy as np
     import depth_dynamics as dd
@@ -1485,6 +1492,8 @@ def main(argv=None):
     torch.backends.cudnn.benchmark = False
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
+    if args.deterministic_ops:
+        torch.use_deterministic_algorithms(True, warn_only=True)
     if not torch.cuda.is_available():
         raise RuntimeError("Actual CVA diagnostics require the project CUDA/custom-op environment")
     experiment = None
@@ -1500,6 +1509,8 @@ def main(argv=None):
                 raise ValueError("Audit contract must have passed P0 on exactly this initialization")
             if prior.get("replay_policy", "strict") != args.replay_policy:
                 raise ValueError("Audit and training replay acceptance policies differ")
+            if prior.get("deterministic_ops", False) != args.deterministic_ops:
+                raise ValueError("Audit and training deterministic operator policies differ")
             if prior["git_head"] != experiment.contract["git"]["head"]:
                 raise ValueError("Audit and training code HEAD differ")
             if prior["tracked_diff_sha256"] != experiment.contract["git"]["tracked_diff_sha256"]:
