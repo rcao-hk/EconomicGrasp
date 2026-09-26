@@ -85,3 +85,12 @@ def test_candidate_latent_response_writes_png(tmp_path):
         path, latent, offsets, score, zero_index=1, max_queries=4)
     assert path.is_file()
     assert path.stat().st_size > 0
+
+
+def test_merge_cli_runs_as_module():
+    root = Path(__file__).resolve().parents[1]
+    p = subprocess.run(
+        [sys.executable, "-m", "tools.merge_grasp_behavior_viz", "--help"],
+        cwd=root, capture_output=True, text=True)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "--root" in p.stdout
