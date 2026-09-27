@@ -168,18 +168,20 @@ def make_dataset(root, split, fraction, *, labels, max_frames=0):
     )
     if labels:
         from dataset.cdf_label_adapter import CVAExtendedLabelAdapter
+        from utils.arguments import cfgs
         dataset = CVAExtendedLabelAdapter(
             base,
             dataset_root=root,
             use_cdf=True,
             label_folder=str(
-                BASE_CONFIG.get(
+                getattr(
+                    cfgs,
                     "cdf_label_folder",
                     "economic_grasp_label_300views_extend_angle_cdf_depth",
                 )
             ),
-            num_angle=int(BASE_CONFIG["num_angle"]),
-            num_depth=int(BASE_CONFIG["num_depth"]),
+            num_angle=int(cfgs.num_angle),
+            num_depth=int(cfgs.num_depth),
         )
     else:
         dataset = base
