@@ -60,7 +60,7 @@ def parser():
     p.add_argument(
         "--ranking-weight",
         type=float,
-        default=1.0,
+        default=0.1,
         help=(
             "Weight of the within-query listwise A x D ranking loss. "
             "The original unbalanced CDF BCE remains active for calibration."
