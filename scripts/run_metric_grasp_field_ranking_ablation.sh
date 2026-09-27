@@ -3,7 +3,10 @@
 #   A) no ranking loss       RANKING_WEIGHT=0
 #   B) query-listwise rank   RANKING_WEIGHT=0.1 (configurable)
 #
-# Both runs are sequential on the SAME GPUs and differ only in ranking weight.
+# Runs execute concurrently on disjoint 3-GPU sets:
+#   no-ranking -> GPUs 0,1,2
+#   ranking    -> GPUs 3,5,6
+# They otherwise differ only in ranking weight.
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,9 +16,11 @@ PYTHON_BIN=${PYTHON_BIN:-python}
 DATASET_ROOT=${DATASET_ROOT:-/data/robotarm/dataset/graspnet}
 ABLATION_ROOT=${ABLATION_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/dav2_mgf_ranking_ablation_10pct}
 
-# Fair-comparison defaults: match the user's current 4-GPU setup.
-GPUS=${GPUS:-0,1,2,3}
-INFER_GPUS=${INFER_GPUS:-$GPUS}
+# Fair-comparison defaults: two disjoint 3-GPU jobs in parallel.
+NO_RANK_GPUS=${NO_RANK_GPUS:-0,1,2}
+RANK_GPUS=${RANK_GPUS:-3,5,6}
+NO_RANK_INFER_GPUS=${NO_RANK_INFER_GPUS:-$NO_RANK_GPUS}
+RANK_INFER_GPUS=${RANK_INFER_GPUS:-$RANK_GPUS}
 BATCH_SIZE=${BATCH_SIZE:-3}
 EPOCHS=${EPOCHS:-20}
 SEED=${SEED:-42}
@@ -68,17 +73,40 @@ if [[ "$EPOCHS" != "20" ]]; then
   echo "[WARN] EPOCHS=$EPOCHS; intended formal ablation is 20" >&2
 fi
 
-IFS=',' read -r -a GPU_IDS <<< "$GPUS"
-if [[ "${#GPU_IDS[@]}" -ne 4 ]]; then
-  echo "[WARN] GPUS=$GPUS gives ${#GPU_IDS[@]} GPUs; intended comparison is 4 GPUs." >&2
+IFS=',' read -r -a NO_RANK_GPU_IDS <<< "$NO_RANK_GPUS"
+IFS=',' read -r -a RANK_GPU_IDS <<< "$RANK_GPUS"
+
+if [[ "${#NO_RANK_GPU_IDS[@]}" -ne 3 ]]; then
+  echo "[ERROR] NO_RANK_GPUS must contain exactly 3 GPU ids; got $NO_RANK_GPUS" >&2
+  exit 2
 fi
+if [[ "${#RANK_GPU_IDS[@]}" -ne 3 ]]; then
+  echo "[ERROR] RANK_GPUS must contain exactly 3 GPU ids; got $RANK_GPUS" >&2
+  exit 2
+fi
+
+for id in "${NO_RANK_GPU_IDS[@]}" "${RANK_GPU_IDS[@]}"; do
+  [[ "$id" =~ ^[0-9]+$ ]] || {
+    echo "[ERROR] Invalid GPU id: $id" >&2
+    exit 2
+  }
+done
+for no_id in "${NO_RANK_GPU_IDS[@]}"; do
+  for rank_id in "${RANK_GPU_IDS[@]}"; do
+    if [[ "$no_id" == "$rank_id" ]]; then
+      echo "[ERROR] GPU $no_id appears in both variants; GPU sets must be disjoint." >&2
+      exit 2
+    fi
+  done
+done
 
 echo "============================================================"
 echo "[MGF RANK ABLATION] common protocol"
 echo "  dataset       : $DATASET_ROOT"
-echo "  GPUs          : $GPUS"
+echo "  no-rank GPUs  : $NO_RANK_GPUS"
+echo "  ranking GPUs  : $RANK_GPUS"
 echo "  batch/GPU     : $BATCH_SIZE"
-echo "  effective B   : $(( BATCH_SIZE * ${#GPU_IDS[@]} ))"
+echo "  effective B   : $(( BATCH_SIZE * 3 )) per variant"
 echo "  epochs        : $EPOCHS"
 echo "  fraction      : $SAMPLE_FRACTION"
 echo "  seed          : $SEED"
@@ -89,23 +117,46 @@ echo "  no-rank root  : $NO_RANK_ROOT"
 echo "  rank root     : $RANK_ROOT"
 echo "============================================================"
 
-run_one() {
+NO_RANK_LAUNCHER_LOG="$NO_RANK_ROOT/launcher.log"
+RANK_LAUNCHER_LOG="$RANK_ROOT/launcher.log"
+NO_RANK_PID=""
+RANK_PID=""
+
+cleanup_parallel() {
+  local pid
+  for pid in "$NO_RANK_PID" "$RANK_PID"; do
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      # Each variant is launched as its own session. Sending TERM to the
+      # session leader triggers run_metric_grasp_field.sh's cleanup trap,
+      # which then terminates its torchrun process group.
+      kill -TERM -- "-$pid" 2>/dev/null || true
+    fi
+  done
+}
+trap cleanup_parallel EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+launch_one() {
   local name="$1"
   local root="$2"
   local rank_weight="$3"
+  local gpu_set="$4"
+  local infer_gpu_set="$5"
+  local launcher_log="$6"
 
-  echo
-  echo "============================================================"
-  echo "[MGF RANK ABLATION] START $name"
+  mkdir -p "$root"
+  echo "[MGF RANK ABLATION] launching $name"
+  echo "  GPUs=$gpu_set"
   echo "  RANKING_WEIGHT=$rank_weight"
-  echo "============================================================"
+  echo "  launcher log=$launcher_log"
 
-  env \
+  setsid env \
     DATASET_ROOT="$DATASET_ROOT" \
     WORK_ROOT="$root" \
     INIT_CHECKPOINT="" \
-    GPUS="$GPUS" \
-    INFER_GPUS="$INFER_GPUS" \
+    GPUS="$gpu_set" \
+    INFER_GPUS="$infer_gpu_set" \
     PHASES="$PHASES" \
     SPLITS="$SPLITS" \
     CHECKPOINT_KIND="$CHECKPOINT_KIND" \
@@ -144,14 +195,70 @@ run_one() {
     MAX_VAL_FRAMES=0 \
     MAX_STEPS=0 \
     INFER_MAX_FRAMES=0 \
-    bash "$ROOT_DIR/scripts/run_metric_grasp_field.sh"
+    bash "$ROOT_DIR/scripts/run_metric_grasp_field.sh" \
+    >"$launcher_log" 2>&1 &
 
-  echo "[MGF RANK ABLATION] DONE $name"
+  LAST_PID=$!
 }
 
-# Sequential by design: same GPUs, same resource conditions, no contention.
-run_one "no_ranking" "$NO_RANK_ROOT" "0"
-run_one "ranking" "$RANK_ROOT" "$RANKING_WEIGHT_ON"
+launch_one \
+  "no_ranking" "$NO_RANK_ROOT" "0" \
+  "$NO_RANK_GPUS" "$NO_RANK_INFER_GPUS" "$NO_RANK_LAUNCHER_LOG"
+NO_RANK_PID=$LAST_PID
+
+launch_one \
+  "ranking" "$RANK_ROOT" "$RANKING_WEIGHT_ON" \
+  "$RANK_GPUS" "$RANK_INFER_GPUS" "$RANK_LAUNCHER_LOG"
+RANK_PID=$LAST_PID
+
+echo "[MGF RANK ABLATION] both variants are running in parallel"
+echo "  no-ranking pid=$NO_RANK_PID"
+echo "  ranking    pid=$RANK_PID"
+
+# Reap whichever variant finishes first. If it fails, terminate the other
+# variant immediately rather than wasting the remaining GPUs.
+if wait -n "$NO_RANK_PID" "$RANK_PID"; then
+  FIRST_STATUS=0
+else
+  FIRST_STATUS=$?
+fi
+
+if [[ "$FIRST_STATUS" -ne 0 ]]; then
+  echo "[MGF RANK ABLATION ERROR] first completed variant failed (status=$FIRST_STATUS)." >&2
+  echo "  inspect: $NO_RANK_LAUNCHER_LOG" >&2
+  echo "  inspect: $RANK_LAUNCHER_LOG" >&2
+  cleanup_parallel
+  wait "$NO_RANK_PID" 2>/dev/null || true
+  wait "$RANK_PID" 2>/dev/null || true
+  exit "$FIRST_STATUS"
+fi
+
+# One child has been reaped by wait -n. The still-live PID is the remaining
+# variant; if both happened to finish together, wait on both is harmless.
+SECOND_STATUS=0
+if kill -0 "$NO_RANK_PID" 2>/dev/null; then
+  wait "$NO_RANK_PID" || SECOND_STATUS=$?
+elif kill -0 "$RANK_PID" 2>/dev/null; then
+  wait "$RANK_PID" || SECOND_STATUS=$?
+else
+  # Both may have exited between wait -n and the checks. Reap any unreaped
+  # child; "not a child" is ignored because wait -n already reaped one.
+  wait "$NO_RANK_PID" 2>/dev/null || true
+  wait "$RANK_PID" 2>/dev/null || true
+fi
+
+if [[ "$SECOND_STATUS" -ne 0 ]]; then
+  echo "[MGF RANK ABLATION ERROR] second variant failed (status=$SECOND_STATUS)." >&2
+  echo "  inspect: $NO_RANK_LAUNCHER_LOG" >&2
+  echo "  inspect: $RANK_LAUNCHER_LOG" >&2
+  exit "$SECOND_STATUS"
+fi
+
+# Disable the cleanup trap after both variants have completed successfully.
+NO_RANK_PID=""
+RANK_PID=""
+
+echo "[MGF RANK ABLATION] both variants completed successfully"
 
 # Training-only comparison is always available after both runs.
 mkdir -p "$SUMMARY_DIR"
