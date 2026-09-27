@@ -620,7 +620,7 @@ def metric_field_loss(
     profile_weight=1.0,
     profile_mean_weight=10.0,
     base_cdf_weight=0.25,
-    ranking_weight=1.0,
+    ranking_weight=0.1,
     ranking_temperature=0.1,
 ):
     from .loss_economicgrasp_depth_kview_transformer import (
