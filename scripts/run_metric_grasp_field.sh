@@ -39,6 +39,8 @@ FIXED_SIGMA=${FIXED_SIGMA:-0.02}
 PROFILE_WEIGHT=${PROFILE_WEIGHT:-1}
 PROFILE_MEAN_WEIGHT=${PROFILE_MEAN_WEIGHT:-10}
 BASE_CDF_WEIGHT=${BASE_CDF_WEIGHT:-0.25}
+RANKING_WEIGHT=${RANKING_WEIGHT:-1.0}
+RANKING_TEMPERATURE=${RANKING_TEMPERATURE:-0.1}
 MAX_TRAIN_FRAMES=${MAX_TRAIN_FRAMES:-0}
 MAX_VAL_FRAMES=${MAX_VAL_FRAMES:-0}
 MAX_STEPS=${MAX_STEPS:-0}
@@ -113,7 +115,8 @@ for phase in "${STEPS[@]}"; do
         --evidence-mode "$EVIDENCE_MODE" --surface-epsilon "$SURFACE_EPSILON" \
         --prior-sigma "$PRIOR_SIGMA" --fixed-sigma "$FIXED_SIGMA" \
         --profile-weight "$PROFILE_WEIGHT" --profile-mean-weight "$PROFILE_MEAN_WEIGHT" \
-        --base-cdf-weight "$BASE_CDF_WEIGHT" --max-train-frames "$MAX_TRAIN_FRAMES" \
+        --base-cdf-weight "$BASE_CDF_WEIGHT" --ranking-weight "$RANKING_WEIGHT" \
+        --ranking-temperature "$RANKING_TEMPERATURE" --max-train-frames "$MAX_TRAIN_FRAMES" \
         --max-val-frames "$MAX_VAL_FRAMES" --max-steps "$MAX_STEPS" --seed "$SEED" \
         "${amp[@]}" "${resume[@]}"
       wait_wave
