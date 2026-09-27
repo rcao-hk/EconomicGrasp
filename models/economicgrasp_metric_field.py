@@ -330,6 +330,137 @@ class EconomicGraspMetricField(nn.Module):
             self._depth_pack = self._proposal_feature = None
 
 
+def _cdf_discriminability_stats(
+    logits,
+    bins,
+    valid,
+    *,
+    prefix,
+    histogram_bins=64,
+):
+    """Lightweight candidate-level CDF discrimination diagnostics.
+
+    The grasp CDF predicts success at T increasing friction thresholds. Candidate
+    utility is the mean threshold success probability. The binary ranking target
+    used by AUROC/AUPRC is whether a valid candidate succeeds at ANY configured
+    threshold (cdf_bin > 0).
+
+    AUROC/AUPRC use a fixed histogram rather than sorting every candidate. This
+    is O(N) and cheap enough to record on every batch. The suffix "64" makes the
+    approximation explicit; these values are diagnostics, not benchmark metrics.
+    """
+    if logits.dim() != 5:
+        raise ValueError(
+            f"{prefix} CDF logits must be [B,T,Q,A,D], got {tuple(logits.shape)}"
+        )
+    B, T, Q, A, D = logits.shape
+    expected = (B, Q, A, D)
+    if bins.shape != expected or valid.shape != expected:
+        raise ValueError(
+            f"{prefix} CDF labels/mask must be {expected}, got "
+            f"bins={tuple(bins.shape)}, valid={tuple(valid.shape)}"
+        )
+    if histogram_bins < 2:
+        raise ValueError("histogram_bins must be >=2")
+
+    with torch.no_grad():
+        bins = bins.to(device=logits.device, dtype=torch.long)
+        valid = valid.to(device=logits.device, dtype=torch.bool)
+        pred_u = torch.sigmoid(logits.float()).mean(dim=1)
+        target_u = torch.where(
+            bins > 0,
+            (float(T) - bins.float() + 1.0) / float(T),
+            torch.zeros_like(bins, dtype=torch.float32),
+        ).clamp_(0.0, 1.0)
+        positive = valid & (bins > 0)
+        negative = valid & (~positive)
+        zero = pred_u.sum() * 0.0
+
+        if bool(valid.any()):
+            pv = pred_u[valid]
+            tv = target_u[valid]
+            pred_mean = pv.mean()
+            target_mean = tv.mean()
+            utility_mae = (pv - tv).abs().mean()
+
+            pc = pv - pred_mean
+            tc = tv - target_mean
+            denom = torch.sqrt(
+                pc.square().mean() * tc.square().mean()
+            )
+            utility_pearson = (
+                (pc * tc).mean() / denom.clamp_min(1e-12)
+                if bool(denom > 1e-12)
+                else zero
+            )
+        else:
+            pred_mean = target_mean = utility_mae = utility_pearson = zero
+
+        pred_pos = pred_u[positive].mean() if bool(positive.any()) else zero
+        pred_neg = pred_u[negative].mean() if bool(negative.any()) else zero
+        gap = pred_pos - pred_neg
+        pos_fraction = (
+            positive.float().sum() / valid.float().sum().clamp_min(1.0)
+        )
+
+        # Histogram ranking metrics over valid candidates.
+        # Scores in [0,1]; index 0=lowest predicted utility.
+        if bool(valid.any()):
+            score = pred_u[valid].clamp(0.0, 1.0)
+            label = positive[valid]
+            idx = torch.floor(score * float(histogram_bins)).long()
+            idx = idx.clamp_(0, histogram_bins - 1)
+            pos_hist = torch.bincount(
+                idx[label], minlength=histogram_bins
+            ).to(torch.float64)
+            neg_hist = torch.bincount(
+                idx[~label], minlength=histogram_bins
+            ).to(torch.float64)
+            P = pos_hist.sum()
+            N = neg_hist.sum()
+
+            if bool((P > 0) & (N > 0)):
+                neg_before = torch.cumsum(neg_hist, 0) - neg_hist
+                # Candidates within one histogram bin are treated as tied.
+                auc = (
+                    pos_hist * (neg_before + 0.5 * neg_hist)
+                ).sum() / (P * N)
+
+                pos_desc = pos_hist.flip(0)
+                neg_desc = neg_hist.flip(0)
+                tp = torch.cumsum(pos_desc, 0)
+                fp = torch.cumsum(neg_desc, 0)
+                precision = tp / (tp + fp).clamp_min(1.0)
+                recall_increment = pos_desc / P
+                auprc = (recall_increment * precision).sum()
+            else:
+                auc = zero.double()
+                auprc = zero.double()
+        else:
+            auc = zero.double()
+            auprc = zero.double()
+
+        lift = (
+            auprc.float() / pos_fraction.clamp_min(1e-8)
+            if bool(pos_fraction > 0)
+            else zero
+        )
+
+    return {
+        f"{prefix}_cdf_utility_pred_mean": pred_mean.float(),
+        f"{prefix}_cdf_utility_target_mean": target_mean.float(),
+        f"{prefix}_cdf_utility_mae": utility_mae.float(),
+        f"{prefix}_cdf_pred_pos_mean": pred_pos.float(),
+        f"{prefix}_cdf_pred_neg_mean": pred_neg.float(),
+        f"{prefix}_cdf_pos_neg_gap": gap.float(),
+        f"{prefix}_cdf_utility_pearson": utility_pearson.float(),
+        f"{prefix}_cdf_positive_fraction": pos_fraction.float(),
+        f"{prefix}_cdf_any_success_auroc64": auc.float(),
+        f"{prefix}_cdf_any_success_auprc64": auprc.float(),
+        f"{prefix}_cdf_any_success_auprc_lift64": lift.float(),
+    }
+
+
 def metric_field_loss(ep, config, *, profile_weight=1., profile_mean_weight=10.,
                       base_cdf_weight=.25):
     from .loss_economicgrasp_depth_kview_transformer import (
@@ -354,10 +485,24 @@ def metric_field_loss(ep, config, *, profile_weight=1., profile_mean_weight=10.,
     total = task + geometric
 
     # Unit/ranking diagnostics. These are observational only and do not alter
-    # gradients. They make catastrophic width-unit mistakes visible in epoch 0.
+    # gradients. They make catastrophic width-unit mistakes and trivial
+    # all-low CDF solutions visible in epoch 0.
+    cdf_bins = ep["batch_grasp_cdf_bins_angle_depth"].long()
+    cdf_valid = ep["batch_grasp_cdf_valid_mask"].bool()
+    field_discrim = _cdf_discriminability_stats(
+        ep["grasp_cdf_pred_angle_depth"],
+        cdf_bins,
+        cdf_valid,
+        prefix="field",
+    )
+    base_discrim = _cdf_discriminability_stats(
+        ep["mgf_base_cdf_logits"],
+        cdf_bins,
+        cdf_valid,
+        prefix="base",
+    )
+
     with torch.no_grad():
-        cdf_bins = ep["batch_grasp_cdf_bins_angle_depth"].long()
-        cdf_valid = ep["batch_grasp_cdf_valid_mask"].bool()
         width_label = ep["batch_grasp_width_angle_depth"].float()
         width_valid = ep["batch_grasp_width_valid_mask_angle_depth"].bool()
         pred_width_m = (
@@ -367,10 +512,6 @@ def metric_field_loss(ep, config, *, profile_weight=1., profile_mean_weight=10.,
         ).clamp(0.0, float(cfgs.grasp_max_width))
 
         zero = total.detach() * 0.0
-        cdf_candidate_positive = (
-            (cdf_bins[cdf_valid] > 0).float().mean()
-            if bool(cdf_valid.any()) else zero
-        )
         width_label_mean = (
             width_label[width_valid].mean()
             if bool(width_valid.any()) else zero
@@ -391,11 +532,15 @@ def metric_field_loss(ep, config, *, profile_weight=1., profile_mean_weight=10.,
     stats = {"loss": total, "task_loss": task, "geometry_loss": geometric,
              "cdf": cdf, "base_cdf": base_cdf, "width": width, "objectness": obj,
              "graspness": gra, "view": view,
-             "cdf_candidate_positive_fraction": cdf_candidate_positive,
+             # Backward-compatible alias used by the previous smoke report.
+             "cdf_candidate_positive_fraction":
+                 field_discrim["field_cdf_positive_fraction"],
              "width_label_m_mean": width_label_mean,
              "width_label_m_max": width_label_max,
              "width_pred_decoded_m_mean": width_pred_mean,
              "width_pred_decoded_m_max": width_pred_max,
              "empty_objects_dropped": ep["D: MGF Empty Objects Dropped"].detach(),
+             **field_discrim,
+             **base_discrim,
              **geom}
     return total, stats
