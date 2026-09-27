@@ -461,8 +461,167 @@ def _cdf_discriminability_stats(
     }
 
 
-def metric_field_loss(ep, config, *, profile_weight=1., profile_mean_weight=10.,
-                      base_cdf_weight=.25):
+def compute_query_listwise_ranking_loss(
+    logits,
+    bins,
+    valid,
+    *,
+    temperature=0.1,
+    target_range_epsilon=1e-6,
+):
+    """Within-query listwise ranking over the A x D grasp candidates.
+
+    The existing unbalanced CDF BCE keeps the absolute probability objective.
+    This auxiliary loss only asks candidates of the SAME (center, selected-view)
+    query to have the correct relative ordering.
+
+    Target utility is the mean binary success over the T friction thresholds:
+        cdf_bin=0 -> 0
+        cdf_bin=k -> (T-k+1)/T.
+
+    Invalid candidates are excluded. Queries are ranked only when they contain
+    at least two valid candidates AND non-constant target utility; all-zero or
+    otherwise tied queries carry no ranking information and are skipped.
+
+    The loss is KL(target_softmax || predicted_softmax), using the same
+    temperature for target and predicted utilities. Ties in target utility are
+    represented naturally by equal target probability.
+    """
+    if logits.dim() != 5:
+        raise ValueError(
+            "ranking logits must be [B,T,Q,A,D], got "
+            f"{tuple(logits.shape)}"
+        )
+    B, T, Q, A, D = logits.shape
+    expected = (B, Q, A, D)
+    if bins.shape != expected or valid.shape != expected:
+        raise ValueError(
+            "ranking labels/mask must match [B,Q,A,D]="
+            f"{expected}, got bins={tuple(bins.shape)}, "
+            f"valid={tuple(valid.shape)}"
+        )
+    temperature = float(temperature)
+    if not math.isfinite(temperature) or temperature <= 0:
+        raise ValueError(
+            f"ranking temperature must be finite and >0, got {temperature}"
+        )
+    if target_range_epsilon < 0:
+        raise ValueError("target_range_epsilon must be non-negative")
+
+    bins = bins.to(device=logits.device, dtype=torch.long)
+    valid = valid.to(device=logits.device, dtype=torch.bool)
+
+    pred_u = torch.sigmoid(logits.float()).mean(dim=1)  # [B,Q,A,D]
+    target_u = torch.where(
+        bins > 0,
+        (float(T) - bins.float() + 1.0) / float(T),
+        torch.zeros_like(bins, dtype=torch.float32),
+    ).clamp_(0.0, 1.0)
+
+    C = A * D
+    pred_flat = pred_u.reshape(B, Q, C)
+    target_flat = target_u.reshape(B, Q, C)
+    valid_flat = valid.reshape(B, Q, C)
+    valid_count = valid_flat.sum(dim=-1)
+
+    target_max = target_flat.masked_fill(~valid_flat, -1.0).max(dim=-1).values
+    target_min = target_flat.masked_fill(~valid_flat, 2.0).min(dim=-1).values
+    target_range = (target_max - target_min).clamp_min(0.0)
+    informative = (
+        (valid_count >= 2)
+        & (target_range > float(target_range_epsilon))
+    )
+
+    # -1e4 is safely negligible at all supported temperatures and avoids
+    # infinities in mixed precision / diagnostic computations.
+    invalid_logit = pred_flat.new_tensor(-1.0e4)
+    pred_rank_logits = (pred_flat / temperature).masked_fill(
+        ~valid_flat, invalid_logit
+    )
+    target_rank_logits = (target_flat / temperature).masked_fill(
+        ~valid_flat, invalid_logit
+    )
+    pred_log_prob = F.log_softmax(pred_rank_logits, dim=-1)
+    target_prob = F.softmax(target_rank_logits, dim=-1)
+    target_log_prob = torch.log(target_prob.clamp_min(1e-12))
+
+    kl_per_query = (
+        target_prob * (target_log_prob - pred_log_prob)
+    ).sum(dim=-1)
+    zero = logits.sum() * 0.0
+    loss = (
+        kl_per_query[informative].mean()
+        if bool(informative.any())
+        else zero
+    )
+
+    with torch.no_grad():
+        query_total = int(B * Q)
+        informative_count = informative.sum()
+        informative_fraction = (
+            informative.float().mean()
+            if query_total > 0 else zero
+        )
+        range_mean = (
+            target_range[informative].mean()
+            if bool(informative.any()) else zero
+        )
+
+        masked_pred = pred_flat.masked_fill(~valid_flat, -1.0)
+        selected_idx = masked_pred.argmax(dim=-1)
+        selected_target = target_flat.gather(
+            -1, selected_idx.unsqueeze(-1)
+        ).squeeze(-1)
+        oracle_target = target_max
+        selection_regret = (oracle_target - selected_target).clamp_min(0.0)
+        top1_best_hit = (
+            selected_target >= oracle_target - 1e-7
+        )
+
+        selected_target_mean = (
+            selected_target[informative].mean()
+            if bool(informative.any()) else zero
+        )
+        oracle_target_mean = (
+            oracle_target[informative].mean()
+            if bool(informative.any()) else zero
+        )
+        regret_mean = (
+            selection_regret[informative].mean()
+            if bool(informative.any()) else zero
+        )
+        top1_hit = (
+            top1_best_hit[informative].float().mean()
+            if bool(informative.any()) else zero
+        )
+
+    stats = {
+        "ranking_loss": loss.detach(),
+        "ranking_informative_query_fraction":
+            informative_fraction.detach(),
+        "ranking_informative_query_count":
+            informative_count.detach().float(),
+        "ranking_target_range_mean": range_mean.detach(),
+        "ranking_selected_target_utility":
+            selected_target_mean.detach(),
+        "ranking_oracle_target_utility":
+            oracle_target_mean.detach(),
+        "ranking_selection_regret": regret_mean.detach(),
+        "ranking_top1_best_hit": top1_hit.detach(),
+    }
+    return loss, stats
+
+
+def metric_field_loss(
+    ep,
+    config,
+    *,
+    profile_weight=1.0,
+    profile_mean_weight=10.0,
+    base_cdf_weight=0.25,
+    ranking_weight=1.0,
+    ranking_temperature=0.1,
+):
     from .loss_economicgrasp_depth_kview_transformer import (
         compute_objectness_loss_tok, compute_graspness_loss_tok,
         compute_view_graspness_loss, compute_cva_cdf_loss, compute_cva_width_depth_loss,
@@ -476,9 +635,32 @@ def metric_field_loss(ep, config, *, profile_weight=1., profile_mean_weight=10.,
     auxiliary = dict(ep)
     auxiliary["grasp_cdf_pred_angle_depth"] = ep["mgf_base_cdf_logits"]
     base_cdf, _ = compute_cva_cdf_loss(auxiliary, balanced=False)
-    task = (cfgs.objectness_loss_weight*obj + cfgs.graspness_loss_weight*gra +
-            cfgs.view_loss_weight*view + cfgs.width_loss_weight*width +
-            cfgs.score_loss_weight*(cdf + base_cdf_weight*base_cdf))
+
+    cdf_bins = ep["batch_grasp_cdf_bins_angle_depth"].long()
+    cdf_valid = ep["batch_grasp_cdf_valid_mask"].bool()
+    ranking, ranking_stats = compute_query_listwise_ranking_loss(
+        ep["grasp_cdf_pred_angle_depth"],
+        cdf_bins,
+        cdf_valid,
+        temperature=ranking_temperature,
+    )
+    rank_weight = float(ranking_weight)
+    if not math.isfinite(rank_weight) or rank_weight < 0:
+        raise ValueError(
+            f"ranking_weight must be finite and >=0, got {ranking_weight}"
+        )
+
+    task = (
+        cfgs.objectness_loss_weight * obj
+        + cfgs.graspness_loss_weight * gra
+        + cfgs.view_loss_weight * view
+        + cfgs.width_loss_weight * width
+        + cfgs.score_loss_weight * (
+            cdf
+            + rank_weight * ranking
+            + base_cdf_weight * base_cdf
+        )
+    )
     geom = geometry_loss(ep["mgf_profile_logits"], ep["depth_map_pred"], ep["gt_depth_m"], config)
     geometric = (cfgs.depth_prob_loss_weight*geom["depth_l1"] +
                  profile_weight*geom["profile_ce"] + profile_mean_weight*geom["profile_mean_l1"])
@@ -487,8 +669,6 @@ def metric_field_loss(ep, config, *, profile_weight=1., profile_mean_weight=10.,
     # Unit/ranking diagnostics. These are observational only and do not alter
     # gradients. They make catastrophic width-unit mistakes and trivial
     # all-low CDF solutions visible in epoch 0.
-    cdf_bins = ep["batch_grasp_cdf_bins_angle_depth"].long()
-    cdf_valid = ep["batch_grasp_cdf_valid_mask"].bool()
     field_discrim = _cdf_discriminability_stats(
         ep["grasp_cdf_pred_angle_depth"],
         cdf_bins,
@@ -530,8 +710,11 @@ def metric_field_loss(ep, config, *, profile_weight=1., profile_mean_weight=10.,
         )
 
     stats = {"loss": total, "task_loss": task, "geometry_loss": geometric,
-             "cdf": cdf, "base_cdf": base_cdf, "width": width, "objectness": obj,
+             "cdf": cdf, "base_cdf": base_cdf, "ranking": ranking,
+             "ranking_weighted": ranking.detach() * rank_weight,
+             "width": width, "objectness": obj,
              "graspness": gra, "view": view,
+             **ranking_stats,
              # Backward-compatible alias used by the previous smoke report.
              "cdf_candidate_positive_fraction":
                  field_discrim["field_cdf_positive_fraction"],
