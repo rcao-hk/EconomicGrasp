@@ -42,6 +42,7 @@ pointcloud_pred_nominal.ply
 pointcloud_active.ply
 pointcloud_sensor.ply
 pointcloud_rendered.ply
+pointcloud_active_green_predicted_red_rendered_gt_blue.ply
 ```
 
 "Active/corrupted depth" is the **internally RGB-predicted metric depth after
@@ -50,6 +51,18 @@ RGB-only model.
 
 The sensor/rendered maps are diagnostic references loaded from GraspNet and are
 never fed into DCR inference.
+
+
+The combined geometry PLY uses a fixed semantic color convention:
+
+```text
+active       = green
+predicted    = red
+rendered_gt  = blue
+```
+
+Here `rendered_gt` is the dataset's rendered/virtual depth reference; it is
+named explicitly rather than being silently treated as sensor depth.
 
 ### 2. Dense proposal behavior
 
@@ -158,8 +171,21 @@ grasps_air_overlay.png      # if AIR_CHECKPOINT is supplied
 grasps_<method>_scene.ply
 ```
 
-The RGB overlay shows grasp center, approach direction and gripper width.  The
-PLY combines the active-depth point cloud with sampled gripper geometry.
+The RGB overlay shows grasp center, approach direction and gripper width.
+Projected query/value markers use the same approximate visual footprint as the
+radius-2/3 dots in `dcr_center_correction_motion.png`, rather than a one-pixel
+heatmap footprint.
+
+Two 3D grasp exports are produced:
+
+```text
+grasps_<method>_scene.ply       # backward-compatible sampled gripper points
+grasps_<method>_scene_mesh.ply  # scene points + true gripper triangle meshes
+```
+
+The mesh PLY keeps the active-depth scene as isolated colored point vertices
+and the GraspNet grippers as triangle faces, which makes grasp pose/width much
+easier to inspect than the sampled-gripper representation.
 
 ### 9. Nominal vs. corrupted geometry
 
