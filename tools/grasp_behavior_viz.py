@@ -22,6 +22,11 @@ import torch.nn.functional as F
 IMAGENET_MEAN = np.asarray([0.485, 0.456, 0.406], np.float32)
 IMAGENET_STD = np.asarray([0.229, 0.224, 0.225], np.float32)
 
+# Match the visual footprint of the radius-2/3 circles used in
+# dcr_center_correction_motion.png. Matplotlib scatter uses points^2.
+PROJECTED_POINT_SIZE = 36.0
+PROJECTED_POINT_ALPHA = 0.88
+
 ITEM_PRESETS = {
     "light": (
         "rgb,depth,proposal,feature,query_response,grasps"
@@ -411,6 +416,85 @@ def write_points_ply(path: str | Path, points: Any,
                         f"{int(rgbv[0])} {int(rgbv[1])} {int(rgbv[2])}\n")
 
 
+def write_multicloud_ply(path: str | Path,
+                         clouds: Sequence[Tuple[str, Any, Sequence[float]]]) -> None:
+    """Write multiple point clouds into one PLY with fixed semantic colors.
+
+    Each entry is (name, points[N,3], rgb), with rgb in either [0,1] or
+    [0,255]. Semantic names are stored as PLY comments.
+    """
+    points_all, colors_all, comments = [], [], []
+    for name, points, color in clouds:
+        pts = np.asarray(points, np.float32).reshape(-1, 3)
+        if len(pts) == 0:
+            continue
+        col = np.asarray(color, np.float32).reshape(3)
+        if float(col.max()) <= 1.0:
+            col = col * 255.0
+        col = np.clip(col, 0, 255).astype(np.uint8)
+        points_all.append(pts)
+        colors_all.append(np.repeat(col[None], len(pts), axis=0))
+        comments.append(f"{name} color={int(col[0])},{int(col[1])},{int(col[2])}")
+    if not points_all:
+        raise ValueError("No non-empty clouds to write")
+    pts = np.concatenate(points_all, axis=0)
+    cols = np.concatenate(colors_all, axis=0)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        f.write("ply\\nformat ascii 1.0\\n")
+        for comment in comments:
+            f.write(f"comment {comment}\\n")
+        f.write(f"element vertex {len(pts)}\\n")
+        f.write("property float x\\nproperty float y\\nproperty float z\\n")
+        f.write("property uchar red\\nproperty uchar green\\nproperty uchar blue\\n")
+        f.write("end_header\\n")
+        for p, color in zip(pts, cols):
+            f.write(
+                f"{p[0]:.7g} {p[1]:.7g} {p[2]:.7g} "
+                f"{int(color[0])} {int(color[1])} {int(color[2])}\\n")
+
+
+def _write_pointcloud_mesh_ply(path: str | Path, scene_points: Any,
+                               scene_colors: Any, mesh_vertices: Any,
+                               mesh_faces: Any, mesh_colors: Any) -> None:
+    """Write isolated scene points and colored triangle grasp meshes in one PLY."""
+    sp = np.asarray(scene_points, np.float32).reshape(-1, 3)
+    sc = np.asarray(scene_colors, np.float32).reshape(-1, 3)
+    if len(sc) != len(sp):
+        raise ValueError("scene point/color length mismatch")
+    if sc.size and float(sc.max()) <= 1.0:
+        sc = sc * 255.0
+    sc = np.clip(sc, 0, 255).astype(np.uint8)
+    mv = np.asarray(mesh_vertices, np.float32).reshape(-1, 3)
+    mf = np.asarray(mesh_faces, np.int64).reshape(-1, 3)
+    mc = np.asarray(mesh_colors, np.float32).reshape(-1, 3)
+    if len(mc) != len(mv):
+        raise ValueError("mesh vertex/color length mismatch")
+    if mc.size and float(mc.max()) <= 1.0:
+        mc = mc * 255.0
+    mc = np.clip(mc, 0, 255).astype(np.uint8)
+    pts = np.concatenate((sp, mv), axis=0)
+    cols = np.concatenate((sc, mc), axis=0)
+    faces = mf + len(sp)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        f.write("ply\\nformat ascii 1.0\\n")
+        f.write("comment isolated vertices are scene points; faces are grasp meshes\\n")
+        f.write(f"element vertex {len(pts)}\\n")
+        f.write("property float x\\nproperty float y\\nproperty float z\\n")
+        f.write("property uchar red\\nproperty uchar green\\nproperty uchar blue\\n")
+        f.write(f"element face {len(faces)}\\n")
+        f.write("property list uchar int vertex_indices\\n")
+        f.write("end_header\\n")
+        for p, color in zip(pts, cols):
+            f.write(
+                f"{p[0]:.7g} {p[1]:.7g} {p[2]:.7g} "
+                f"{int(color[0])} {int(color[1])} {int(color[2])}\\n")
+        for tri in faces:
+            f.write(f"3 {int(tri[0])} {int(tri[1])} {int(tri[2])}\\n")
+
 def save_depth_bundle(out_dir: str | Path, rgb: np.ndarray, K: Any,
                       nominal: Any, active: Any,
                       sensor: Optional[Any] = None,
@@ -459,6 +543,18 @@ def save_depth_bundle(out_dir: str | Path, rgb: np.ndarray, K: Any,
             save_heatmap(out / f"depth_{name}.png", d, f"{name} depth", vmin=.2, vmax=1.0)
         pts, colors = depth_to_points(d, K, rgb, stride=point_stride)
         write_points_ply(out / f"pointcloud_{name}.ply", pts, colors)
+
+    if rendered is not None:
+        pred_pts, _ = depth_to_points(nom, K, stride=point_stride)
+        active_pts, _ = depth_to_points(act, K, stride=point_stride)
+        gt_pts, _ = depth_to_points(rendered, K, stride=point_stride)
+        write_multicloud_ply(
+            out / "pointcloud_active_green_predicted_red_rendered_gt_blue.ply",
+            (
+                ("active", active_pts, (0, 255, 0)),
+                ("predicted", pred_pts, (255, 0, 0)),
+                ("rendered_gt", gt_pts, (0, 0, 255)),
+            ))
 
 
 def proposal_maps(proposal_logits: Any):
@@ -522,28 +618,51 @@ def sparse_query_map(token_ids: Any, values: Any, hw: Tuple[int, int],
     return out.reshape(h, w)
 
 
-def save_query_scalar_overlay(path: str | Path, rgb: np.ndarray,
-                              token_ids: Any, values: Any, title: str,
-                              cmap: str = "coolwarm", symmetric: bool = False) -> None:
+def save_projected_query_overlay(path: str | Path, rgb: np.ndarray,
+                                 token_ids: Any, values: Any, title: str,
+                                 cmap: str = "viridis", symmetric: bool = False,
+                                 reduce: str = "mean",
+                                 point_size: float = PROJECTED_POINT_SIZE) -> None:
+    """Draw sparse query values as visible colored projected points.
+
+    Using scatter rather than a one-pixel imshow footprint makes query-level
+    behavior readable at the same visual scale as DCR center-correction dots.
+    """
     h, w = rgb.shape[:2]
-    arr = sparse_query_map(token_ids, values, (h, w), reduce="mean")
-    masked = np.ma.masked_invalid(arr)
-    kwargs = {}
-    if symmetric:
-        finite = np.isfinite(arr)
-        lim = max(1e-6, float(np.nanpercentile(np.abs(arr[finite]), 99))) if finite.any() else 1.0
-        kwargs.update(vmin=-lim, vmax=lim)
+    arr = sparse_query_map(token_ids, values, (h, w), reduce=reduce)
+    finite = np.isfinite(arr)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     plt = _plt()
     fig, ax = plt.subplots(figsize=(6, 6), dpi=160)
     ax.imshow(rgb)
-    im = ax.imshow(masked, cmap=cmap, alpha=.78, **kwargs)
+    if finite.any():
+        ys, xs = np.nonzero(finite)
+        vals = arr[ys, xs]
+        kwargs = {}
+        if symmetric:
+            lim = max(1e-6, float(np.nanpercentile(np.abs(vals), 99)))
+            kwargs.update(vmin=-lim, vmax=lim)
+        else:
+            lo, hi = robust_limits(vals)
+            kwargs.update(vmin=lo, vmax=hi)
+        sc = ax.scatter(
+            xs, ys, c=vals, s=float(point_size), cmap=cmap,
+            alpha=PROJECTED_POINT_ALPHA, linewidths=.35,
+            edgecolors="white", **kwargs)
+        fig.colorbar(sc, ax=ax, fraction=.046, pad=.04)
     ax.axis("off")
     ax.set_title(title)
-    fig.colorbar(im, ax=ax, fraction=.046, pad=.04)
     fig.tight_layout(pad=0)
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path)
     plt.close(fig)
+
+def save_query_scalar_overlay(path: str | Path, rgb: np.ndarray,
+                              token_ids: Any, values: Any, title: str,
+                              cmap: str = "coolwarm", symmetric: bool = False) -> None:
+    save_projected_query_overlay(
+        path, rgb, token_ids, values, title,
+        cmap=cmap, symmetric=symmetric, reduce="mean")
 
 
 def save_candidate_latent_response(path: str | Path, latent: Any,
@@ -589,28 +708,18 @@ def save_query_response(out_dir: str | Path, rgb: np.ndarray,
                         local_utility: Any) -> None:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    h, w = rgb.shape[:2]
-    score_map = sparse_query_map(token_ids, stage1_score, (h, w))
-    off_map = sparse_query_map(token_ids, selected_offset_mm, (h, w), reduce="mean")
     util = np.asarray(to_numpy(local_utility))
     best = util.max(0) if util.ndim == 2 else util.reshape(-1)
-    utility_map = sparse_query_map(token_ids, best, (h, w))
-    for name, arr, title, cmap in (
-        ("query_stage1_score.png", score_map, "Stage-1 score at query pixels", "viridis"),
-        ("query_selected_offset_mm.png", off_map, "Selected center offset [mm]", "coolwarm"),
-        ("query_best_local_utility.png", utility_map, "Best local CDF utility", "magma"),
-    ):
-        masked = np.ma.masked_invalid(arr)
-        plt = _plt()
-        fig, ax = plt.subplots(figsize=(6, 6), dpi=160)
-        ax.imshow(rgb)
-        im = ax.imshow(masked, cmap=cmap, alpha=.75)
-        ax.axis("off")
-        ax.set_title(title)
-        fig.colorbar(im, ax=ax, fraction=.046, pad=.04)
-        fig.tight_layout(pad=0)
-        fig.savefig(out / name)
-        plt.close(fig)
+    save_projected_query_overlay(
+        out / "query_stage1_score.png", rgb, token_ids, stage1_score,
+        "Stage-1 score at query pixels", cmap="viridis", reduce="max")
+    save_projected_query_overlay(
+        out / "query_selected_offset_mm.png", rgb, token_ids,
+        selected_offset_mm, "Selected center offset [mm]",
+        cmap="coolwarm", symmetric=True, reduce="mean")
+    save_projected_query_overlay(
+        out / "query_best_local_utility.png", rgb, token_ids, best,
+        "Best local CDF utility", cmap="magma", reduce="max")
 
 
 def _project_xyz(xyz: np.ndarray, K: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -621,6 +730,81 @@ def _project_xyz(xyz: np.ndarray, K: np.ndarray) -> Tuple[np.ndarray, np.ndarray
     uv[:, 1] = K[1, 1] * xyz[:, 1] / np.maximum(z, 1e-6) + K[1, 2]
     return uv, valid
 
+
+def _grasp_display_color(index: int, count: int,
+                         eval_score: Optional[float] = None,
+                         collision: bool = False) -> np.ndarray:
+    if eval_score is not None:
+        if collision or eval_score <= 0:
+            return np.asarray([.30, .30, .30], np.float32)
+        if eval_score <= .4:
+            return np.asarray([.15, .80, .20], np.float32)
+        if eval_score <= .8:
+            return np.asarray([1.00, .75, .10], np.float32)
+        return np.asarray([1.00, .30, .10], np.float32)
+    t = float(index) / max(1, int(count) - 1)
+    return np.asarray([t, .8 - .4 * t, 1. - t], np.float32)
+
+
+def save_grasp_scene_mesh_ply(path: str | Path, scene_points: Any,
+                              scene_colors: Optional[Any], grasps: Any,
+                              topk: int = 50,
+                              eval_scores: Optional[Any] = None,
+                              collision: Optional[Any] = None) -> bool:
+    """Save scene point cloud + true GraspNet gripper triangle meshes in one PLY.
+
+    Unlike save_grasp_scene_ply(), the grippers remain surfaces/faces instead
+    of being resampled into sparse points, so pose/width are easier to inspect.
+    """
+    try:
+        from graspnetAPI.grasp import GraspGroup
+    except Exception:
+        return False
+    pts = np.asarray(scene_points, np.float32).reshape(-1, 3)
+    if scene_colors is None:
+        cols = np.full((len(pts), 3), .55, np.float32)
+    else:
+        cols = np.clip(
+            np.asarray(scene_colors, np.float32).reshape(-1, 3), 0, 1)
+    g = np.asarray(to_numpy(grasps), np.float32).reshape(-1, 17)
+    if not len(g):
+        _write_pointcloud_mesh_ply(
+            path, pts, cols, np.empty((0, 3), np.float32),
+            np.empty((0, 3), np.int64), np.empty((0, 3), np.float32))
+        return True
+    order = np.argsort(-g[:, 0], kind="stable")[:min(int(topk), len(g))]
+    selected = g[order]
+    ev = None if eval_scores is None else np.asarray(eval_scores).reshape(-1)[order]
+    co = None if collision is None else np.asarray(collision).reshape(-1)[order]
+    gg = GraspGroup(selected.copy())
+    vertices, faces, colors = [], [], []
+    vertex_offset = 0
+    for i, geom in enumerate(gg.to_open3d_geometry_list()):
+        try:
+            v = np.asarray(geom.vertices, dtype=np.float32)
+            tri = np.asarray(geom.triangles, dtype=np.int64)
+        except Exception:
+            continue
+        if len(v) == 0 or len(tri) == 0:
+            continue
+        color = _grasp_display_color(
+            i, len(selected),
+            None if ev is None else float(ev[i]),
+            False if co is None else bool(co[i]))
+        vertices.append(v)
+        faces.append(tri + vertex_offset)
+        colors.append(np.repeat(color[None], len(v), axis=0))
+        vertex_offset += len(v)
+    if vertices:
+        mv = np.concatenate(vertices, axis=0)
+        mf = np.concatenate(faces, axis=0)
+        mc = np.concatenate(colors, axis=0)
+    else:
+        mv = np.empty((0, 3), np.float32)
+        mf = np.empty((0, 3), np.int64)
+        mc = np.empty((0, 3), np.float32)
+    _write_pointcloud_mesh_ply(path, pts, cols, mv, mf, mc)
+    return True
 
 def save_grasp_scene_ply(path: str | Path, scene_points: Any,
                          scene_colors: Optional[Any], grasps: Any,
@@ -769,7 +953,7 @@ def save_local_patch_overlay(path: str | Path, rgb: np.ndarray,
             if vm is not None and not bool(vm[qi].reshape(-1)[j]):
                 continue
             color = (int(255 * (1 - ww)), int(80 + 175 * ww), int(255 * ww))
-            cv2.circle(img, (int(round(u)), int(round(v))), 1 + int(ww > .65),
+            cv2.circle(img, (int(round(u)), int(round(v))), 2 + int(ww > .65),
                        color, -1, cv2.LINE_AA)
         if c is not None:
             u, v = np.round(c[qi]).astype(int)
