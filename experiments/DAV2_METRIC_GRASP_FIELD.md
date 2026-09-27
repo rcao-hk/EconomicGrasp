@@ -274,9 +274,16 @@ A: RANKING_WEIGHT=0
 B: RANKING_WEIGHT=0.1
 ```
 
-Both explicitly use `INIT_CHECKPOINT=''`. Defaults match the 4-GPU setup
-(`GPUS=0,1,2,3`, `BATCH_SIZE=3`), so effective batch is 12. The default
-phase is training only:
+Both explicitly use `INIT_CHECKPOINT=''`. The two variants run concurrently
+on disjoint 3-GPU sets:
+
+```text
+no_ranking  -> GPUs 0,1,2
+ranking     -> GPUs 3,5,6
+```
+
+With the default `BATCH_SIZE=3`, both variants therefore use the same effective
+batch of 9. The default phase is training only:
 
 ```bash
 bash scripts/run_metric_grasp_field_ranking_ablation.sh
@@ -286,12 +293,15 @@ To override the root while preserving the controlled protocol:
 
 ```bash
 ABLATION_ROOT=/data2/robotarm/result/grasp/rgbgrasp/dav2_mgf_ranking_ablation_10pct \
-GPUS=0,1,2,3 BATCH_SIZE=3 SEED=42 \
+NO_RANK_GPUS=0,1,2 RANK_GPUS=3,5,6 \
+BATCH_SIZE=3 SEED=42 \
 bash scripts/run_metric_grasp_field_ranking_ablation.sh
 ```
 
-The runs are sequential on the same GPUs to avoid resource-contention
-confounds. After both complete, the launcher calls
+The two jobs are launched in parallel and write separate `launcher.log` files.
+The GPU sets are required to contain exactly three numeric IDs each and to be
+disjoint. If either variant fails, the wrapper terminates the other job instead
+of letting an unmatched run continue. After both complete, the launcher calls
 `compare_metric_grasp_field_ranking.py`, which fails if the two protocols
 differ in anything other than `ranking_weight` and writes:
 
