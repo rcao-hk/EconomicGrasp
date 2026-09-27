@@ -36,6 +36,7 @@ BASE_CONFIG = {
     "multi_modal": True, "use_cdf": True, "extend_angle": True,
     "use_obs_depth": False, "use_gt_depth": False, "use_fuse_depth": False,
     "use_top4_view_infer": False, "graspness_mode": "scene",
+    "cdf_label_folder": "economic_grasp_label_300views_extend_angle_cdf_depth",
 }
 
 
@@ -153,15 +154,100 @@ def configure_base(config, field_config, pose_mode, *, top4=False):
 
 def make_dataset(root, split, fraction, *, labels, max_frames=0):
     from dataset.graspnet_dataset import GraspNetMultiDataset
-    dataset = GraspNetMultiDataset(
+    base = GraspNetMultiDataset(
         root, camera="realsense", split=split, num_points=20000,
         remove_outlier=True, augment=False, load_label=labels,
         use_gt_depth=False, use_fuse_depth=False, graspness_mode="scene",
         min_depth=.2, max_depth=1., bin_num=256, depth_strides=1,
         extend_angle=True,
+        # IMPORTANT: the canonical CVA adapter below is the sole owner of the
+        # extended CDF cache. Direct GraspNetMultiDataset loading converts
+        # widths_depth_mm to metres, while process_grasp_labels_cdf_width()
+        # expects raw uint16 millimetres and applies 1e-3 itself.
+        load_grasp_payload=False,
     )
+    if labels:
+        from dataset.cdf_label_adapter import CVAExtendedLabelAdapter
+        dataset = CVAExtendedLabelAdapter(
+            base,
+            dataset_root=root,
+            use_cdf=True,
+            label_folder=str(
+                BASE_CONFIG.get(
+                    "cdf_label_folder",
+                    "economic_grasp_label_300views_extend_angle_cdf_depth",
+                )
+            ),
+            num_angle=int(BASE_CONFIG["num_angle"]),
+            num_depth=int(BASE_CONFIG["num_depth"]),
+        )
+    else:
+        dataset = base
     indices = sampled_indices(len(dataset), fraction, max_frames)
     return dataset, Subset(dataset, indices), indices
+
+
+def validate_cdf_cpu_label_contract(batch):
+    """Match main's CDF cache-unit contract before any GPU transfer.
+
+    The canonical adapter must preserve widths as uint16 millimetres. The
+    online matcher is the only place that converts those values to metres.
+    """
+    required = {
+        "object_poses_list",
+        "grasp_points_list",
+        "view_graspness_list",
+        "top_view_index_list",
+        "grasp_cdf_bins_list",
+        "grasp_widths_depth_list",
+        "grasp_width_valids_depth_list",
+        "cdf_thresholds",
+    }
+    missing = sorted(key for key in required if key not in batch)
+    if missing:
+        raise KeyError(f"CDF training batch is missing labels: {missing}")
+
+    batch_size = len(batch["object_poses_list"])
+    list_keys = sorted(required - {"cdf_thresholds"})
+    for key in list_keys:
+        value = batch[key]
+        if not isinstance(value, (list, tuple)) or len(value) != batch_size:
+            raise TypeError(f"{key} must be a batch list of length {batch_size}")
+
+    for batch_i in range(batch_size):
+        n_obj = len(batch["object_poses_list"][batch_i])
+        if n_obj <= 0:
+            raise RuntimeError(f"Batch item {batch_i} has no active CVA objects")
+        for key in list_keys:
+            if len(batch[key][batch_i]) != n_obj:
+                raise RuntimeError(
+                    f"{key}[{batch_i}] has {len(batch[key][batch_i])} "
+                    f"objects, expected {n_obj}"
+                )
+        for obj_i, tensor in enumerate(batch["grasp_widths_depth_list"][batch_i]):
+            if not torch.is_tensor(tensor) or tensor.dtype != torch.uint16:
+                raise TypeError(
+                    "grasp_widths_depth_list must stay raw uint16 millimetres "
+                    "until process_grasp_labels_cdf_width(); got "
+                    f"{type(tensor).__name__} "
+                    f"{getattr(tensor, 'dtype', None)} at [{batch_i}][{obj_i}]"
+                )
+            if tensor.device.type != "cpu":
+                raise RuntimeError(
+                    f"grasp_widths_depth_list[{batch_i}][{obj_i}] "
+                    f"must remain on CPU, got {tensor.device}"
+                )
+        for obj_i, tensor in enumerate(batch["grasp_cdf_bins_list"][batch_i]):
+            if not torch.is_tensor(tensor) or tensor.dtype != torch.uint8:
+                raise TypeError(
+                    f"CDF bins must remain uint8 at [{batch_i}][{obj_i}]"
+                )
+        for obj_i, tensor in enumerate(batch["grasp_width_valids_depth_list"][batch_i]):
+            if not torch.is_tensor(tensor) or tensor.dtype != torch.uint8:
+                raise TypeError(
+                    "width validity cache must remain uint8 at "
+                    f"[{batch_i}][{obj_i}]"
+                )
 
 
 def move_batch(batch, device, *, inference=False):
@@ -172,6 +258,8 @@ def move_batch(batch, device, *, inference=False):
     input. This preserves main's dataset crop; it does NOT claim that upstream
     dataset cropping/workspace generation is itself annotation-independent.
     """
+    if not inference:
+        validate_cdf_cpu_label_contract(batch)
     out = {}
     for key, value in batch.items():
         if isinstance(value, (list, tuple)):
