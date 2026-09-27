@@ -14,7 +14,10 @@ from metric_grasp_field_core import (
     MetricFieldConfig, MetricRayEvidenceHead, TaskFeatureAdapter, GraspFieldReadout,
     cdf_at, evidence_at, geometry_loss, gripper_support, project_points, sample_map,
 )
-from metric_field_runtime import sampled_indices, move_batch, atomic_json, digest
+from metric_field_runtime import (
+    sampled_indices, move_batch, atomic_json, digest,
+    validate_cdf_cpu_label_contract,
+)
 
 
 def wrapper_module():
@@ -244,6 +247,29 @@ def test_candidate_actions_match_main_decode_width_and_insertion():
     torch.testing.assert_close(a[0, :, 1], torch.full((8,), .06))
     torch.testing.assert_close(a[0, :, 3], torch.tensor([.01, .02, .03, .04]*2))
     torch.testing.assert_close(a[0, :, 15], torch.full((8,), .6))
+
+
+def _minimal_cdf_batch(width_dtype=torch.uint16):
+    return {
+        "object_poses_list": [[torch.eye(4)[:3]]],
+        "grasp_points_list": [[torch.ones(2, 3)]],
+        "view_graspness_list": [[torch.ones(2, 300)]],
+        "top_view_index_list": [[torch.ones(2, 5, dtype=torch.int32)]],
+        "grasp_cdf_bins_list": [[torch.ones(2, 5, 12, 4, dtype=torch.uint8)]],
+        "grasp_widths_depth_list": [[torch.ones(2, 5, 12, 4, dtype=width_dtype)]],
+        "grasp_width_valids_depth_list": [[torch.ones(2, 5, 12, 4, dtype=torch.uint8)]],
+        "cdf_thresholds": torch.tensor([[.2, .4, .6, .8, 1., 1.2]]),
+    }
+
+
+def test_cdf_width_cache_must_stay_uint16_millimetres():
+    good = _minimal_cdf_batch(torch.uint16)
+    validate_cdf_cpu_label_contract(good)
+    bad = _minimal_cdf_batch(torch.float32)
+    # This reproduces the old direct-dataset path: widths had already been
+    # divided by 1000 before the matcher applied its own mm->m conversion.
+    with pytest.raises(TypeError, match="raw uint16 millimetres"):
+        validate_cdf_cpu_label_contract(bad)
 
 
 def test_batch_annotation_payload_stays_host_and_infer_drops_depth():
