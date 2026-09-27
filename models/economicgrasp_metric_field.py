@@ -17,7 +17,7 @@ from metric_grasp_field_core import (
     GraspFieldReadout, geometry_loss,
 )
 
-VERSION = "dav2_metric_grasp_field_detach_v1"
+VERSION = "dav2_metric_grasp_field_detach_rank_v2"
 DAV2_CONFIGS = {
     "vits": (384, 64, [48, 96, 192, 384]),
     "vitb": (768, 128, [96, 192, 384, 768]),
