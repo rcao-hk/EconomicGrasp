@@ -321,11 +321,17 @@ def test_cdf_width_cache_must_stay_uint16_millimetres():
 
 
 def test_batch_annotation_payload_stays_host_and_infer_drops_depth():
-    payload = [[torch.ones(2, 3)]]
-    batch = {"img": torch.ones(1, 3, 4, 4), "K": camera(), "object_poses_list": payload,
-             "gt_depth_m": torch.ones(1, 1, 4, 4), "sensor_depth_m": torch.ones(1, 1, 4, 4)}
+    batch = _minimal_cdf_batch()
+    payload = batch["object_poses_list"]
+    batch.update({
+        "img": torch.ones(1, 3, 4, 4),
+        "K": camera(),
+        "gt_depth_m": torch.ones(1, 1, 4, 4),
+        "sensor_depth_m": torch.ones(1, 1, 4, 4),
+    })
     train = move_batch(batch, "cpu")
     assert train["object_poses_list"] is payload
+    assert train["grasp_widths_depth_list"][0][0].device.type == "cpu"
     infer = move_batch(batch, "cpu", inference=True)
     assert set(infer) == {"img", "K"}
 
