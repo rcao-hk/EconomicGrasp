@@ -352,9 +352,50 @@ def metric_field_loss(ep, config, *, profile_weight=1., profile_mean_weight=10.,
     geometric = (cfgs.depth_prob_loss_weight*geom["depth_l1"] +
                  profile_weight*geom["profile_ce"] + profile_mean_weight*geom["profile_mean_l1"])
     total = task + geometric
+
+    # Unit/ranking diagnostics. These are observational only and do not alter
+    # gradients. They make catastrophic width-unit mistakes visible in epoch 0.
+    with torch.no_grad():
+        cdf_bins = ep["batch_grasp_cdf_bins_angle_depth"].long()
+        cdf_valid = ep["batch_grasp_cdf_valid_mask"].bool()
+        width_label = ep["batch_grasp_width_angle_depth"].float()
+        width_valid = ep["batch_grasp_width_valid_mask_angle_depth"].bool()
+        pred_width_m = (
+            1.2
+            * ep["grasp_width_pred_angle_depth"].float().permute(0, 2, 3, 1)
+            / 10.0
+        ).clamp(0.0, float(cfgs.grasp_max_width))
+
+        zero = total.detach() * 0.0
+        cdf_candidate_positive = (
+            (cdf_bins[cdf_valid] > 0).float().mean()
+            if bool(cdf_valid.any()) else zero
+        )
+        width_label_mean = (
+            width_label[width_valid].mean()
+            if bool(width_valid.any()) else zero
+        )
+        width_label_max = (
+            width_label[width_valid].max()
+            if bool(width_valid.any()) else zero
+        )
+        width_pred_mean = (
+            pred_width_m[width_valid].mean()
+            if bool(width_valid.any()) else zero
+        )
+        width_pred_max = (
+            pred_width_m[width_valid].max()
+            if bool(width_valid.any()) else zero
+        )
+
     stats = {"loss": total, "task_loss": task, "geometry_loss": geometric,
              "cdf": cdf, "base_cdf": base_cdf, "width": width, "objectness": obj,
              "graspness": gra, "view": view,
+             "cdf_candidate_positive_fraction": cdf_candidate_positive,
+             "width_label_m_mean": width_label_mean,
+             "width_label_m_max": width_label_max,
+             "width_pred_decoded_m_mean": width_pred_mean,
+             "width_pred_decoded_m_max": width_pred_max,
              "empty_objects_dropped": ep["D: MGF Empty Objects Dropped"].detach(),
              **geom}
     return total, stats
