@@ -102,9 +102,38 @@ Default objective:
 
 ```
 L_task = 1*objectness + 10*graspness + 100*view + 10*width
-         + 1*field_CDF_BCE + .25*base_CDF_BCE
+         + 1*(field_CDF_BCE + 1.0*query_listwise_rank + .25*base_CDF_BCE)
 L_geometry = 10*main_depth_L1 + 1*profile_CE + 10*profile_mean_L1
 ```
+
+The original unbalanced field CDF BCE remains unchanged and preserves the
+absolute success-probability objective. The new ranking term is auxiliary and
+acts only on the field scorer; the base CVA scorer remains an auxiliary BCE
+control.
+
+For each matched query `q`, its `A x D = 12 x 4 = 48` candidates are ranked
+against one another. With `T` friction thresholds,
+
+```text
+target_utility(cdf_bin=0) = 0
+target_utility(cdf_bin=k) = (T-k+1)/T
+pred_utility              = mean_t sigmoid(cdf_logit_t)
+```
+
+Invalid candidates are excluded. A query is used only when at least two
+candidates are valid and its target utilities are non-constant; all-zero/tied
+queries contain no ranking information and are skipped. The ranking target and
+prediction are converted to distributions with a temperature-scaled softmax and
+optimized with
+
+```text
+KL(target_softmax || predicted_softmax).
+```
+
+Defaults are `RANKING_WEIGHT=1.0` and `RANKING_TEMPERATURE=0.1`. Both are
+stored in the training protocol and therefore cannot silently change on resume.
+Set `RANKING_WEIGHT=0` for the no-ranking ablation without changing the
+architecture.
 
 The existing depth L1 retains main's full-image masked normalization. The new
 profile losses average valid geometry labels. Base CDF is a configurable auxiliary
@@ -214,11 +243,32 @@ the identical valid mask/labels, making their within-run comparison meaningful.
 The training log prints field gap/AUROC/AUPRC and base gap/AUROC every
 `--log-every` steps; epoch aggregates are saved in `metrics.json`.
 
+The listwise objective also records:
+
+```text
+ranking
+ranking_weighted
+ranking_informative_query_fraction
+ranking_informative_query_count
+ranking_target_range_mean
+ranking_selected_target_utility
+ranking_oracle_target_utility
+ranking_selection_regret
+ranking_top1_best_hit
+```
+
+The most useful smoke criteria are: informative-query fraction must be nonzero,
+selection regret should fall, top-1 best-hit should rise, and the field
+pos/neg gap / AUROC / AUPRC lift should improve without destroying CDF
+calibration. Ranking metrics are computed only on informative within-query
+candidate sets and do not use cross-scene candidate pairs.
+
 ### Formal online training + inference + evaluation
 
 ```bash
 WORK_ROOT=/data2/robotarm/result/grasp/rgbgrasp/dav2_metric_grasp_field_10pct \
 GPUS=0,1,2,3,4,5 BATCH_SIZE=1 EPOCHS=20 \
+RANKING_WEIGHT=1.0 RANKING_TEMPERATURE=0.1 \
 PHASES=train,infer,eval \
 bash scripts/run_metric_grasp_field.sh
 ```
