@@ -87,6 +87,17 @@ translations/widths. This distinction must remain explicit in comparisons with
 Rep-P0/P1. It is impossible to promise arbitrary-action exact labels while neither
 reading an action-label cache nor evaluating those actions online.
 
+The training dataset MUST follow main's canonical `CVAExtendedLabelAdapter`
+path: the base `GraspNetMultiDataset` is constructed with
+`load_grasp_payload=False`, and the adapter is the sole owner of the CDF cache.
+In CDF mode, `widths_depth_mm` must remain `uint16` millimetres until
+`process_grasp_labels_cdf_width()` performs the single mm-to-metre conversion.
+Directly loading the extended cache through `GraspNetMultiDataset` converts
+widths to metres too early and the matcher then applies a second `1e-3`, causing
+decoded gripper widths to collapse to at most about 0.12 mm and official AP to
+become zero. `validate_cdf_cpu_label_contract()` now fails before training if
+this unit/dtype contract is violated.
+
 Default objective:
 
 ```
