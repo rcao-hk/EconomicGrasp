@@ -263,6 +263,50 @@ pos/neg gap / AUROC / AUPRC lift should improve without destroying CDF
 calibration. Ranking metrics are computed only on informative within-query
 candidate sets and do not use cross-scene candidate pairs.
 
+### Controlled 20-epoch ranking ablation
+
+For the formal comparison of the ranking objective, use the dedicated sequential
+launcher. It runs two fresh models on the identical 10% schedule with identical
+seed, GPUs, batch size, optimizer and architecture:
+
+```text
+A: RANKING_WEIGHT=0
+B: RANKING_WEIGHT=0.1
+```
+
+Both explicitly use `INIT_CHECKPOINT=''`. Defaults match the 4-GPU setup
+(`GPUS=0,1,2,3`, `BATCH_SIZE=3`), so effective batch is 12. The default
+phase is training only:
+
+```bash
+bash scripts/run_metric_grasp_field_ranking_ablation.sh
+```
+
+To override the root while preserving the controlled protocol:
+
+```bash
+ABLATION_ROOT=/data2/robotarm/result/grasp/rgbgrasp/dav2_mgf_ranking_ablation_10pct \
+GPUS=0,1,2,3 BATCH_SIZE=3 SEED=42 \
+bash scripts/run_metric_grasp_field_ranking_ablation.sh
+```
+
+The runs are sequential on the same GPUs to avoid resource-contention
+confounds. After both complete, the launcher calls
+`compare_metric_grasp_field_ranking.py`, which fails if the two protocols
+differ in anything other than `ranking_weight` and writes:
+
+```text
+comparison/comparison.md
+comparison/comparison.json
+comparison/per_epoch.tsv
+```
+
+The primary comparison is epoch 20 / `checkpoint_latest.pt`. This is
+intentional: `checkpoint_best.pt` is selected by CDF BCE and can prefer a
+constant-prior solution, which would bias a ranking-loss ablation. If official
+AP is also desired, set `PHASES=train,infer,eval`; the wrapper defaults
+`CHECKPOINT_KIND=latest` for both variants.
+
 ### Formal online training + inference + evaluation
 
 ```bash
