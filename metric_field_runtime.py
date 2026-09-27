@@ -18,7 +18,7 @@ from torch.utils.data import Subset
 from metric_grasp_field_core import MetricFieldConfig
 
 BASE_MAIN_SHA = "52d09f925059bec3643610ecf1f1722894627ee5"
-VERSION = "dav2_metric_grasp_field_detach_v1"
+VERSION = "dav2_metric_grasp_field_detach_rank_v2"
 DEFAULT_WORK = "/data2/robotarm/result/grasp/rgbgrasp/dav2_metric_grasp_field_10pct"
 BASE_CONFIG = {
     "num_view": 300, "num_angle": 12, "num_depth": 4, "m_point": 1024,
