@@ -32,7 +32,8 @@ from tools.grasp_behavior_viz import (
     save_backbone_feature_bundle, save_candidate_latent_response,
     save_corruption_motion, save_depth_bundle,
     save_depth_feature_bundle, save_feature_bundle, save_grasp_overlay,
-    save_grasp_scene_ply, save_local_patch_overlay, save_proposal_bundle,
+    save_grasp_scene_mesh_ply, save_grasp_scene_ply, save_local_patch_overlay,
+    save_proposal_bundle,
     save_pose_depth_bundle, save_query_response, save_query_scalar_overlay,
     save_rgb, save_heatmap, save_spatial_bundle,
     save_stage1_angle_depth, save_view_response, write_csv, write_html_index,
@@ -246,6 +247,11 @@ def save_eval_artifacts(out, method, result, rgb, K, scene_points, scene_colors,
         scene_points, scene_colors, result["ranked_grasps"],
         topk=topk, eval_scores=result["ranked_eval_scores"],
         collision=result["ranked_collision"])
+    save_grasp_scene_mesh_ply(
+        method_dir / "ranked_eval_scene_mesh.ply",
+        scene_points, scene_colors, result["ranked_grasps"],
+        topk=topk, eval_scores=result["ranked_eval_scores"],
+        collision=result["ranked_collision"])
     write_json(method_dir / "summary.json", result["stats"])
 
 
@@ -420,7 +426,8 @@ def main():
                             images.append((name, p))
                     for name in (
                             "pointcloud_pred_nominal.ply", "pointcloud_active.ply",
-                            "pointcloud_sensor.ply", "pointcloud_rendered.ply"):
+                            "pointcloud_sensor.ply", "pointcloud_rendered.ply",
+                            "pointcloud_active_green_predicted_red_rendered_gt_blue.ply"):
                         p = case_dir / name
                         if p.is_file():
                             files.append((name, p))
@@ -670,7 +677,12 @@ def main():
                         if save_grasp_scene_ply(
                                 ply, active_pts, active_cols, arr,
                                 topk=args.topk):
-                            files.append((f"{method} scene PLY", ply))
+                            files.append((f"{method} scene sampled-grasp PLY", ply))
+                        mesh_ply = case_dir / f"grasps_{method}_scene_mesh.ply"
+                        if save_grasp_scene_mesh_ply(
+                                mesh_ply, active_pts, active_cols, arr,
+                                topk=args.topk):
+                            files.append((f"{method} scene + grasp mesh PLY", mesh_ply))
 
                 if case == "nominal":
                     nominal_reference = {
@@ -716,6 +728,13 @@ def main():
                             f"{method} evaluator outcome",
                             case_dir / "evaluator" / method /
                             "ranked_eval_overlay.png"))
+                        eval_mesh = (
+                            case_dir / "evaluator" / method /
+                            "ranked_eval_scene_mesh.ply")
+                        if eval_mesh.is_file():
+                            files.append((
+                                f"{method} evaluator scene + grasp mesh PLY",
+                                eval_mesh))
 
                 case_manifest = {
                     "split": split, "scene_id": sid, "anno_id": aid,
