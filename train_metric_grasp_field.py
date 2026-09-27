@@ -308,9 +308,17 @@ def main():
                 sums[k] = sums.get(k, 0.) + b*v
             count += b
             if rank == 0 and (step+1) % args.log_every == 0:
-                print(f"[MGF TRAIN] epoch={epoch} step={step+1}/{total_batches} "
-                      f"loss={values['loss']:.5f} cdf={values['cdf']:.5f} "
-                      f"depth={values['depth_l1']:.5f}", flush=True)
+                print(
+                    f"[MGF TRAIN] epoch={epoch} step={step+1}/{total_batches} "
+                    f"loss={values['loss']:.5f} cdf={values['cdf']:.5f} "
+                    f"depth={values['depth_l1']:.5f} "
+                    f"field_gap={values['field_cdf_pos_neg_gap']:+.4f} "
+                    f"field_auc64={values['field_cdf_any_success_auroc64']:.4f} "
+                    f"field_auprc64={values['field_cdf_any_success_auprc64']:.4f} "
+                    f"base_gap={values['base_cdf_pos_neg_gap']:+.4f} "
+                    f"base_auc64={values['base_cdf_any_success_auroc64']:.4f}",
+                    flush=True,
+                )
             del ep, batch, loss, stats
         train_stats = reduce_sums(sums, count, device, world)
         # Rank-0 validation uses unwrapped model, avoiding DDP collective padding.
