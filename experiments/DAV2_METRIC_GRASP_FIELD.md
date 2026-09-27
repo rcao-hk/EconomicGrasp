@@ -102,7 +102,7 @@ Default objective:
 
 ```
 L_task = 1*objectness + 10*graspness + 100*view + 10*width
-         + 1*(field_CDF_BCE + 1.0*query_listwise_rank + .25*base_CDF_BCE)
+         + 1*(field_CDF_BCE + .1*query_listwise_rank + .25*base_CDF_BCE)
 L_geometry = 10*main_depth_L1 + 1*profile_CE + 10*profile_mean_L1
 ```
 
@@ -130,7 +130,7 @@ optimized with
 KL(target_softmax || predicted_softmax).
 ```
 
-Defaults are `RANKING_WEIGHT=1.0` and `RANKING_TEMPERATURE=0.1`. Both are
+Defaults are `RANKING_WEIGHT=0.1` and `RANKING_TEMPERATURE=0.1`. Both are
 stored in the training protocol and therefore cannot silently change on resume.
 Set `RANKING_WEIGHT=0` for the no-ranking ablation without changing the
 architecture.
@@ -268,7 +268,7 @@ candidate sets and do not use cross-scene candidate pairs.
 ```bash
 WORK_ROOT=/data2/robotarm/result/grasp/rgbgrasp/dav2_metric_grasp_field_10pct \
 GPUS=0,1,2,3,4,5 BATCH_SIZE=1 EPOCHS=20 \
-RANKING_WEIGHT=1.0 RANKING_TEMPERATURE=0.1 \
+RANKING_WEIGHT=0.1 RANKING_TEMPERATURE=0.1 \
 PHASES=train,infer,eval \
 bash scripts/run_metric_grasp_field.sh
 ```
