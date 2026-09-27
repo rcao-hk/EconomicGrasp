@@ -192,6 +192,83 @@ def test_cdf_discriminability_handles_one_class_without_nan():
     assert float(stats["field_cdf_any_success_auprc64"]) == 0.0
 
 
+def test_query_listwise_ranking_prefers_correct_within_query_order():
+    m = wrapper_module()
+    # One query, four angle-depth candidates. Target utilities from cdf bins:
+    # [0, 0.5, 1.0, 0] for T=2.
+    bins = torch.tensor([[[[0, 2, 1, 0]]]], dtype=torch.long)
+    valid = torch.ones_like(bins, dtype=torch.bool)
+
+    # Correct ordering: candidate 2 > candidate 1 > candidates 0/3.
+    good = torch.tensor(
+        [[[[[-8.0, 0.0, 8.0, -8.0]]],
+          [[[-8.0, 0.0, 8.0, -8.0]]]]],
+        requires_grad=True,
+    )
+    # Reversed ordering.
+    bad = torch.tensor(
+        [[[[[8.0, 0.0, -8.0, 8.0]]],
+          [[[8.0, 0.0, -8.0, 8.0]]]]],
+        requires_grad=True,
+    )
+
+    good_loss, good_stats = m.compute_query_listwise_ranking_loss(
+        good, bins, valid, temperature=0.1
+    )
+    bad_loss, bad_stats = m.compute_query_listwise_ranking_loss(
+        bad, bins, valid, temperature=0.1
+    )
+
+    assert torch.isfinite(good_loss)
+    assert torch.isfinite(bad_loss)
+    assert float(good_loss.detach()) < float(bad_loss.detach())
+    assert float(good_stats["ranking_informative_query_fraction"]) == 1.0
+    assert float(good_stats["ranking_top1_best_hit"]) == 1.0
+    assert float(good_stats["ranking_selection_regret"]) == 0.0
+    assert float(bad_stats["ranking_top1_best_hit"]) == 0.0
+    assert float(bad_stats["ranking_selection_regret"]) > 0.0
+
+    good_loss.backward()
+    assert good.grad is not None
+    assert torch.isfinite(good.grad).all()
+    assert float(good.grad.abs().sum()) > 0.0
+
+
+def test_query_listwise_ranking_skips_constant_target_queries():
+    m = wrapper_module()
+    bins = torch.zeros(1, 1, 1, 4, dtype=torch.long)
+    valid = torch.ones_like(bins, dtype=torch.bool)
+    logits = torch.zeros(1, 2, 1, 1, 4, requires_grad=True)
+
+    loss, stats = m.compute_query_listwise_ranking_loss(
+        logits, bins, valid, temperature=0.1
+    )
+    assert torch.isfinite(loss)
+    assert float(loss.detach()) == 0.0
+    assert float(stats["ranking_informative_query_fraction"]) == 0.0
+    assert float(stats["ranking_informative_query_count"]) == 0.0
+    loss.backward()
+    assert logits.grad is not None
+    torch.testing.assert_close(logits.grad, torch.zeros_like(logits.grad))
+
+
+def test_query_listwise_ranking_respects_invalid_candidates():
+    m = wrapper_module()
+    bins = torch.tensor([[[[0, 1, 0, 0]]]], dtype=torch.long)
+    valid = torch.tensor([[[[True, True, False, False]]]])
+    logits = torch.tensor(
+        [[[[[-4.0, 4.0, 20.0, 20.0]]],
+          [[[-4.0, 4.0, 20.0, 20.0]]]]],
+        requires_grad=True,
+    )
+    loss, stats = m.compute_query_listwise_ranking_loss(
+        logits, bins, valid, temperature=0.1
+    )
+    assert torch.isfinite(loss)
+    assert float(stats["ranking_top1_best_hit"]) == 1.0
+    assert float(stats["ranking_selection_regret"]) == 0.0
+
+
 def test_main_metric_loss_normalization_preserved():
     cfg = MetricFieldConfig(bins=8, hidden=8)
     logits = torch.zeros(1, 8, 2, 2, requires_grad=True)
