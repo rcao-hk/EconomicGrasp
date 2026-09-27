@@ -179,6 +179,41 @@ Check `train/gradient_contract.json`, `train/metrics.json`, saved grasp arrays,
 and absence of runtime errors. The evaluator refuses smoke/partial checkpoints
 and truncated inference schedules as formal AP runs.
 
+### CDF discriminability diagnostics
+
+Low CDF BCE is not sufficient because valid candidates are strongly imbalanced
+toward failure. Every train/validation batch therefore records the same
+candidate-level diagnostics for both the new field scorer (`field_*`) and the
+reused base CVA scorer (`base_*`):
+
+```text
+*_cdf_utility_pred_mean
+*_cdf_utility_target_mean
+*_cdf_utility_mae
+*_cdf_pred_pos_mean
+*_cdf_pred_neg_mean
+*_cdf_pos_neg_gap
+*_cdf_utility_pearson
+*_cdf_positive_fraction
+*_cdf_any_success_auroc64
+*_cdf_any_success_auprc64
+*_cdf_any_success_auprc_lift64
+```
+
+Candidate utility is the mean success probability across the six friction
+thresholds. A binary positive means `cdf_bin > 0`: the candidate succeeds at
+at least one configured threshold. `pos_neg_gap` should become positive;
+AUROC should rise above 0.5. Because positives can be only a few percent, AUPRC
+must be interpreted relative to `*_cdf_positive_fraction`; the reported lift
+is AUPRC divided by that prevalence.
+
+`auroc64` and `auprc64` use a fixed 64-bin utility histogram rather than a
+full candidate sort, so they are low-overhead approximations intended for
+training diagnostics, not benchmark metrics. Both field and base metrics use
+the identical valid mask/labels, making their within-run comparison meaningful.
+The training log prints field gap/AUROC/AUPRC and base gap/AUROC every
+`--log-every` steps; epoch aggregates are saved in `metrics.json`.
+
 ### Formal online training + inference + evaluation
 
 ```bash
