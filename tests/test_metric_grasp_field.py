@@ -144,6 +144,54 @@ def test_empty_gt_loss_is_finite_zero_and_connected():
     sum(losses.values()).backward()
 
 
+def test_cdf_discriminability_detects_perfect_and_reversed_ranking():
+    m = wrapper_module()
+    # Four valid candidates: two negatives (bin=0), two positives (bin=1).
+    bins = torch.tensor([[[[0, 1, 0, 1]]]], dtype=torch.long)
+    valid = torch.ones_like(bins, dtype=torch.bool)
+    # [B,T,Q,A,D], T=2.
+    perfect = torch.tensor(
+        [[[[[-8.0, 8.0, -7.0, 7.0]]],
+          [[[-8.0, 8.0, -7.0, 7.0]]]]]
+    )
+    reversed_logits = -perfect
+
+    good = m._cdf_discriminability_stats(
+        perfect, bins, valid, prefix="field", histogram_bins=64
+    )
+    bad = m._cdf_discriminability_stats(
+        reversed_logits, bins, valid, prefix="field", histogram_bins=64
+    )
+
+    assert float(good["field_cdf_pred_pos_mean"]) > float(
+        good["field_cdf_pred_neg_mean"]
+    )
+    assert float(good["field_cdf_pos_neg_gap"]) > 0.9
+    assert float(good["field_cdf_any_success_auroc64"]) == pytest.approx(1.0)
+    assert float(good["field_cdf_any_success_auprc64"]) == pytest.approx(1.0)
+    assert float(good["field_cdf_any_success_auprc_lift64"]) == pytest.approx(2.0)
+    assert float(good["field_cdf_utility_pearson"]) > 0.99
+
+    assert float(bad["field_cdf_pos_neg_gap"]) < -0.9
+    assert float(bad["field_cdf_any_success_auroc64"]) == pytest.approx(0.0)
+    assert float(bad["field_cdf_any_success_auprc64"]) == pytest.approx(0.5)
+    assert float(bad["field_cdf_utility_pearson"]) < -0.99
+
+
+def test_cdf_discriminability_handles_one_class_without_nan():
+    m = wrapper_module()
+    bins = torch.zeros(1, 1, 1, 4, dtype=torch.long)
+    valid = torch.ones_like(bins, dtype=torch.bool)
+    logits = torch.zeros(1, 2, 1, 1, 4)
+    stats = m._cdf_discriminability_stats(
+        logits, bins, valid, prefix="field", histogram_bins=64
+    )
+    assert all(torch.isfinite(v) for v in stats.values())
+    assert float(stats["field_cdf_positive_fraction"]) == 0.0
+    assert float(stats["field_cdf_any_success_auroc64"]) == 0.0
+    assert float(stats["field_cdf_any_success_auprc64"]) == 0.0
+
+
 def test_main_metric_loss_normalization_preserved():
     cfg = MetricFieldConfig(bins=8, hidden=8)
     logits = torch.zeros(1, 8, 2, 2, requires_grad=True)
