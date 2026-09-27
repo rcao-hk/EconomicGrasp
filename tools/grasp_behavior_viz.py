@@ -1057,23 +1057,13 @@ def save_view_response(out_dir: str | Path, rgb: np.ndarray,
         token = token[0] if token.ndim == 2 else token
         token = token.reshape(-1)
     n = min(len(token), entropy.shape[1])
-    h, w = rgb.shape[:2]
     for name, val, title in (
         ("view_entropy.png", entropy[0, :n], "View distribution entropy"),
         ("view_margin.png", margin[0, :n], "View top1-top2 probability margin"),
     ):
-        arr = sparse_query_map(token[:n], val, (h, w))
-        masked = np.ma.masked_invalid(arr)
-        plt = _plt()
-        fig, ax = plt.subplots(figsize=(6, 6), dpi=160)
-        ax.imshow(rgb)
-        im = ax.imshow(masked, cmap="magma", alpha=.75)
-        ax.axis("off")
-        ax.set_title(title)
-        fig.colorbar(im, ax=ax, fraction=.046, pad=.04)
-        fig.tight_layout(pad=0)
-        fig.savefig(Path(out_dir) / name)
-        plt.close(fig)
+        save_projected_query_overlay(
+            Path(out_dir) / name, rgb, token[:n], val, title,
+            cmap="magma", reduce="mean")
 
 
 def save_center_selection_motion(path: str | Path, rgb: np.ndarray, K: Any,
