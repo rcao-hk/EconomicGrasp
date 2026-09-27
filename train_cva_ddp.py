@@ -631,6 +631,7 @@ class Trainer:
             pose_depth_mode=getattr(cfgs, "pose_depth_mode", None),
             use_depth_comp=False,
             use_cdf=self.use_cdf,
+            detach_depth=bool(getattr(cfgs, "detach_depth", True)),
             vis_dir=getattr(cfgs, 'vis_dir', None) if self.main else None,
             vis_every=int(getattr(cfgs, 'vis_every', 1000)),
         )

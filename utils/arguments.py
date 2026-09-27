@@ -122,6 +122,18 @@ parser.add_argument(
 )
 
 parser.add_argument(
+    "--detach_depth",
+    type=int,
+    choices=(0, 1),
+    default=1,
+    help=(
+        "CVA-CDF training: 1 detaches depth at GSE, seed XYZ, and CVA support "
+        "sampling (default); 0 lets grasp losses update depth through all three. "
+        "The depth loss is unchanged. Used by train_cva_ddp.py and its wrappers."
+    ),
+)
+
+parser.add_argument(
     "--cdf_label_folder",
     type=str,
     default=(

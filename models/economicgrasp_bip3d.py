@@ -6396,6 +6396,7 @@ class economicgrasp_dpt(nn.Module):
         debug_print_every: int = 50,
         seed_selection_mode: str = "point_fps",
         geometry_depth_source: str = "pred",
+        detach_depth: bool = True,
     ):
         super().__init__()
         self.is_training = bool(is_training)
@@ -6442,6 +6443,8 @@ class economicgrasp_dpt(nn.Module):
         # CDF is an explicit model choice. Geometry diagnostics follow
         # visualization automatically: a non-empty vis_dir enables them.
         self.use_cdf = bool(use_cdf)
+        # One switch for GSE, seed XYZ, and CVA support-depth gradients.
+        self.detach_depth = bool(detach_depth) if self.use_cdf else True
         self.use_geometry_diagnostics = bool(vis_dir)
 
         self.stride = 1
@@ -6525,7 +6528,7 @@ class economicgrasp_dpt(nn.Module):
             min_depth=self.min_depth,
             max_depth=self.max_depth,
             num_depth=self.bin_num,
-            detach_depth_grad=True,      # 第一轮建议 True，避免破坏 depth_net
+            detach_depth_grad=self.detach_depth,
             use_post_norm=False,         # 第一轮建议 False，保持 path_1 分布
             vis_dir=None if self.vis_dir is None else os.path.join(self.vis_dir, 'spatial_enhancer'),
             vis_every=self.vis_every,
@@ -6604,6 +6607,7 @@ class economicgrasp_dpt(nn.Module):
 
         # Shared K-view selector/grouping configuration.
         self.kview_config = KViewQueryTransformerConfig(
+            detach_depth=self.detach_depth,
             mode=(
                 "A2"
                 if bool(
@@ -7238,7 +7242,7 @@ class economicgrasp_dpt(nn.Module):
             uv = torch.stack([u, v], dim=-1)
             seed_xyz = self._backproject_uvz(
                 uv,
-                z_seed if use_gt_xyz else z_seed.detach(),
+                z_seed if use_gt_xyz or not self.detach_depth else z_seed.detach(),
                 camera_K,
             )
 
@@ -7281,7 +7285,7 @@ class economicgrasp_dpt(nn.Module):
         ).clamp_min(1e-6)
         xyz_all_pred = self._backproject_uvz(
             uv_all,
-            z_all_pred.detach(),
+            z_all_pred.detach() if self.detach_depth else z_all_pred,
             camera_K,
         )
         if use_gt_xyz:
