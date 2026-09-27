@@ -57,6 +57,24 @@ def parser():
     p.add_argument("--profile-weight", type=float, default=1.)
     p.add_argument("--profile-mean-weight", type=float, default=10.)
     p.add_argument("--base-cdf-weight", type=float, default=.25)
+    p.add_argument(
+        "--ranking-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "Weight of the within-query listwise A x D ranking loss. "
+            "The original unbalanced CDF BCE remains active for calibration."
+        ),
+    )
+    p.add_argument(
+        "--ranking-temperature",
+        type=float,
+        default=0.1,
+        help=(
+            "Softmax temperature for both target and predicted candidate "
+            "utilities in the query-level listwise ranking loss."
+        ),
+    )
     p.add_argument("--max-train-frames", type=int, default=0)
     p.add_argument("--max-val-frames", type=int, default=0)
     p.add_argument("--max-steps", type=int, default=0, help="Per epoch smoke cap; marks run partial")
@@ -150,9 +168,16 @@ def main():
         raise ValueError("Epoch/batch/log/query counts must be positive")
     if min(args.max_steps, args.max_train_frames, args.max_val_frames, args.workers, args.eval_workers) < 0:
         raise ValueError("Frame/step/worker counts cannot be negative")
-    if min(args.lr, args.geometry_lr) <= 0 or min(args.weight_decay, args.profile_weight,
-                                                args.profile_mean_weight, args.base_cdf_weight) < 0:
+    if min(args.lr, args.geometry_lr) <= 0 or min(
+        args.weight_decay,
+        args.profile_weight,
+        args.profile_mean_weight,
+        args.base_cdf_weight,
+        args.ranking_weight,
+    ) < 0:
         raise ValueError("Invalid loss/optimizer settings")
+    if not math.isfinite(args.ranking_temperature) or args.ranking_temperature <= 0:
+        raise ValueError("--ranking-temperature must be finite and >0")
     if args.profile_weight == 0 or args.profile_mean_weight == 0:
         raise ValueError("The metric profile needs geometry supervision; keep both profile weights positive")
     if not torch.cuda.is_available():
@@ -180,7 +205,16 @@ def main():
     if not len(train_set) or not len(val_set):
         raise RuntimeError("Empty data schedule")
     official = Path("checkpoints") / f"depth_anything_v2_{args.encoder}.pth"
-    loss_kwargs = {k: getattr(args, k) for k in ("profile_weight", "profile_mean_weight", "base_cdf_weight")}
+    loss_kwargs = {
+        k: getattr(args, k)
+        for k in (
+            "profile_weight",
+            "profile_mean_weight",
+            "base_cdf_weight",
+            "ranking_weight",
+            "ranking_temperature",
+        )
+    }
     sampling = {"train": dataset_schedule(dataset, train_idx), "test_seen": dataset_schedule(val_full, val_idx)}
     protocol = {
         "version": VERSION, "base_main_sha": BASE_MAIN_SHA, "code_sha256": code_fingerprint(),
@@ -315,6 +349,10 @@ def main():
                     f"field_gap={values['field_cdf_pos_neg_gap']:+.4f} "
                     f"field_auc64={values['field_cdf_any_success_auroc64']:.4f} "
                     f"field_auprc64={values['field_cdf_any_success_auprc64']:.4f} "
+                    f"rank={values['ranking']:.4f} "
+                    f"rank_q={values['ranking_informative_query_fraction']:.3f} "
+                    f"rank_regret={values['ranking_selection_regret']:.4f} "
+                    f"rank_hit={values['ranking_top1_best_hit']:.3f} "
                     f"base_gap={values['base_cdf_pos_neg_gap']:+.4f} "
                     f"base_auc64={values['base_cdf_any_success_auroc64']:.4f}",
                     flush=True,
