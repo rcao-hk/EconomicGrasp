@@ -23,6 +23,11 @@ LR=${LR:-0.0001}
 GEOMETRY_LR=${GEOMETRY_LR:-0.00001}
 WEIGHT_DECAY=${WEIGHT_DECAY:-0.0001}
 SAMPLE_FRACTION=${SAMPLE_FRACTION:-0.1}
+TRAIN_FRACTION=${TRAIN_FRACTION:-$SAMPLE_FRACTION}
+EVAL_FRACTION=${EVAL_FRACTION:-$SAMPLE_FRACTION}
+USE_FUSE_DEPTH=${USE_FUSE_DEPTH:-0}
+LR_SCHEDULE=${LR_SCHEDULE:-constant}
+GRAD_CLIP=${GRAD_CLIP:-5.0}
 WORKERS=${WORKERS:-2}
 EVAL_WORKERS=${EVAL_WORKERS:-1}
 OFFICIAL_WORKERS=${OFFICIAL_WORKERS:-2}
@@ -63,6 +68,8 @@ export MALLOC_ARENA_MAX=${MALLOC_ARENA_MAX:-2}
 export PYTHONUNBUFFERED=1
 command -v setsid >/dev/null || { echo 'setsid is required' >&2; exit 2; }
 [[ "$CHECKPOINT_KIND" == best || "$CHECKPOINT_KIND" == latest ]] || { echo 'CHECKPOINT_KIND=best|latest' >&2; exit 2; }
+[[ "$USE_FUSE_DEPTH" == 0 || "$USE_FUSE_DEPTH" == 1 ]] || { echo 'USE_FUSE_DEPTH=0|1' >&2; exit 2; }
+[[ "$LR_SCHEDULE" == constant || "$LR_SCHEDULE" == cosine ]] || { echo 'LR_SCHEDULE=constant|cosine' >&2; exit 2; }
 [[ -d "$DATASET_ROOT" ]] || { echo "Missing dataset: $DATASET_ROOT" >&2; exit 2; }
 [[ -f "checkpoints/depth_anything_v2_${ENCODER}.pth" ]] || { echo "Missing official DAV2 $ENCODER checkpoint" >&2; exit 2; }
 IFS=',' read -r -a TRAIN_IDS <<< "$GPUS"
@@ -101,6 +108,7 @@ wait_wave() {
 resume=(); [[ "$RESUME" == 1 ]] && resume+=(--resume)
 amp=(); [[ "$AMP" == 1 ]] && amp+=(--amp)
 top4=(); [[ "$TOP4" == 1 ]] && top4+=(--top4)
+fuse_depth=(); [[ "$USE_FUSE_DEPTH" == 1 ]] && fuse_depth+=(--use-fuse-depth)
 
 for phase in "${STEPS[@]}"; do
   case "$phase" in
@@ -114,7 +122,10 @@ for phase in "${STEPS[@]}"; do
         --pose-mode "$POSE_MODE" --seed-mode "$SEED_MODE" \
         --epochs "$EPOCHS" --batch-size "$BATCH_SIZE" \
         --lr "$LR" --geometry-lr "$GEOMETRY_LR" --weight-decay "$WEIGHT_DECAY" \
-        --sample-fraction "$SAMPLE_FRACTION" --workers "$WORKERS" --eval-workers "$EVAL_WORKERS" \
+        --sample-fraction "$SAMPLE_FRACTION" \
+        --train-fraction "$TRAIN_FRACTION" --eval-fraction "$EVAL_FRACTION" \
+        --lr-schedule "$LR_SCHEDULE" --grad-clip "$GRAD_CLIP" \
+        --workers "$WORKERS" --eval-workers "$EVAL_WORKERS" \
         --m-point "$M_POINT" --group-chunk "$GROUP_CHUNK" --action-chunk "$ACTION_CHUNK" \
         --field-bins "$FIELD_BINS" --field-hidden "$FIELD_HIDDEN" --field-stride "$FIELD_STRIDE" \
         --evidence-mode "$EVIDENCE_MODE" --surface-epsilon "$SURFACE_EPSILON" \
@@ -123,7 +134,7 @@ for phase in "${STEPS[@]}"; do
         --base-cdf-weight "$BASE_CDF_WEIGHT" --ranking-weight "$RANKING_WEIGHT" \
         --ranking-temperature "$RANKING_TEMPERATURE" --max-train-frames "$MAX_TRAIN_FRAMES" \
         --max-val-frames "$MAX_VAL_FRAMES" --max-steps "$MAX_STEPS" --seed "$SEED" \
-        "${amp[@]}" "${resume[@]}"
+        "${fuse_depth[@]}" "${amp[@]}" "${resume[@]}"
       wait_wave
       ;;
     infer)
