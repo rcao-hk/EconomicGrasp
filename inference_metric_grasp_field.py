@@ -108,8 +108,16 @@ def main():
     if use_collision_filter:
         from graspnetAPI import GraspGroup
         from utils.collision_detector import ModelFreeCollisionDetectorTorch
-    full, _, indices = make_dataset(args.dataset_root, args.split, protocol["sample_fraction"],
-                                     labels=False, max_frames=args.max_frames)
+    eval_fraction = float(
+        protocol.get("eval_fraction", protocol["sample_fraction"])
+    )
+    full, _, indices = make_dataset(
+        args.dataset_root,
+        args.split,
+        eval_fraction,
+        labels=False,
+        max_frames=args.max_frames,
+    )
     schedule = dataset_schedule(full, indices)
     root = Path(args.output_root)
     collision_filter = (
@@ -127,6 +135,7 @@ def main():
            "checkpoint_epoch": epoch, "training_protocol": protocol,
            "code_sha256": code_fingerprint(), "split": args.split,
            "schedule": schedule, "top4": args.top4,
+           "evaluation_fraction": eval_fraction,
            "score_source": args.score_source,
            "max_frames": args.max_frames, "collision_filter": collision_filter,
            "prediction_modalities": (
