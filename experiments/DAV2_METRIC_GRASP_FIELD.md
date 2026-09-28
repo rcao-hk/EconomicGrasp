@@ -356,6 +356,32 @@ paired collision-off AP when available, and the rejection ratio.
 Use `RESUME=1` only when continuing matching partial/existing inference dumps;
 fresh evaluation should keep the default `RESUME=0`.
 
+To isolate whether the new Metric Field scorer itself is responsible for an AP
+drop, the inference script also supports:
+
+```text
+--score-source field   # default: Metric Grasp Field logits
+--score-source base    # reused Base CVA-CDF logits from the same forward pass
+```
+
+The Base-CVA diagnostic changes only the final CDF tensor consumed by
+`pred_decode_center_view_angle()`; centers, selected views, predicted metric
+depth, width prediction, checkpoint weights, and dataset schedule are otherwise
+unchanged. Run both collision settings for both ranking-ablation checkpoints via:
+
+```bash
+bash scripts/run_metric_grasp_field_base_cva_2x2_eval.sh
+```
+
+The script executes the no-ranking and ranking checkpoints in parallel on
+`0,1,2` and `3,5,6`, first with collision filtering disabled and then with
+the historical `0.01` sensor-cloud collision filter. Outputs are isolated under
+`test_latest_base_cva_nocollision` and
+`test_latest_base_cva_collision0p01`. The final
+`comparison_base_vs_field_2x2/comparison.md/json` includes existing Field
+results when available and reports Base-minus-Field deltas under both collision
+settings.
+
 ### Formal online training + inference + evaluation
 
 ```bash
