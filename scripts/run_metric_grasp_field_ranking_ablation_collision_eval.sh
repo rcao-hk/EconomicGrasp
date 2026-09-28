@@ -194,6 +194,9 @@ rank_root = Path(sys.argv[2])
 no_col_root = Path(sys.argv[3])
 rank_col_root = Path(sys.argv[4])
 out = Path(sys.argv[5])
+collision_thresh = float(sys.argv[6])
+collision_voxel = float(sys.argv[7])
+collision_approach = float(sys.argv[8])
 out.mkdir(parents=True, exist_ok=True)
 splits = ("test_seen", "test_similar", "test_novel")
 
@@ -222,6 +225,8 @@ def retention(root, split):
 
 
 def vec_delta(a, b):
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return float(a) - float(b)
     if not isinstance(a, list) or not isinstance(b, list) or len(a) != len(b):
         return None
     return [float(x) - float(y) for x, y in zip(a, b)]
@@ -230,9 +235,9 @@ def vec_delta(a, b):
 result = {
     "collision_protocol": {
         "source": "original_graspnet_sensor_point_cloud",
-        "threshold": 0.01,
-        "voxel_size_m": 0.01,
-        "approach_dist_m": 0.05,
+        "threshold": collision_thresh,
+        "voxel_size_m": collision_voxel,
+        "approach_dist_m": collision_approach,
     },
     "no_ranking": {},
     "ranking": {},
@@ -268,7 +273,8 @@ lines = [
     "# MGF Collision-On Evaluation",
     "",
     "Protocol: original GraspNet sensor-cloud model-free collision filter; "
-    "threshold=0.01, voxel=0.01 m, approach=0.05 m.",
+    f"threshold={collision_thresh}, voxel={collision_voxel} m, "
+    f"approach={collision_approach} m.",
     "",
 ]
 for name in ("no_ranking", "ranking"):
