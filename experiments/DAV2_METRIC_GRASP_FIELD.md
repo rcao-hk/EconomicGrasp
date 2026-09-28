@@ -382,6 +382,58 @@ the historical `0.01` sensor-cloud collision filter. Outputs are isolated under
 results when available and reports Base-minus-Field deltas under both collision
 settings.
 
+### Mixed-setting-matched 20% GraspNet control
+
+The current GN-Trans mixed CVA setting uses 3 GPUs, batch size 3/GPU, 20 epochs,
+AdamW with LR `3e-4`, weight decay `1e-3`, cosine epoch LR decay, gradient
+clip 1.0, fused-depth supervision, and seed 0. The mixed data exposure is
+10% GraspNet + 10% GN-Trans = 5,200 samples/epoch.
+
+To compare the Metric Grasp Field at the same exposure without changing its
+architecture, use the dedicated 20% GraspNet control:
+
+```bash
+bash scripts/run_metric_grasp_field_mixed_matched20.sh
+```
+
+Its default contract is:
+
+```text
+train_fraction       = 0.2   # 5200 GraspNet frames
+eval_fraction        = 0.1   # 780 Seen-val frames
+GPUs                 = 0,1,2
+batch_per_gpu        = 3
+effective_batch      = 9
+epochs               = 20
+task_lr              = 3e-4
+geometry_lr          = 3e-4
+weight_decay         = 1e-3
+lr_schedule          = cosine
+grad_clip            = 1.0
+use_fuse_depth       = true
+seed                 = 0
+init_checkpoint      = ''
+ranking_weight       = 0.1
+ranking_temperature  = 0.1
+```
+
+The trainer now stores independent `train_fraction` and `eval_fraction` in
+the protocol. `sample_fraction` remains only as a backward-compatible alias
+for the training fraction. Inference and official evaluation use
+`eval_fraction` when present, so a 20%-train / 10%-test protocol evaluates
+exactly the same 10% Seen/Similar/Novel schedules as the mixed control.
+
+With `use_fuse_depth`, the geometry target follows the canonical
+EconomicGrasp convention: rendered object depth is retained in object regions
+and fused TSDF depth supplies the background. This target is supervision only;
+inference remains RGB + camera metadata until an optional post-hoc collision
+filter is explicitly requested.
+
+The dedicated wrapper validates the saved protocol after training and fails if
+the default matched contract silently changes. Set `PHASES=train,infer,eval`
+to continue directly to epoch-20/latest inference/evaluation; the wrapper then
+defaults to the historical sensor-cloud collision threshold 0.01.
+
 ### Formal online training + inference + evaluation
 
 ```bash
