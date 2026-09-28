@@ -45,6 +45,8 @@ MAX_TRAIN_FRAMES=${MAX_TRAIN_FRAMES:-0}
 MAX_VAL_FRAMES=${MAX_VAL_FRAMES:-0}
 MAX_STEPS=${MAX_STEPS:-0}
 INFER_MAX_FRAMES=${INFER_MAX_FRAMES:-0}
+INFER_BATCH_SIZE=${INFER_BATCH_SIZE:-1}
+SCORE_SOURCE=${SCORE_SOURCE:-field}
 COLLISION_THRESH=${COLLISION_THRESH:-0}
 COLLISION_VOXEL_SIZE=${COLLISION_VOXEL_SIZE:-0.01}
 COLLISION_APPROACH_DIST=${COLLISION_APPROACH_DIST:-0.05}
@@ -133,7 +135,9 @@ for phase in "${STEPS[@]}"; do
             "$ROOT_DIR/inference_metric_grasp_field.py" --dataset-root "$DATASET_ROOT" \
             --checkpoint "$ckpt" --output-root "$TEST_ROOT" --split "$split" \
             --shard-id "$shard" --num-shards "${#INFER_IDS[@]}" \
+            --batch-size "$INFER_BATCH_SIZE" \
             --max-frames "$INFER_MAX_FRAMES" --workers "$EVAL_WORKERS" \
+            --score-source "$SCORE_SOURCE" \
             --collision-thresh "$COLLISION_THRESH" \
             --collision-voxel-size "$COLLISION_VOXEL_SIZE" \
             --collision-approach-dist "$COLLISION_APPROACH_DIST" \
