@@ -313,9 +313,25 @@ comparison/per_epoch.tsv
 
 The primary comparison is epoch 20 / `checkpoint_latest.pt`. This is
 intentional: `checkpoint_best.pt` is selected by CDF BCE and can prefer a
-constant-prior solution, which would bias a ranking-loss ablation. If official
-AP is also desired, set `PHASES=train,infer,eval`; the wrapper defaults
-`CHECKPOINT_KIND=latest` for both variants.
+constant-prior solution, which would bias a ranking-loss ablation.
+
+After the two 20-epoch training runs already exist, run inference and official
+GraspNet evaluation without retraining via:
+
+```bash
+bash scripts/run_metric_grasp_field_ranking_ablation_eval.sh
+```
+
+Defaults are `no_ranking -> GPUs 0,1,2` and
+`ranking_w0p1 -> GPUs 3,5,6`. The two variants run concurrently, each split is
+sharded across its three GPUs, and both always evaluate
+`checkpoint_latest.pt` on `test_seen,test_similar,test_novel`. The wrapper
+first validates the matched training protocols, then runs inference/evaluation,
+and finally reruns `compare_metric_grasp_field_ranking.py` so official AP is
+included in `comparison/comparison.md` and `comparison/comparison.json`.
+
+Use `RESUME=1` only when continuing matching partial/existing inference dumps;
+fresh evaluation should keep the default `RESUME=0`.
 
 ### Formal online training + inference + evaluation
 
