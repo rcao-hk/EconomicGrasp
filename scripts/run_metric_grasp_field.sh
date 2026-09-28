@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Online 10%-frame experiment. No P0/P1 cache/mining stage.
+# Online Metric Grasp Field experiment. No P0/P1 cache/mining stage.
 set -Eeuo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
