@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Official GraspNet AP for complete MGF dumps (no sensor collision filter)."""
+"""Official GraspNet AP for complete MGF dumps, preserving inference filter metadata."""
 import argparse
 import json
 from pathlib import Path
@@ -66,7 +66,8 @@ def main():
         atomic_json(out/"summary.json", {"signature": sig, "split": args.split,
                     "checkpoint_epoch": protocol["checkpoint_epoch"], "reported_ap": np.asarray(ap).tolist(),
                     "mean_accuracy": float(accuracy.mean()), "shape": list(accuracy.shape),
-                    "collision_filter": "none", "seen_role": "validation" if args.split == "test_seen" else "held_out"})
+                    "collision_filter": protocol.get("collision_filter", "unknown"),
+                    "seen_role": "validation" if args.split == "test_seen" else "held_out"})
         print(f"[MGF AP] {args.split}: {ap}", flush=True)
 
 
