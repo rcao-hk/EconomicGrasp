@@ -438,6 +438,7 @@ def test_inference_cli_exposes_optional_collision_filter():
         text=True,
     )
     assert p.returncode == 0, p.stderr
+    assert "--score-source" in p.stdout
     assert "--collision-thresh" in p.stdout
     assert "--collision-voxel-size" in p.stdout
     assert "--collision-approach-dist" in p.stdout
