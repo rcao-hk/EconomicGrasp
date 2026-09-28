@@ -420,6 +420,13 @@ def test_cli_help_does_not_import_main_cuda_dependencies(script):
     assert "usage:" in p.stdout
 
 
+def test_mixed_matched20_sampling_counts():
+    # 100 train scenes x 256 frames, stride 5 -> 52 frames/scene.
+    assert len(sampled_indices(100 * 256, .2)) == 5200
+    # 30 Seen scenes x 256 frames, stride 10 -> 26 frames/scene.
+    assert len(sampled_indices(30 * 256, .1)) == 780
+
+
 def test_training_cli_has_no_gradient_accumulation_option():
     p = subprocess.run(
         [sys.executable, str(ROOT/"train_metric_grasp_field.py"), "--help"],
@@ -428,6 +435,11 @@ def test_training_cli_has_no_gradient_accumulation_option():
     )
     assert p.returncode == 0, p.stderr
     assert "--batch-size" in p.stdout
+    assert "--train-fraction" in p.stdout
+    assert "--eval-fraction" in p.stdout
+    assert "--use-fuse-depth" in p.stdout
+    assert "--lr-schedule" in p.stdout
+    assert "--grad-clip" in p.stdout
     assert "--grad-accum" not in p.stdout
 
 
