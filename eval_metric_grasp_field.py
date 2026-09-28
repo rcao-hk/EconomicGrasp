@@ -56,7 +56,13 @@ def main():
         evaluator = GraspNetEval(args.dataset_root, camera="realsense", split=args.split)
         evaluate = getattr(evaluator, {"test_seen": "eval_seen", "test_similar": "eval_similar",
                                        "test_novel": "eval_novel"}[args.split])
-        fraction = protocol["training_protocol"]["sample_fraction"]
+        training_protocol = protocol["training_protocol"]
+        fraction = float(
+            training_protocol.get(
+                "eval_fraction",
+                training_protocol["sample_fraction"],
+            )
+        )
         result, ap = evaluate(str(root/"dump"), anno_sample_ratio=fraction, proc=args.workers)
         accuracy = np.asarray(result)
         frame_count = len(range(0, 256, round(1/fraction)))
