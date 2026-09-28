@@ -184,7 +184,11 @@ RANK_PID=""
 
 # Build a compact paired summary. If the previous no-collision test_latest
 # results exist, also report collision-on minus collision-off deltas.
-"$PYTHON_BIN" -   "$NO_RANK_ROOT" "$RANK_ROOT"   "$NO_RANK_TEST_ROOT" "$RANK_TEST_ROOT"   "$SUMMARY_DIR" <<'PY'
+"$PYTHON_BIN" - \
+  "$NO_RANK_ROOT" "$RANK_ROOT" \
+  "$NO_RANK_TEST_ROOT" "$RANK_TEST_ROOT" \
+  "$SUMMARY_DIR" \
+  "$COLLISION_THRESH" "$COLLISION_VOXEL_SIZE" "$COLLISION_APPROACH_DIST" <<'PY'
 import json
 import sys
 from pathlib import Path
