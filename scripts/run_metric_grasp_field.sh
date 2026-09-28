@@ -45,6 +45,9 @@ MAX_TRAIN_FRAMES=${MAX_TRAIN_FRAMES:-0}
 MAX_VAL_FRAMES=${MAX_VAL_FRAMES:-0}
 MAX_STEPS=${MAX_STEPS:-0}
 INFER_MAX_FRAMES=${INFER_MAX_FRAMES:-0}
+COLLISION_THRESH=${COLLISION_THRESH:-0}
+COLLISION_VOXEL_SIZE=${COLLISION_VOXEL_SIZE:-0.01}
+COLLISION_APPROACH_DIST=${COLLISION_APPROACH_DIST:-0.05}
 SEED=${SEED:-2117}
 AMP=${AMP:-0}
 TOP4=${TOP4:-0}
@@ -131,6 +134,9 @@ for phase in "${STEPS[@]}"; do
             --checkpoint "$ckpt" --output-root "$TEST_ROOT" --split "$split" \
             --shard-id "$shard" --num-shards "${#INFER_IDS[@]}" \
             --max-frames "$INFER_MAX_FRAMES" --workers "$EVAL_WORKERS" \
+            --collision-thresh "$COLLISION_THRESH" \
+            --collision-voxel-size "$COLLISION_VOXEL_SIZE" \
+            --collision-approach-dist "$COLLISION_APPROACH_DIST" \
             "${top4[@]}" "${resume[@]}"
         done
         wait_wave
