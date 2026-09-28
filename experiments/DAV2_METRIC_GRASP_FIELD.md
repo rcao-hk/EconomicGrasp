@@ -315,8 +315,8 @@ The primary comparison is epoch 20 / `checkpoint_latest.pt`. This is
 intentional: `checkpoint_best.pt` is selected by CDF BCE and can prefer a
 constant-prior solution, which would bias a ranking-loss ablation.
 
-After the two 20-epoch training runs already exist, run inference and official
-GraspNet evaluation without retraining via:
+After the two 20-epoch training runs already exist, run strict no-collision
+inference and official GraspNet evaluation without retraining via:
 
 ```bash
 bash scripts/run_metric_grasp_field_ranking_ablation_eval.sh
@@ -329,6 +329,29 @@ sharded across its three GPUs, and both always evaluate
 first validates the matched training protocols, then runs inference/evaluation,
 and finally reruns `compare_metric_grasp_field_ranking.py` so official AP is
 included in `comparison/comparison.md` and `comparison/comparison.json`.
+
+For the historical EconomicGrasp-style system comparison with model-free
+collision filtering enabled, use the separate wrapper:
+
+```bash
+bash scripts/run_metric_grasp_field_ranking_ablation_collision_eval.sh
+```
+
+Its default collision protocol matches the earlier CVA evaluation:
+
+```text
+source          = original GraspNet sensor point cloud
+collision_thresh= 0.01
+voxel_size      = 0.01 m
+approach_dist   = 0.05 m
+```
+
+The RGB network and its predicted metric geometry are unchanged; sensor depth is
+used only by the post-hoc collision detector. Collision-on dumps are written to
+`test_latest_collision0p01`, leaving `test_latest` untouched. Per-frame and
+per-shard metadata records grasp counts before/after filtering, and the wrapper
+writes `comparison_collision0p01/comparison.md/json` with collision-on AP,
+paired collision-off AP when available, and the rejection ratio.
 
 Use `RESUME=1` only when continuing matching partial/existing inference dumps;
 fresh evaluation should keep the default `RESUME=0`.
