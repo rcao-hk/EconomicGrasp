@@ -29,6 +29,16 @@ def parser():
     p.add_argument("--max-frames", type=int, default=0)
     p.add_argument("--top4", action="store_true")
     p.add_argument(
+        "--score-source",
+        choices=("field", "base"),
+        default="field",
+        help=(
+            "CDF scorer used for final angle-depth decoding. 'field' uses the "
+            "Metric Grasp Field readout; 'base' restores the reused CVA-CDF "
+            "logits from the same forward pass/checkpoint."
+        ),
+    )
+    p.add_argument(
         "--collision-thresh",
         type=float,
         default=0.0,
@@ -117,6 +127,7 @@ def main():
            "checkpoint_epoch": epoch, "training_protocol": protocol,
            "code_sha256": code_fingerprint(), "split": args.split,
            "schedule": schedule, "top4": args.top4,
+           "score_source": args.score_source,
            "max_frames": args.max_frames, "collision_filter": collision_filter,
            "prediction_modalities": (
                "RGB + camera metadata; depth internally predicted; "
@@ -157,6 +168,23 @@ def main():
     for raw in loader:
         batch = move_batch(raw, device, inference=True)
         ep = model(batch)
+        if args.score_source == "base":
+            base_logits = ep.get("mgf_base_cdf_logits")
+            field_logits = ep.get("grasp_cdf_pred_angle_depth")
+            if base_logits is None or field_logits is None:
+                raise RuntimeError(
+                    "Base-CVA decode requested but field/base CDF logits are missing"
+                )
+            if tuple(base_logits.shape) != tuple(field_logits.shape):
+                raise RuntimeError(
+                    "Base/field CDF shape mismatch: "
+                    f"base={tuple(base_logits.shape)} "
+                    f"field={tuple(field_logits.shape)}"
+                )
+            # Diagnostic intervention only: preserve the SAME centers, selected
+            # views, widths, metric depth, and checkpoint; replace only the
+            # final CDF scorer consumed by pred_decode_center_view_angle().
+            ep["grasp_cdf_pred_angle_depth"] = base_logits
         predictions = pred_decode_center_view_angle(ep, use_cdf=True)
         for pred in predictions:
             data_idx = pending[done]
