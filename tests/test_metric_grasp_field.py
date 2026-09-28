@@ -431,6 +431,18 @@ def test_training_cli_has_no_gradient_accumulation_option():
     assert "--grad-accum" not in p.stdout
 
 
+def test_inference_cli_exposes_optional_collision_filter():
+    p = subprocess.run(
+        [sys.executable, str(ROOT/"inference_metric_grasp_field.py"), "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert p.returncode == 0, p.stderr
+    assert "--collision-thresh" in p.stdout
+    assert "--collision-voxel-size" in p.stdout
+    assert "--collision-approach-dist" in p.stdout
+
+
 def test_atomic_json_and_digest(tmp_path):
     payload = {"version": "test", "sampling": sampled_indices(256, .1)}
     atomic_json(tmp_path/"protocol.json", payload)
