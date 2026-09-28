@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Predict online metric-grasp-field grasps; no P0/P1 cache or sensor filtering."""
+"""Predict online metric-grasp-field grasps with optional sensor-cloud collision filtering."""
 import argparse
 from dataclasses import asdict
 import json
@@ -28,6 +28,28 @@ def parser():
     p.add_argument("--workers", type=int, default=1)
     p.add_argument("--max-frames", type=int, default=0)
     p.add_argument("--top4", action="store_true")
+    p.add_argument(
+        "--collision-thresh",
+        type=float,
+        default=0.0,
+        help=(
+            "Model-free collision IoU threshold. <=0 disables collision "
+            "filtering. Positive values use the original GraspNet sensor cloud "
+            "as a post-hoc system-level filter."
+        ),
+    )
+    p.add_argument(
+        "--collision-voxel-size",
+        type=float,
+        default=0.01,
+        help="Voxel size (m) for the model-free sensor-cloud collision detector.",
+    )
+    p.add_argument(
+        "--collision-approach-dist",
+        type=float,
+        default=0.05,
+        help="Collision-free approach distance (m) before the grasp pose.",
+    )
     p.add_argument("--resume", action="store_true")
     return p
 
@@ -45,6 +67,12 @@ def main():
     args = parser().parse_args()
     if args.batch_size < 1 or args.workers < 0 or args.max_frames < 0:
         raise ValueError("Invalid batch/worker/frame setting")
+    if args.collision_thresh < 0:
+        raise ValueError("--collision-thresh must be >=0")
+    if args.collision_voxel_size <= 0 or args.collision_approach_dist <= 0:
+        raise ValueError(
+            "--collision-voxel-size and --collision-approach-dist must be >0"
+        )
     if args.num_shards < 1 or not 0 <= args.shard_id < args.num_shards:
         raise ValueError("Invalid shard setting")
     if not torch.cuda.is_available():
@@ -66,16 +94,35 @@ def main():
     model.eval()
     from dataset.graspnet_dataset import collate_fn
     from models.economicgrasp_bip3d import pred_decode_center_view_angle
+    use_collision_filter = args.collision_thresh > 0
+    if use_collision_filter:
+        from graspnetAPI import GraspGroup
+        from utils.collision_detector import ModelFreeCollisionDetectorTorch
     full, _, indices = make_dataset(args.dataset_root, args.split, protocol["sample_fraction"],
                                      labels=False, max_frames=args.max_frames)
     schedule = dataset_schedule(full, indices)
     root = Path(args.output_root)
+    collision_filter = (
+        {
+            "type": "model_free_original_sensor",
+            "threshold": float(args.collision_thresh),
+            "voxel_size_m": float(args.collision_voxel_size),
+            "approach_dist_m": float(args.collision_approach_dist),
+            "network_input": False,
+        }
+        if use_collision_filter
+        else "none"
+    )
     run = {"version": VERSION, "checkpoint_sha256": sha256_file(args.checkpoint),
            "checkpoint_epoch": epoch, "training_protocol": protocol,
            "code_sha256": code_fingerprint(), "split": args.split,
            "schedule": schedule, "top4": args.top4,
-           "max_frames": args.max_frames, "collision_filter": "none",
-           "prediction_modalities": "RGB + camera metadata; depth internally predicted",
+           "max_frames": args.max_frames, "collision_filter": collision_filter,
+           "prediction_modalities": (
+               "RGB + camera metadata; depth internally predicted; "
+               + ("original sensor depth used only for post-hoc collision filtering"
+                  if use_collision_filter else "no sensor-depth post-filter")
+           ),
            "preprocessing": "unchanged main GraspNetMultiDataset crop/workspace protocol"}
     sig = digest(run)
     manifest = root/args.split/"protocol.json"
@@ -105,6 +152,8 @@ def main():
                         worker_init_fn=worker_init, pin_memory=False)
     names = full.scene_list()
     done = 0
+    grasps_before_filter = 0
+    grasps_after_filter = 0
     for raw in loader:
         batch = move_batch(raw, device, inference=True)
         ep = model(batch)
@@ -115,15 +164,63 @@ def main():
             array = pred.detach().float().cpu().numpy()
             if array.ndim != 2 or array.shape[-1] != 17 or not np.isfinite(array).all():
                 raise RuntimeError(f"Invalid decoded grasps for {sid}/{aid}")
+
+            before = int(len(array))
+            if use_collision_filter and before > 0:
+                # Match the historical EconomicGrasp CVA evaluation protocol:
+                # the RGB network remains unchanged, while a model-free
+                # detector uses the paired original GraspNet sensor point cloud
+                # only as a post-hoc system-level filter.
+                cloud, _ = full.get_data(data_idx, return_raw_cloud=True)
+                gg = GraspGroup(array)
+                detector = ModelFreeCollisionDetectorTorch(
+                    np.asarray(cloud, dtype=np.float32).reshape(-1, 3),
+                    voxel_size=args.collision_voxel_size,
+                )
+                collision = detector.detect(
+                    gg,
+                    approach_dist=args.collision_approach_dist,
+                    collision_thresh=args.collision_thresh,
+                )
+                keep = ~collision.detach().cpu().numpy()
+                array = gg[keep].grasp_group_array.astype(np.float32, copy=False)
+
+            after = int(len(array))
+            grasps_before_filter += before
+            grasps_after_filter += after
+
             path = root/"dump"/f"scene_{sid:04d}"/"realsense"/f"{aid:04d}.npy"
             atomic_npy(path, array)
-            atomic_json(root/args.split/"completed"/f"{sid:04d}_{aid:04d}.json",
-                        {"signature": sig, "output_sha256": sha256_file(path), "grasps": len(array)})
+            atomic_json(
+                root/args.split/"completed"/f"{sid:04d}_{aid:04d}.json",
+                {
+                    "signature": sig,
+                    "output_sha256": sha256_file(path),
+                    "grasps": after,
+                    "grasps_before_collision": before,
+                    "grasps_after_collision": after,
+                    "collision_rejected": before - after,
+                },
+            )
             done += 1
         if done % 20 < args.batch_size:
             print(f"[MGF INFER] {args.split} shard={args.shard_id} done={done}/{len(pending)} skipped={skipped}", flush=True)
-    atomic_json(root/args.split/f"shard_{args.shard_id}.json",
-                {"signature": sig, "written": done, "skipped": skipped, "assigned": len(owned)})
+    retention = (
+        float(grasps_after_filter) / float(grasps_before_filter)
+        if grasps_before_filter > 0 else 1.0
+    )
+    atomic_json(
+        root/args.split/f"shard_{args.shard_id}.json",
+        {
+            "signature": sig,
+            "written": done,
+            "skipped": skipped,
+            "assigned": len(owned),
+            "grasps_before_collision": grasps_before_filter,
+            "grasps_after_collision": grasps_after_filter,
+            "collision_retention_ratio": retention,
+        },
+    )
     lock.close()
 
 
