@@ -152,12 +152,21 @@ def configure_base(config, field_config, pose_mode, *, top4=False):
     return cfgs
 
 
-def make_dataset(root, split, fraction, *, labels, max_frames=0):
+def make_dataset(
+    root,
+    split,
+    fraction,
+    *,
+    labels,
+    max_frames=0,
+    use_fuse_depth=False,
+):
     from dataset.graspnet_dataset import GraspNetMultiDataset
     base = GraspNetMultiDataset(
         root, camera="realsense", split=split, num_points=20000,
         remove_outlier=True, augment=False, load_label=labels,
-        use_gt_depth=False, use_fuse_depth=False, graspness_mode="scene",
+        use_gt_depth=False, use_fuse_depth=bool(use_fuse_depth),
+        graspness_mode="scene",
         min_depth=.2, max_depth=1., bin_num=256, depth_strides=1,
         extend_angle=True,
         # IMPORTANT: the canonical CVA adapter below is the sole owner of the
