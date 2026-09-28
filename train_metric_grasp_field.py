@@ -40,7 +40,37 @@ def parser():
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--geometry-lr", type=float, default=1e-5)
     p.add_argument("--weight-decay", type=float, default=1e-4)
-    p.add_argument("--sample-fraction", type=float, default=.1)
+    p.add_argument(
+        "--sample-fraction",
+        type=float,
+        default=.1,
+        help=(
+            "Legacy shared train/eval fraction. --train-fraction and "
+            "--eval-fraction override it independently."
+        ),
+    )
+    p.add_argument("--train-fraction", type=float, default=None)
+    p.add_argument("--eval-fraction", type=float, default=None)
+    p.add_argument(
+        "--use-fuse-depth",
+        action="store_true",
+        help=(
+            "Use rendered object depth plus fused-TSDF background as metric "
+            "depth supervision, matching the current mixed/G20 CVA setting."
+        ),
+    )
+    p.add_argument(
+        "--lr-schedule",
+        choices=("constant", "cosine"),
+        default="constant",
+        help="Epoch-wise LR schedule; cosine matches train_cva_ddp.py.",
+    )
+    p.add_argument(
+        "--grad-clip",
+        type=float,
+        default=5.0,
+        help="Global gradient norm clipping threshold.",
+    )
     p.add_argument("--workers", type=int, default=2)
     p.add_argument("--eval-workers", type=int, default=1)
     p.add_argument("--seed", type=int, default=2117)
@@ -82,6 +112,50 @@ def parser():
     p.add_argument("--amp", action="store_true", help="Opt-in CUDA mixed precision; default FP32")
     p.add_argument("--no-chunk-checkpoint", action="store_true")
     return p
+
+
+def resolve_data_fractions(args):
+    train_fraction = (
+        float(args.train_fraction)
+        if args.train_fraction is not None
+        else float(args.sample_fraction)
+    )
+    eval_fraction = (
+        float(args.eval_fraction)
+        if args.eval_fraction is not None
+        else float(args.sample_fraction)
+    )
+    for name, value in (
+        ("train_fraction", train_fraction),
+        ("eval_fraction", eval_fraction),
+    ):
+        if not math.isfinite(value) or not 0.0 < value <= 1.0:
+            raise ValueError(f"{name} must lie in (0,1], got {value}")
+    return train_fraction, eval_fraction
+
+
+def set_epoch_learning_rates(optimizer, args, epoch):
+    if args.lr_schedule == "constant":
+        factor = 1.0
+    elif args.lr_schedule == "cosine":
+        factor = 0.5 * (
+            math.cos(float(epoch) / float(args.epochs) * math.pi) + 1.0
+        )
+    else:
+        raise ValueError(f"Unknown lr schedule: {args.lr_schedule}")
+
+    base = {
+        "grasp": float(args.lr),
+        "geometry": float(args.geometry_lr),
+    }
+    current = {}
+    for group in optimizer.param_groups:
+        name = str(group.get("name", ""))
+        if name not in base:
+            raise RuntimeError(f"Optimizer group missing known name: {name!r}")
+        group["lr"] = base[name] * factor
+        current[name] = float(group["lr"])
+    return factor, current
 
 
 def grad_norm(grads):
@@ -178,6 +252,9 @@ def main():
         raise ValueError("Invalid loss/optimizer settings")
     if not math.isfinite(args.ranking_temperature) or args.ranking_temperature <= 0:
         raise ValueError("--ranking-temperature must be finite and >0")
+    if not math.isfinite(args.grad_clip) or args.grad_clip <= 0:
+        raise ValueError("--grad-clip must be finite and >0")
+    train_fraction, eval_fraction = resolve_data_fractions(args)
     if args.profile_weight == 0 or args.profile_mean_weight == 0:
         raise ValueError("The metric profile needs geometry supervision; keep both profile weights positive")
     if not torch.cuda.is_available():
@@ -194,14 +271,31 @@ def main():
         evidence_mode=args.evidence_mode, surface_epsilon=args.surface_epsilon,
         prior_sigma=args.prior_sigma, fixed_sigma=args.fixed_sigma,
     )
-    base_cfg = {**BASE_CONFIG, "m_point": args.m_point, "kview_group_chunk": args.group_chunk}
+    base_cfg = {
+        **BASE_CONFIG,
+        "m_point": args.m_point,
+        "kview_group_chunk": args.group_chunk,
+        "use_fuse_depth": bool(args.use_fuse_depth),
+    }
     configure_base(base_cfg, config, args.pose_mode)
     from dataset.graspnet_dataset import collate_fn
     from models.economicgrasp_metric_field import metric_field_loss
-    dataset, train_set, train_idx = make_dataset(args.dataset_root, "train", args.sample_fraction,
-                                                labels=True, max_frames=args.max_train_frames)
-    val_full, val_set, val_idx = make_dataset(args.dataset_root, "test_seen", args.sample_fraction,
-                                             labels=True, max_frames=args.max_val_frames)
+    dataset, train_set, train_idx = make_dataset(
+        args.dataset_root,
+        "train",
+        train_fraction,
+        labels=True,
+        max_frames=args.max_train_frames,
+        use_fuse_depth=args.use_fuse_depth,
+    )
+    val_full, val_set, val_idx = make_dataset(
+        args.dataset_root,
+        "test_seen",
+        eval_fraction,
+        labels=True,
+        max_frames=args.max_val_frames,
+        use_fuse_depth=args.use_fuse_depth,
+    )
     if not len(train_set) or not len(val_set):
         raise RuntimeError("Empty data schedule")
     official = Path("checkpoints") / f"depth_anything_v2_{args.encoder}.pth"
@@ -219,7 +313,13 @@ def main():
     protocol = {
         "version": VERSION, "base_main_sha": BASE_MAIN_SHA, "code_sha256": code_fingerprint(),
         "encoder": args.encoder, "pose_mode": args.pose_mode, "seed_mode": args.seed_mode,
-        "field": asdict(config), "base_config": base_cfg, "sample_fraction": args.sample_fraction,
+        "field": asdict(config), "base_config": base_cfg,
+        # Keep sample_fraction as a backward-compatible alias for the training
+        # fraction; new inference/eval code uses eval_fraction explicitly.
+        "sample_fraction": train_fraction,
+        "train_fraction": train_fraction,
+        "eval_fraction": eval_fraction,
+        "use_fuse_depth": bool(args.use_fuse_depth),
         "sampling_sha256": digest(sampling), "train_frames": len(train_idx), "val_frames": len(val_idx),
         "init_checkpoint": str(Path(args.init_checkpoint).resolve()) if args.init_checkpoint else "",
         "init_sha256": sha256_file(args.init_checkpoint) if args.init_checkpoint else "",
@@ -227,6 +327,7 @@ def main():
         "optimizer": {"task_lr": args.lr, "geometry_lr": args.geometry_lr,
                       "weight_decay": args.weight_decay, "batch_per_gpu": args.batch_size,
                       "world_size": world, "effective_batch": args.batch_size * world,
+                      "lr_schedule": args.lr_schedule, "grad_clip": args.grad_clip,
                       "amp": args.amp},
         "partial_run": bool(args.max_train_frames or args.max_val_frames or args.max_steps),
         "max_steps": args.max_steps, "seed": args.seed,
@@ -234,7 +335,15 @@ def main():
         "torch_version": str(torch.__version__),
         "ddp_training_padding_frames": (math.ceil(len(train_idx)/world)*world-len(train_idx)),
         "checkpoint_selection": "lowest Seen field-CDF BCE, not a no-op policy metric",
-        "depth_contract": "predicted depth/profile/metric latent detached from all grasp losses; geometry supervision remains live",
+        "depth_contract": (
+            "predicted depth/profile/metric latent detached from all grasp "
+            "losses; geometry supervision remains live; "
+            + (
+                "rendered-object + fused-TSDF-background target"
+                if args.use_fuse_depth
+                else "rendered full-scene target"
+            )
+        ),
         "label_contract": "main online <=5mm NN canonical CDF/width annotation matching, NOT arbitrary-action DexNet labels",
     }
     signature = digest(protocol)
@@ -316,6 +425,9 @@ def main():
     ) if world > 1 else model
     total_batches = min(len(loader), args.max_steps) if args.max_steps else len(loader)
     for epoch in range(start, args.epochs):
+        lr_factor, current_lrs = set_epoch_learning_rates(
+            optimizer, args, epoch
+        )
         model.train()
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
@@ -333,7 +445,9 @@ def main():
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(
-                task_params + geom_params, 5., error_if_nonfinite=True
+                task_params + geom_params,
+                args.grad_clip,
+                error_if_nonfinite=True,
             )
             scaler.step(optimizer)
             scaler.update()
@@ -344,6 +458,8 @@ def main():
             if rank == 0 and (step+1) % args.log_every == 0:
                 print(
                     f"[MGF TRAIN] epoch={epoch} step={step+1}/{total_batches} "
+                    f"lr_task={current_lrs['grasp']:.7g} "
+                    f"lr_geom={current_lrs['geometry']:.7g} "
                     f"loss={values['loss']:.5f} cdf={values['cdf']:.5f} "
                     f"depth={values['depth_l1']:.5f} "
                     f"field_gap={values['field_cdf_pos_neg_gap']:+.4f} "
@@ -372,8 +488,14 @@ def main():
         else:
             states[0], loader_states[0] = state, loader_state
         if rank == 0:
-            row = {"epoch": epoch, "train": train_stats, "validation": val_stats,
-                   "seconds": time.monotonic()-t0}
+            row = {
+                "epoch": epoch,
+                "train": train_stats,
+                "validation": val_stats,
+                "lr_factor": lr_factor,
+                "learning_rates": current_lrs,
+                "seconds": time.monotonic()-t0,
+            }
             history.append(row)
             improved = val_stats["cdf"] < best
             best = min(best, val_stats["cdf"])
