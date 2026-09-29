@@ -119,8 +119,10 @@ def load(root, split, required=True):
 
 
 def primary(ap):
-    if isinstance(ap, list):
-        return float(ap[0])
+    while isinstance(ap, list):
+        if not ap:
+            raise ValueError("Empty reported_ap list")
+        ap = ap[0]
     return float(ap)
 
 
