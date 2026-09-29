@@ -17,6 +17,7 @@ RESUME=${RESUME:-0}
 ENCODER=${ENCODER:-vitb}
 POSE_MODE=${POSE_MODE:-global_film}
 SEED_MODE=${SEED_MODE:-image_fps}
+FIELD_SCORE_MODE=${FIELD_SCORE_MODE:-absolute}
 EPOCHS=${EPOCHS:-20}
 BATCH_SIZE=${BATCH_SIZE:-1}
 LR=${LR:-0.0001}
@@ -70,6 +71,7 @@ command -v setsid >/dev/null || { echo 'setsid is required' >&2; exit 2; }
 [[ "$CHECKPOINT_KIND" == best || "$CHECKPOINT_KIND" == latest ]] || { echo 'CHECKPOINT_KIND=best|latest' >&2; exit 2; }
 [[ "$USE_FUSE_DEPTH" == 0 || "$USE_FUSE_DEPTH" == 1 ]] || { echo 'USE_FUSE_DEPTH=0|1' >&2; exit 2; }
 [[ "$LR_SCHEDULE" == constant || "$LR_SCHEDULE" == cosine ]] || { echo 'LR_SCHEDULE=constant|cosine' >&2; exit 2; }
+[[ "$FIELD_SCORE_MODE" == absolute || "$FIELD_SCORE_MODE" == residual ]] || { echo 'FIELD_SCORE_MODE=absolute|residual' >&2; exit 2; }
 [[ -d "$DATASET_ROOT" ]] || { echo "Missing dataset: $DATASET_ROOT" >&2; exit 2; }
 [[ -f "checkpoints/depth_anything_v2_${ENCODER}.pth" ]] || { echo "Missing official DAV2 $ENCODER checkpoint" >&2; exit 2; }
 IFS=',' read -r -a TRAIN_IDS <<< "$GPUS"
@@ -120,6 +122,7 @@ for phase in "${STEPS[@]}"; do
         --dataset-root "$DATASET_ROOT" --output-root "$TRAIN_ROOT" \
         --init-checkpoint "$INIT_CHECKPOINT" --encoder "$ENCODER" \
         --pose-mode "$POSE_MODE" --seed-mode "$SEED_MODE" \
+        --field-score-mode "$FIELD_SCORE_MODE" \
         --epochs "$EPOCHS" --batch-size "$BATCH_SIZE" \
         --lr "$LR" --geometry-lr "$GEOMETRY_LR" --weight-decay "$WEIGHT_DECAY" \
         --sample-fraction "$SAMPLE_FRACTION" \
