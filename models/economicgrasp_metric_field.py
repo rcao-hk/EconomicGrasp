@@ -14,7 +14,7 @@ import torch.nn.functional as F
 
 from metric_grasp_field_core import (
     MetricFieldConfig, MetricRayEvidenceHead, TaskFeatureAdapter,
-    GraspFieldReadout, geometry_loss,
+    GraspFieldReadout, compose_monotone_residual_logits, geometry_loss,
 )
 
 VERSION = "dav2_metric_grasp_field_detach_rank_v2"
@@ -195,8 +195,17 @@ def build_candidate_actions(end_points, rotation_fn, max_width=0.1):
 
 
 class EconomicGraspMetricField(nn.Module):
-    def __init__(self, config=None, *, encoder="vitb", pose_depth_mode="global_film",
-                 init_checkpoint="", seed_selection_mode="image_fps", tok_feat_dim=128):
+    def __init__(
+        self,
+        config=None,
+        *,
+        encoder="vitb",
+        pose_depth_mode="global_film",
+        init_checkpoint="",
+        seed_selection_mode="image_fps",
+        tok_feat_dim=128,
+        field_score_mode="absolute",
+    ):
         super().__init__()
         from .economicgrasp_bip3d import economicgrasp_dpt
         from .dinov2_dpt import DPTHead
@@ -207,6 +216,12 @@ class EconomicGraspMetricField(nn.Module):
         self.encoder_name = encoder
         self.pose_depth_mode = pose_depth_mode
         self.seed_selection_mode = seed_selection_mode
+        self.field_score_mode = str(field_score_mode)
+        if self.field_score_mode not in ("absolute", "residual"):
+            raise ValueError(
+                "field_score_mode must be 'absolute' or 'residual', got "
+                f"{self.field_score_mode!r}"
+            )
         self.rotation_fn = batch_viewpoint_params_to_matrix
         self.max_width = float(cfgs.grasp_max_width)
         if encoder not in DAV2_CONFIGS:
@@ -252,6 +267,10 @@ class EconomicGraspMetricField(nn.Module):
         self.ray_head = MetricRayEvidenceHead(geom_dim, geom_dim, c)
         self.task_adapter = TaskFeatureAdapter(tok_feat_dim, geom_dim, geom_dim, c.hidden)
         self.readout = GraspFieldReadout(c)
+        if self.field_score_mode == "residual":
+            # Start exactly from the Base-CVA scorer. The field branch initially
+            # contributes zero correction and must earn every deviation.
+            self.readout.zero_initialize_output()
         self._depth_pack = None
         self._proposal_feature = None
         # Hooks avoid changing main's 10k-line model or state-dict layout.
@@ -315,10 +334,51 @@ class EconomicGraspMetricField(nn.Module):
             logits, prob = self.ray_head(relative_feat, relative_inverse, metric_feat, depth, (h, w), batch["K"])
             task_feature = self.task_adapter(self._proposal_feature, relative_feat, metric_feat,
                                              logits.shape[-2:])
-            actions, (b, q, a, d) = build_candidate_actions(ep, self.rotation_fn, self.max_width)
-            field_logits = self.readout(task_feature, prob.detach(), actions, batch["K"], (h, w))
-            ep["mgf_base_cdf_logits"] = ep["grasp_cdf_pred_angle_depth"]
-            ep["grasp_cdf_pred_angle_depth"] = field_logits.reshape(b, q, a, d, 6).permute(0, 4, 1, 2, 3).contiguous()
+            actions, (b, q, a, d) = build_candidate_actions(
+                ep, self.rotation_fn, self.max_width
+            )
+            base_logits = ep["grasp_cdf_pred_angle_depth"]
+            ep["mgf_base_cdf_logits"] = base_logits
+
+            if self.field_score_mode == "residual":
+                residual_raw = self.readout(
+                    task_feature,
+                    prob.detach(),
+                    actions,
+                    batch["K"],
+                    (h, w),
+                    raw_output=True,
+                ).reshape(b, q, a, d, 6)
+
+                # The final scorer starts from Base-CVA and learns only a
+                # physical correction. Detaching here prevents the final
+                # field loss/ranking loss from simply rewriting the Base head;
+                # Base-CVA remains supervised by its own auxiliary BCE.
+                base_last = base_logits.detach().permute(0, 2, 3, 4, 1)
+                final_last = compose_monotone_residual_logits(
+                    base_last, residual_raw
+                )
+                ep["mgf_field_residual_raw"] = residual_raw.permute(
+                    0, 4, 1, 2, 3
+                ).contiguous()
+                ep["grasp_cdf_pred_angle_depth"] = final_last.permute(
+                    0, 4, 1, 2, 3
+                ).contiguous()
+            else:
+                field_logits = self.readout(
+                    task_feature,
+                    prob.detach(),
+                    actions,
+                    batch["K"],
+                    (h, w),
+                )
+                ep["grasp_cdf_pred_angle_depth"] = field_logits.reshape(
+                    b, q, a, d, 6
+                ).permute(0, 4, 1, 2, 3).contiguous()
+
+            ep["D: MGF Residual Mode"] = base_logits.new_tensor(
+                float(self.field_score_mode == "residual")
+            ).reshape(())
             ep["mgf_profile_logits"] = logits
             # Original undetached prediction for metric-only supervision.
             ep["depth_map_pred"] = depth
@@ -710,11 +770,31 @@ def metric_field_loss(
             if bool(width_valid.any()) else zero
         )
 
+    with torch.no_grad():
+        residual_raw = ep.get("mgf_field_residual_raw")
+        if torch.is_tensor(residual_raw):
+            residual_abs_mean = residual_raw.float().abs().mean()
+            final_base_logit_delta = (
+                ep["grasp_cdf_pred_angle_depth"].float()
+                - ep["mgf_base_cdf_logits"].float()
+            ).abs().mean()
+            final_base_utility_delta = (
+                torch.sigmoid(ep["grasp_cdf_pred_angle_depth"].float()).mean(1)
+                - torch.sigmoid(ep["mgf_base_cdf_logits"].float()).mean(1)
+            ).abs().mean()
+        else:
+            residual_abs_mean = total.detach() * 0.0
+            final_base_logit_delta = total.detach() * 0.0
+            final_base_utility_delta = total.detach() * 0.0
+
     stats = {"loss": total, "task_loss": task, "geometry_loss": geometric,
              "cdf": cdf, "base_cdf": base_cdf, "ranking": ranking,
              "ranking_weighted": ranking.detach() * rank_weight,
              "width": width, "objectness": obj,
              "graspness": gra, "view": view,
+             "field_residual_raw_abs_mean": residual_abs_mean,
+             "field_final_base_logit_abs_delta": final_base_logit_delta,
+             "field_final_base_utility_abs_delta": final_base_utility_delta,
              **ranking_stats,
              # Backward-compatible alias used by the previous smoke report.
              "cdf_candidate_positive_fraction":
