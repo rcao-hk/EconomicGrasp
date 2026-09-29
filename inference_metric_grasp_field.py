@@ -30,12 +30,21 @@ def parser():
     p.add_argument("--top4", action="store_true")
     p.add_argument(
         "--score-source",
-        choices=("field", "base"),
+        choices=("field", "base", "blend"),
         default="field",
         help=(
             "CDF scorer used for final angle-depth decoding. 'field' uses the "
-            "Metric Grasp Field readout; 'base' restores the reused CVA-CDF "
-            "logits from the same forward pass/checkpoint."
+            "Metric Grasp Field output; 'base' restores Base CVA-CDF logits; "
+            "'blend' interpolates Base/Field logits."
+        ),
+    )
+    p.add_argument(
+        "--blend-alpha",
+        type=float,
+        default=0.5,
+        help=(
+            "For --score-source blend: final=(1-alpha)*base + alpha*field. "
+            "Use alpha in [0,1]."
         ),
     )
     p.add_argument(
@@ -79,6 +88,8 @@ def main():
         raise ValueError("Invalid batch/worker/frame setting")
     if args.collision_thresh < 0:
         raise ValueError("--collision-thresh must be >=0")
+    if not np.isfinite(args.blend_alpha) or not 0.0 <= args.blend_alpha <= 1.0:
+        raise ValueError("--blend-alpha must lie in [0,1]")
     if args.collision_voxel_size <= 0 or args.collision_approach_dist <= 0:
         raise ValueError(
             "--collision-voxel-size and --collision-approach-dist must be >0"
@@ -137,6 +148,11 @@ def main():
            "schedule": schedule, "top4": args.top4,
            "evaluation_fraction": eval_fraction,
            "score_source": args.score_source,
+           "blend_alpha": (
+               float(args.blend_alpha)
+               if args.score_source == "blend"
+               else None
+           ),
            "max_frames": args.max_frames, "collision_filter": collision_filter,
            "prediction_modalities": (
                "RGB + camera metadata; depth internally predicted; "
@@ -177,12 +193,12 @@ def main():
     for raw in loader:
         batch = move_batch(raw, device, inference=True)
         ep = model(batch)
-        if args.score_source == "base":
+        if args.score_source in ("base", "blend"):
             base_logits = ep.get("mgf_base_cdf_logits")
             field_logits = ep.get("grasp_cdf_pred_angle_depth")
             if base_logits is None or field_logits is None:
                 raise RuntimeError(
-                    "Base-CVA decode requested but field/base CDF logits are missing"
+                    "Base/blend decode requested but field/base CDF logits are missing"
                 )
             if tuple(base_logits.shape) != tuple(field_logits.shape):
                 raise RuntimeError(
@@ -191,9 +207,15 @@ def main():
                     f"field={tuple(field_logits.shape)}"
                 )
             # Diagnostic intervention only: preserve the SAME centers, selected
-            # views, widths, metric depth, and checkpoint; replace only the
-            # final CDF scorer consumed by pred_decode_center_view_angle().
-            ep["grasp_cdf_pred_angle_depth"] = base_logits
+            # views, widths, metric depth, and checkpoint; change only the
+            # final CDF tensor consumed by pred_decode_center_view_angle().
+            if args.score_source == "base":
+                ep["grasp_cdf_pred_angle_depth"] = base_logits
+            else:
+                alpha = float(args.blend_alpha)
+                ep["grasp_cdf_pred_angle_depth"] = (
+                    (1.0 - alpha) * base_logits + alpha * field_logits
+                )
         predictions = pred_decode_center_view_angle(ep, use_cdf=True)
         for pred in predictions:
             data_idx = pending[done]
