@@ -53,6 +53,7 @@ MAX_STEPS=${MAX_STEPS:-0}
 INFER_MAX_FRAMES=${INFER_MAX_FRAMES:-0}
 INFER_BATCH_SIZE=${INFER_BATCH_SIZE:-1}
 SCORE_SOURCE=${SCORE_SOURCE:-field}
+BLEND_ALPHA=${BLEND_ALPHA:-0.5}
 COLLISION_THRESH=${COLLISION_THRESH:-0}
 COLLISION_VOXEL_SIZE=${COLLISION_VOXEL_SIZE:-0.01}
 COLLISION_APPROACH_DIST=${COLLISION_APPROACH_DIST:-0.05}
@@ -151,7 +152,7 @@ for phase in "${STEPS[@]}"; do
             --shard-id "$shard" --num-shards "${#INFER_IDS[@]}" \
             --batch-size "$INFER_BATCH_SIZE" \
             --max-frames "$INFER_MAX_FRAMES" --workers "$EVAL_WORKERS" \
-            --score-source "$SCORE_SOURCE" \
+            --score-source "$SCORE_SOURCE" --blend-alpha "$BLEND_ALPHA" \
             --collision-thresh "$COLLISION_THRESH" \
             --collision-voxel-size "$COLLISION_VOXEL_SIZE" \
             --collision-approach-dist "$COLLISION_APPROACH_DIST" \
