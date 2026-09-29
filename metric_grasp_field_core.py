@@ -200,6 +200,51 @@ def monotone_grasp_logits(raw):
     return torch.cat((raw[..., :1], raw[..., :1] + F.softplus(raw[..., 1:]).cumsum(-1)), -1)
 
 
+def inverse_softplus_positive(y):
+    """Stable inverse softplus for strictly-positive increments."""
+    y = y.float().clamp_min(1e-7)
+    return y + torch.log(-torch.expm1(-y))
+
+
+def compose_monotone_residual_logits(base_logits, residual_raw):
+    """Apply a zero-centered residual while preserving CDF monotonicity.
+
+    Both tensors use the friction-threshold dimension LAST. The first threshold
+    logit receives an additive residual. For later thresholds, the residual acts
+    in the unconstrained pre-softplus increment space:
+
+        d_base[t] = base[t] - base[t-1] > 0
+        d_final[t] = softplus(inv_softplus(d_base[t]) + delta[t])
+
+    Therefore residual_raw == 0 reconstructs base_logits (up to numerical
+    precision), and positive threshold increments remain guaranteed.
+
+    The caller may detach base_logits before entering this function when the
+    residual branch should correct—but not backpropagate through—the base scorer.
+    """
+    if base_logits.shape != residual_raw.shape:
+        raise ValueError(
+            "base/residual shape mismatch: "
+            f"{tuple(base_logits.shape)} vs {tuple(residual_raw.shape)}"
+        )
+    if base_logits.shape[-1] < 2:
+        raise ValueError("Need at least two CDF thresholds")
+
+    base = base_logits.float()
+    delta = residual_raw.float()
+    base_inc = base[..., 1:] - base[..., :-1]
+    if bool((base_inc < -1e-6).any()):
+        raise RuntimeError("Base CDF logits are not monotone across thresholds")
+
+    inc_raw = inverse_softplus_positive(base_inc.clamp_min(1e-7))
+    final_first = base[..., :1] + delta[..., :1]
+    final_inc = F.softplus(inc_raw + delta[..., 1:])
+    return torch.cat(
+        (final_first, final_first + final_inc.cumsum(dim=-1)),
+        dim=-1,
+    )
+
+
 class GraspFieldReadout(nn.Module):
     def __init__(self, cfg):
         super().__init__()
@@ -212,6 +257,11 @@ class GraspFieldReadout(nn.Module):
         with torch.no_grad():
             self.head[-1].bias[0] = -2.
             self.head[-1].bias[1:] = -3.
+
+    def zero_initialize_output(self):
+        """Make the readout emit exactly zero raw residual parameters."""
+        nn.init.zeros_(self.head[-1].weight)
+        nn.init.zeros_(self.head[-1].bias)
 
     def _chunk(self, feature, prob, actions, K, image_hw):
         xyz, local, roles = gripper_support(actions.float())
@@ -230,9 +280,9 @@ class GraspFieldReadout(nn.Module):
             m = (roles == role)[None, None] & valid
             pooled.append((tokens * m[..., None]).sum(-2) / m.sum(-1, keepdim=True).clamp_min(1))
         size = actions[..., 1:4] / actions.new_tensor([.1, .02, .04])
-        return monotone_grasp_logits(self.head(torch.cat((*pooled, size), -1)))
+        return self.head(torch.cat((*pooled, size), -1))
 
-    def forward(self, feature, prob, actions, K, image_hw):
+    def forward(self, feature, prob, actions, K, image_hw, *, raw_output=False):
         if actions.ndim != 3 or actions.shape[-1] != 17:
             raise ValueError("Expected [B,N,17] actions")
         # One compulsory boundary for *all* task-side numeric geometry.
@@ -246,7 +296,8 @@ class GraspFieldReadout(nn.Module):
             else:
                 y = self._chunk(feature, prob, chunk, K, image_hw)
             outputs.append(y)
-        return torch.cat(outputs, 1)
+        raw = torch.cat(outputs, 1)
+        return raw if raw_output else monotone_grasp_logits(raw)
 
 
 def geometry_loss(logits, depth, gt, cfg):
