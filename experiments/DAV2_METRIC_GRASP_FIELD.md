@@ -434,6 +434,88 @@ the default matched contract silently changes. Set `PHASES=train,infer,eval`
 to continue directly to epoch-20/latest inference/evaluation; the wrapper then
 defaults to the historical sensor-cloud collision threshold 0.01.
 
+### Base–Field fusion sweep and residual Field variant
+
+The matched20 result shows that the Base-CVA scorer remains a strong prior,
+especially on Seen. Two follow-up experiments are implemented in parallel.
+
+#### Zero-training logit fusion sweep
+
+Existing absolute matched20 checkpoints expose both:
+
+```text
+base_logits  = mgf_base_cdf_logits
+field_logits = grasp_cdf_pred_angle_depth
+```
+
+Inference now supports `--score-source blend --blend-alpha A` with
+
+```text
+final_logits = (1-A) * base_logits + A * field_logits.
+```
+
+Because both endpoints are monotone CDF logits, convex interpolation for
+`A in [0,1]` preserves threshold monotonicity. Run the intermediate sweep via:
+
+```bash
+bash scripts/run_metric_grasp_field_blend_sweep.sh
+```
+
+Defaults compute `A={0.25,0.5,0.75}` with the historical collision-on protocol
+and reuse already-computed `A=0` Base and `A=1` Field endpoints when present.
+The summary is written to:
+
+```text
+<matched20>/blend_logit_sweep/summary/sweep.md
+<matched20>/blend_logit_sweep/summary/sweep.json
+```
+
+#### Residual Metric Grasp Field
+
+The residual variant changes the Field role from absolute replacement to a
+physical correction of the Base-CVA scorer. The Field readout's last layer is
+zero-initialized. Its six raw outputs parameterize corrections to the Base
+threshold logits while preserving CDF monotonicity:
+
+```text
+first_final = first_base + delta_0
+inc_final_t = softplus(inv_softplus(inc_base_t) + delta_t)
+```
+
+Thus `delta=0` reconstructs Base-CVA at initialization. Base logits are detached
+inside the final residual composition, so final CDF BCE/listwise ranking cannot
+silently rewrite the Base scorer; Base-CVA continues to receive its own auxiliary
+CDF BCE. The final scorer, not the residual alone, receives the existing
+unbalanced CDF BCE and query-level listwise ranking loss.
+
+Run the residual variant under the same 20% matched regime via:
+
+```bash
+bash scripts/run_metric_grasp_field_residual_matched20.sh
+```
+
+It defaults to GPUs `3,5,6`, fresh training, and then latest-checkpoint
+collision-on Seen/Similar/Novel evaluation.
+
+#### Run both at once
+
+With six GPUs available, launch the fusion diagnostic and residual experiment
+concurrently:
+
+```bash
+bash scripts/run_metric_grasp_field_sweep_and_residual_parallel.sh
+```
+
+Defaults:
+
+```text
+GPUs 0,1,2 -> zero-training fusion sweep
+GPUs 3,5,6 -> residual matched20 train + infer + eval
+```
+
+The two jobs use disjoint GPU sets and share only read-only dataset/checkpoint
+inputs.
+
 ### Formal online training + inference + evaluation
 
 ```bash
