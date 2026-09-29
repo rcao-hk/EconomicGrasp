@@ -297,7 +297,10 @@ def construct_model(protocol, *, initialize=False, device="cpu", top4=False):
     configure_base(protocol["base_config"], field, protocol["pose_mode"], top4=top4)
     from models.economicgrasp_metric_field import EconomicGraspMetricField
     return EconomicGraspMetricField(
-        field, encoder=protocol["encoder"], pose_depth_mode=protocol["pose_mode"],
+        field,
+        encoder=protocol["encoder"],
+        pose_depth_mode=protocol["pose_mode"],
         seed_selection_mode=protocol["seed_mode"],
         init_checkpoint=protocol.get("init_checkpoint", "") if initialize else "",
+        field_score_mode=protocol.get("field_score_mode", "absolute"),
     ).to(device)
