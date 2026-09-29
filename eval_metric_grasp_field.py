@@ -74,6 +74,7 @@ def main():
                     "mean_accuracy": float(accuracy.mean()), "shape": list(accuracy.shape),
                     "collision_filter": protocol.get("collision_filter", "unknown"),
                     "score_source": protocol.get("score_source", "field"),
+                    "blend_alpha": protocol.get("blend_alpha"),
                     "seen_role": "validation" if args.split == "test_seen" else "held_out"})
         print(f"[MGF AP] {args.split}: {ap}", flush=True)
 
