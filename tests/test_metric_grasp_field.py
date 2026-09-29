@@ -12,7 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from metric_grasp_field_core import (
     MetricFieldConfig, MetricRayEvidenceHead, TaskFeatureAdapter, GraspFieldReadout,
-    cdf_at, evidence_at, geometry_loss, gripper_support, project_points, sample_map,
+    cdf_at, compose_monotone_residual_logits, evidence_at, geometry_loss,
+    gripper_support, project_points, sample_map,
 )
 from metric_field_runtime import (
     sampled_indices, move_batch, atomic_json, digest,
@@ -78,6 +79,52 @@ def test_surface_evidence_normalized_and_depth_detached(mode):
     # z is detached by the public readout boundary, not the pure formula.
     gp = torch.autograd.grad(e.sum(), p, allow_unused=True)[0]
     assert gp is None
+
+
+def test_zero_residual_reconstructs_base_and_preserves_monotonicity():
+    raw = torch.randn(2, 3, 6)
+    # Construct guaranteed-monotone Base-CVA logits.
+    base = torch.cat(
+        (
+            raw[..., :1],
+            raw[..., :1] + torch.nn.functional.softplus(
+                raw[..., 1:]
+            ).cumsum(-1),
+        ),
+        -1,
+    )
+    zero = torch.zeros_like(base)
+    final = compose_monotone_residual_logits(base, zero)
+    torch.testing.assert_close(final, base, atol=2e-6, rtol=2e-6)
+    assert bool(((final[..., 1:] - final[..., :-1]) >= 0).all())
+
+
+def test_residual_correction_has_gradient_and_stays_monotone():
+    base = torch.tensor(
+        [[[-2.0, -1.5, -1.0, -0.4, 0.2, 1.0]]]
+    )
+    delta = torch.randn_like(base, requires_grad=True) * 0.1
+    final = compose_monotone_residual_logits(base, delta)
+    assert bool(((final[..., 1:] - final[..., :-1]) > 0).all())
+    loss = final.square().mean()
+    grad = torch.autograd.grad(loss, delta)[0]
+    assert torch.isfinite(grad).all()
+    assert float(grad.abs().sum()) > 0.0
+
+
+def test_readout_zero_output_initialization():
+    cfg = MetricFieldConfig(bins=8, hidden=8, action_chunk=4)
+    model = GraspFieldReadout(cfg)
+    model.zero_initialize_output()
+    out = model(
+        torch.randn(1, 8, 16, 16),
+        torch.ones(1, 8, 16, 16) / 8,
+        actions(2),
+        camera(),
+        (64, 64),
+        raw_output=True,
+    )
+    torch.testing.assert_close(out, torch.zeros_like(out))
 
 
 def test_physical_transform_and_projection():
@@ -437,6 +484,7 @@ def test_training_cli_has_no_gradient_accumulation_option():
     assert "--batch-size" in p.stdout
     assert "--train-fraction" in p.stdout
     assert "--eval-fraction" in p.stdout
+    assert "--field-score-mode" in p.stdout
     assert "--use-fuse-depth" in p.stdout
     assert "--lr-schedule" in p.stdout
     assert "--grad-clip" in p.stdout
@@ -451,6 +499,7 @@ def test_inference_cli_exposes_optional_collision_filter():
     )
     assert p.returncode == 0, p.stderr
     assert "--score-source" in p.stdout
+    assert "--blend-alpha" in p.stdout
     assert "--collision-thresh" in p.stdout
     assert "--collision-voxel-size" in p.stdout
     assert "--collision-approach-dist" in p.stdout
