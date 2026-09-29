@@ -51,6 +51,7 @@ PROFILE_MEAN_WEIGHT=${PROFILE_MEAN_WEIGHT:-10}
 ENCODER=${ENCODER:-vitb}
 POSE_MODE=${POSE_MODE:-global_film}
 SEED_MODE=${SEED_MODE:-image_fps}
+FIELD_SCORE_MODE=${FIELD_SCORE_MODE:-absolute}
 M_POINT=${M_POINT:-1024}
 GROUP_CHUNK=${GROUP_CHUNK:-256}
 ACTION_CHUNK=${ACTION_CHUNK:-256}
@@ -98,6 +99,7 @@ echo "  LR schedule         : $LR_SCHEDULE"
 echo "  grad clip           : $GRAD_CLIP"
 echo "  fused depth target  : $USE_FUSE_DEPTH"
 echo "  ranking weight      : $RANKING_WEIGHT"
+echo "  field score mode    : $FIELD_SCORE_MODE"
 echo "  seed                : $SEED"
 echo "  init checkpoint     : EMPTY"
 echo "  phases              : $PHASES"
@@ -139,6 +141,7 @@ env \
   ENCODER="$ENCODER" \
   POSE_MODE="$POSE_MODE" \
   SEED_MODE="$SEED_MODE" \
+  FIELD_SCORE_MODE="$FIELD_SCORE_MODE" \
   M_POINT="$M_POINT" \
   GROUP_CHUNK="$GROUP_CHUNK" \
   ACTION_CHUNK="$ACTION_CHUNK" \
@@ -165,15 +168,17 @@ env \
 # Validate the protocol whenever a training protocol is available.
 PROTOCOL="$WORK_ROOT/train/protocol.json"
 if [[ -f "$PROTOCOL" ]]; then
-  python - "$PROTOCOL" <<'PY'
+  python - "$PROTOCOL" "$FIELD_SCORE_MODE" <<'PY'
 import json
 import math
 import sys
 
 p = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+field_score_mode = sys.argv[2]
 errors = []
 
 expected = {
+    "field_score_mode": field_score_mode,
     "train_fraction": 0.2,
     "eval_fraction": 0.1,
     "train_frames": 5200,
