@@ -35,6 +35,15 @@ def parser():
     p.add_argument("--encoder", choices=("vits", "vitb", "vitl"), default="vitb")
     p.add_argument("--pose-mode", choices=("none", "global_film", "ray_gravity_film"), default="global_film")
     p.add_argument("--seed-mode", choices=("image_fps", "point_fps"), default="image_fps")
+    p.add_argument(
+        "--field-score-mode",
+        choices=("absolute", "residual"),
+        default="absolute",
+        help=(
+            "absolute: Field logits replace Base-CVA logits; residual: zero-init "
+            "Field correction is composed on detached Base-CVA logits."
+        ),
+    )
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=1, help="Per GPU")
     p.add_argument("--lr", type=float, default=1e-4)
@@ -313,6 +322,7 @@ def main():
     protocol = {
         "version": VERSION, "base_main_sha": BASE_MAIN_SHA, "code_sha256": code_fingerprint(),
         "encoder": args.encoder, "pose_mode": args.pose_mode, "seed_mode": args.seed_mode,
+        "field_score_mode": args.field_score_mode,
         "field": asdict(config), "base_config": base_cfg,
         # Keep sample_fraction as a backward-compatible alias for the training
         # fraction; new inference/eval code uses eval_fraction explicitly.
@@ -345,6 +355,14 @@ def main():
             )
         ),
         "label_contract": "main online <=5mm NN canonical CDF/width annotation matching, NOT arbitrary-action DexNet labels",
+        "score_contract": (
+            "absolute Field replacement"
+            if args.field_score_mode == "absolute"
+            else (
+                "Base-CVA logits detached in final scorer; zero-initialized "
+                "Metric Field predicts monotone residual corrections"
+            )
+        ),
     }
     signature = digest(protocol)
     out = Path(args.output_root)
@@ -460,6 +478,7 @@ def main():
                     f"[MGF TRAIN] epoch={epoch} step={step+1}/{total_batches} "
                     f"lr_task={current_lrs['grasp']:.7g} "
                     f"lr_geom={current_lrs['geometry']:.7g} "
+                    f"mode={args.field_score_mode} "
                     f"loss={values['loss']:.5f} cdf={values['cdf']:.5f} "
                     f"depth={values['depth_l1']:.5f} "
                     f"field_gap={values['field_cdf_pos_neg_gap']:+.4f} "
@@ -469,6 +488,7 @@ def main():
                     f"rank_q={values['ranking_informative_query_fraction']:.3f} "
                     f"rank_regret={values['ranking_selection_regret']:.4f} "
                     f"rank_hit={values['ranking_top1_best_hit']:.3f} "
+                    f"resid_d={values['field_final_base_logit_abs_delta']:.4f} "
                     f"base_gap={values['base_cdf_pos_neg_gap']:+.4f} "
                     f"base_auc64={values['base_cdf_any_success_auroc64']:.4f}",
                     flush=True,
