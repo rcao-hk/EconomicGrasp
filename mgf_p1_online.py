@@ -50,6 +50,32 @@ def code_digest():
     return h.hexdigest()
 
 
+def source_forward(source, batch, **kwargs):
+    """Run the unchanged P0 FrozenSource while observing the official relative cue.
+
+    The relative decoder output is captured by a temporary hook so P1 can ablate
+    the scalar relative-depth cue without changing mgf_p0_online.py or its code
+    digest/resume contract.
+    """
+    captured = {}
+
+    def hook(_module, _args, output):
+        if not isinstance(output, (tuple, list)) or len(output) != 2:
+            raise RuntimeError("Unexpected relative decoder output contract")
+        captured["relative_inverse"] = F.relu(output[1]).detach()
+
+    handle = source.model.relative_decoder.register_forward_hook(hook)
+    try:
+        context = source(batch, **kwargs)
+    finally:
+        handle.remove()
+    if "relative_inverse" not in captured:
+        raise RuntimeError("Relative decoder hook did not execute")
+    context = dict(context)
+    context["relative_inverse"] = captured["relative_inverse"]
+    return context
+
+
 def prepare_p11_context(source, context, variant):
     """Prepare a P1-1 view of one frozen-source forward.
 
