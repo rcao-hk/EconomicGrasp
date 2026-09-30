@@ -129,7 +129,8 @@ class FrozenSource(nn.Module):
             depth, _, metric, _, feats, _ = model._depth_pack
             h, w = batch['img'].shape[-2:]
             relative, relative_raw = model.relative_decoder(feats, h//14, w//14)
-            _, prob = model.ray_head(relative, F.relu(relative_raw), metric, depth, (h,w), batch['K'])
+            relative_inverse = F.relu(relative_raw)
+            _, prob = model.ray_head(relative, relative_inverse, metric, depth, (h,w), batch['K'])
             if geometry_from is not None:
                 prob = geometry_from['prob']
             actions, shape = build_candidate_actions(ep, model.rotation_fn, model.max_width)
@@ -139,6 +140,7 @@ class FrozenSource(nn.Module):
                 torch.testing.assert_close(ep['grasp_top_view_inds'], fixed['views'], atol=0, rtol=0)
             return {'ep': ep, 'grouped': captured['grouped'],
                     'proposal': model._proposal_feature.detach(), 'relative': relative.detach(),
+                    'relative_inverse': relative_inverse.detach(),
                     'metric': metric.detach(), 'depth': depth.detach(), 'prob': prob.detach(),
                     'K': batch['K'].detach(), 'hw': (h,w), 'actions': actions.detach(), 'shape': shape}
         finally:
