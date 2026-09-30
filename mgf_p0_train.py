@@ -10,7 +10,7 @@ import time
 import torch
 from torch import distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, Subset
 from mgf_p0_core import VERSION, Metrics, assert_frozen, fingerprint, score_loss
 
 
@@ -52,6 +52,11 @@ def validate(source, control, loader, device):
         own.update(control(c), y, m)
         base.update(e['grasp_cdf_pred_angle_depth'], y, m)
         del c
+    # Validation must be collective-safe. Every rank evaluates a disjoint
+    # validation shard, then pools sufficient statistics. The old rank0-only
+    # validation left the other ranks waiting in a NCCL barrier for >600 s.
+    own.synchronize(device)
+    base.synchronize(device)
     control.train(was)
     return {'score': own.report(), 'base': base.report()}
 
@@ -117,6 +122,7 @@ def main():
                     prediction_source='frozen eval RGB+metadata; no sensor-depth network input',
                     labels='existing canonical CDF annotations, online matching; NOT exact predicted-action labels',
                     initialization='same source adapter/readout hidden weights; residual last layer zero; CVA private decoder copy',
+                    validation_execution='disjoint strided validation shards on every DDP rank; pooled sufficient statistics; no padding duplicates',
                     selection='fixed additional budget; latest only; test_seen is monitoring, not model selection')
     signature=digest(protocol); out=Path(a.output_root); out.mkdir(parents=True,exist_ok=True)
     if rank==0:
@@ -146,8 +152,16 @@ def main():
     loader=DataLoader(train,batch_size=a.batch_size,sampler=sampler,shuffle=sampler is None,
                       collate_fn=collate_fn,num_workers=a.workers,worker_init_fn=worker_init,
                       generator=gen,persistent_workers=False,pin_memory=False)
-    vl=DataLoader(val,batch_size=a.batch_size,shuffle=False,collate_fn=collate_fn,
-                  num_workers=a.eval_workers,worker_init_fn=worker_init) if rank==0 else None
+    # No DistributedSampler here: it pads when len(val) is not divisible by
+    # world size, which would duplicate validation frames. A deterministic
+    # strided Subset gives each frame to exactly one rank.
+    val_rank = (
+        Subset(val, list(range(rank, len(val), world)))
+        if world > 1 else val
+    )
+    vl=DataLoader(val_rank,batch_size=a.batch_size,shuffle=False,collate_fn=collate_fn,
+                  num_workers=a.eval_workers,worker_init_fn=worker_init,
+                  persistent_workers=False,pin_memory=False)
     if ck:
         restore_rng(ck['rng'][rank]); gen.set_state(ck['loader_rng'][rank]); del ck
     wrapped=DDP(control,device_ids=None,broadcast_buffers=False,find_unused_parameters=False) if world>1 else control
@@ -173,8 +187,10 @@ def main():
                       f'rank_q={int(diagnostic["informative_queries"])}',flush=True)
             del ctx,logits,loss,e
         metrics.synchronize(device)
-        v=validate(source,control,vl,device) if rank==0 else None
-        if world>1: dist.barrier()
+        # All ranks participate in validation and its metric all-reduces.
+        # This both avoids the NCCL watchdog timeout and reduces wall time by
+        # roughly world_size for the expensive frozen-source validation.
+        v=validate(source,control,vl,device)
         current=fingerprint(source.model)
         if current!=frozen_before: raise RuntimeError('Frozen parameters/buffers changed during fine-tuning')
         rs,gs=[None]*world,[None]*world
