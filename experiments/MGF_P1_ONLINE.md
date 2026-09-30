@@ -84,7 +84,9 @@ bash scripts/run_mgf_p1_1_online.sh
 Defaults: five additional scorer-only epochs, batch/GPU 3, AdamW 3e-4, WD
 1e-3, cosine LR, BCE + 0.1 query-ranking, 20% train exposure, 10% Seen
 monitoring, latest checkpoint only. Collision off/on dumps are produced from
-the same inference forward; **collision-off is the primary mechanism result**.
+the same inference forward. **Collision-on is the primary benchmark result** to
+match the historical EconomicGrasp/GraspNet reporting protocol; collision-off is
+retained as a secondary mechanism diagnostic.
 
 Smoke:
 
@@ -209,9 +211,10 @@ be used as a cross-check; do not merge checkpoints from different protocols.
 3. **P1-3:** compare correction forms only after confirming identical source
    hashes and budgets. A simpler shared shift that matches residual6 should
    replace the more complex parameterization.
-4. Collision-off is primary for representation/scoring claims. Collision-on is
-   a system-level secondary result because it uses sensor depth outside the RGB
-   network.
+4. Collision-on is the primary reported AP for consistency with the historical
+   EconomicGrasp/GraspNet protocol. Collision-off remains a required secondary
+   diagnostic to isolate the network/scoring contribution because the collision
+   filter uses sensor depth outside the RGB network.
 5. These experiments use existing official test splits for diagnosis. Do not
    repeatedly select architectures/hyperparameters from Similar/Novel and then
    report the same numbers as untouched final-test evidence.
