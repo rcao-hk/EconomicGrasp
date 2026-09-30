@@ -43,7 +43,7 @@ def main():
             validation=hist[-1]['validation'],
             official={}
         )
-        for mode in ('off','on'):
+        for mode in ('on','off'):
             scores={}
             for split in ('test_seen','test_similar','test_novel'):
                 d=root/variant/f'test_collision_{mode}'/'official'/split
@@ -58,13 +58,16 @@ def main():
                 scores[split]=mean
             if scores: result[variant]['official'][mode]=scores
     out=root/'comparison'; out.mkdir(exist_ok=True)
-    payload=dict(family=a.family,protocol=reference,results=result)
+    payload=dict(family=a.family,primary_collision='on',protocol=reference,results=result)
     (out/'comparison.json').write_text(json.dumps(payload,indent=2)+'\n')
     lines=[f'# {a.family} frozen-source comparison','',
+           '**Primary benchmark reporting uses collision-on; collision-off is a network/scoring diagnostic.**','',
            '| Variant | Collision | Seen | Similar | Novel | Mean |',
            '|---|---|---:|---:|---:|---:|']
     for variant,data in result.items():
-        for mode,scores in data['official'].items():
+        for mode in ('on','off'):
+            if mode not in data['official']: continue
+            scores=data['official'][mode]
             vals=[scores.get(k) for k in ('test_seen','test_similar','test_novel')]
             mean=float(np.mean(vals)) if all(v is not None for v in vals) else None
             fmt=lambda x:'pending' if x is None else f'{100*x:.3f}'
