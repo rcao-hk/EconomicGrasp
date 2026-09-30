@@ -41,7 +41,7 @@ def main():
     if not torch.cuda.is_available(): raise RuntimeError('CUDA inference environment required')
 
     from mgf_p0_online import FrozenSource,safe_batch
-    from mgf_p1_online import load_control,prepare_context,code_digest,VERSION as P1_VERSION
+    from mgf_p1_online import load_control,prepare_context,source_forward,code_digest,VERSION as P1_VERSION
     from metric_field_runtime import (VERSION,make_dataset,dataset_schedule,ensure_manifest,
                                       digest,sha256_file,atomic_json,seed_all,worker_init)
     from inference_metric_grasp_field import atomic_npy
@@ -112,7 +112,7 @@ def main():
         from utils.collision_detector import ModelFreeCollisionDetectorTorch
     cursor=0
     for raw in loader:
-        ctx=source(safe_batch(raw,'cuda:0',False))
+        ctx=source_forward(source,safe_batch(raw,'cuda:0',False))
         ctx=prepare_context(source,ctx,family,variant)
         ep=dict(ctx['ep']); ep['grasp_cdf_pred_angle_depth']=control(ctx)
         preds=pred_decode_center_view_angle(ep,use_cdf=True)
