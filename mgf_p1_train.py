@@ -53,11 +53,11 @@ def validate_variant(family,variant):
 @torch.no_grad()
 def validate(source,control,loader,device,family,variant):
     from mgf_p0_online import safe_batch
-    from mgf_p1_online import prepare_context
+    from mgf_p1_online import prepare_context,source_forward
     was=control.training; control.eval()
     own,base=Metrics(),Metrics()
     for raw in loader:
-        ctx=source(safe_batch(raw,device,True))
+        ctx=source_forward(source,safe_batch(raw,device,True))
         ctx=prepare_context(source,ctx,family,variant)
         ep=ctx['ep']; y=ep['batch_grasp_cdf_bins_angle_depth']; m=ep['batch_grasp_cdf_valid_mask']
         own.update(control(ctx),y,m)
@@ -70,10 +70,10 @@ def validate(source,control,loader,device,family,variant):
 def preflight(source,control,dataset,device,family,variant):
     from dataset.graspnet_dataset import collate_fn
     from mgf_p0_online import safe_batch
-    from mgf_p1_online import prepare_context
+    from mgf_p1_online import prepare_context,source_forward
     control.eval()
     for i in range(min(32,len(dataset))):
-        ctx=source(safe_batch(collate_fn([dataset[i]]),device,True))
+        ctx=source_forward(source,safe_batch(collate_fn([dataset[i]]),device,True))
         ctx=prepare_context(source,ctx,family,variant)
         ep=ctx['ep']; y=ep['batch_grasp_cdf_bins_angle_depth']; v=ep['batch_grasp_cdf_valid_mask']
         logits=control(ctx)
@@ -112,7 +112,7 @@ def main():
     if world>1: dist.init_process_group('nccl')
 
     from mgf_p0_online import FrozenSource,safe_batch
-    from mgf_p1_online import make_control,prepare_context,code_digest
+    from mgf_p1_online import make_control,prepare_context,source_forward,code_digest
     from metric_field_runtime import (make_dataset,seed_all,digest,atomic_json,atomic_torch,
                                       rng_state,restore_rng,worker_init)
     from dataset.graspnet_dataset import collate_fn
@@ -188,7 +188,7 @@ def main():
         metric=Metrics(); steps=0
         for step,raw in enumerate(loader):
             if a.max_steps and step>=a.max_steps: break
-            ctx=source(safe_batch(raw,device,True))
+            ctx=source_forward(source,safe_batch(raw,device,True))
             ctx=prepare_context(source,ctx,a.family,a.variant)
             ep=ctx['ep']; y=ep['batch_grasp_cdf_bins_angle_depth']; mask=ep['batch_grasp_cdf_valid_mask']
             opt.zero_grad(set_to_none=True)
