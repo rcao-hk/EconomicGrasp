@@ -31,7 +31,7 @@ def main():
                              last_validation=history[-1]['validation'],official={})
     result['base']={'official':{}}
     for variant,data in result.items():
-        for mode in ('off','on'):
+        for mode in ('on','off'):
             scores={}
             for split in ('test_seen','test_similar','test_novel'):
                 directory=root/variant/f'test_collision_{mode}'/'official'/split
@@ -45,13 +45,16 @@ def main():
                     scores[split]=mean
             if scores: data['official'][mode]=scores
     out=root/'comparison'; out.mkdir(exist_ok=True)
-    (out/'comparison.json').write_text(json.dumps(dict(protocol=reference,results=result),indent=2)+'\n')
+    (out/'comparison.json').write_text(json.dumps(dict(protocol=reference,primary_collision='on',results=result),indent=2)+'\n')
     lines=['# Frozen-source P0-1 comparison','',
            'Additional online fine-tuning; fixed source parameters, buffers and candidate generator.',
-           'Feature-only/full have identical trainable shapes. CVA is a private scorer control, not parameter-count matched.','',
+           'Feature-only/full have identical trainable shapes. CVA is a private scorer control, not parameter-count matched.',
+           '**Primary benchmark reporting uses collision-on; collision-off is a network/scoring diagnostic.**','',
            '| Variant | Collision | Seen | Similar | Novel | Mean |','|---|---|---:|---:|---:|---:|']
     for name,data in result.items():
-        for mode,s in data['official'].items():
+        for mode in ('on','off'):
+            if mode not in data['official']: continue
+            s=data['official'][mode]
             vals=[s.get(k) for k in ('test_seen','test_similar','test_novel')]
             mean=float(np.mean(vals)) if all(v is not None for v in vals) else None
             fmt=lambda v: 'pending' if v is None else f'{100*v:.3f}'
