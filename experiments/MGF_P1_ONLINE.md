@@ -22,6 +22,15 @@ concurrently with P0-2 on the same host unless CPU/RAM contention has been
 measured. P1-1 or P1-3 training is the preferred concurrent job while P0 is
 running.
 
+To queue all P1 families on GPUs 3,5,6 while P0 occupies another GPU pool:
+
+```bash
+GPUS=3,5,6 bash scripts/run_mgf_p1_queue.sh
+```
+
+The queue runs P1-1 -> P1-3 -> P1-2 sequentially, so the P1 jobs do not
+oversubscribe the same GPUs. Override `STAGES` to run a subset.
+
 ---
 
 ## P1-1: what does the ray field actually contribute?
