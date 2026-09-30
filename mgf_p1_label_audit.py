@@ -104,7 +104,8 @@ def main():
     if not 0<=a.shard_id<a.num_shards: raise ValueError('Invalid shard')
     if not torch.cuda.is_available(): raise RuntimeError('P1-2 needs CUDA/GraspNet environment')
 
-    from mgf_p0_online import FrozenSource,safe_batch,code_digest
+    from mgf_p0_online import FrozenSource,safe_batch
+    from mgf_p1_online import code_digest
     from metric_field_runtime import (make_dataset,dataset_schedule,atomic_json,
                                       ensure_manifest,digest,seed_all)
     from dataset.graspnet_dataset import collate_fn
@@ -208,7 +209,7 @@ def main():
                              'pure_collision' if bool(exact.pure_collision[i]) else 'clear')
             row=dict(scene=int(sid),ann=int(ann),query=qi,candidate=ci,angle=aid[i],depth=did[i],
                      center_match_mm=cmm[i],
-                     center_bin=_bin(cmm[i],[1,2,3,4],['0-1','1-2','2-3','3-4','4-5']),
+                     center_bin=_bin(cmm[i],[1,2,3,4,5],['0-1','1-2','2-3','3-4','4-5','5+']),
                      predicted_width_mm=1000*pwidth[i],
                      canonical_width_mm=(1000*transfer_width[i] if transfer_width_valid[i] else None),
                      width_mismatch_mm=wm,width_label_valid=transfer_width_valid[i],
