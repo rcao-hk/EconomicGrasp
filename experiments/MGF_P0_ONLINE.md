@@ -63,9 +63,11 @@ bash scripts/run_mgf_p0_1_online.sh
 ```
 
 Variants run sequentially on the same GPUs; each training run uses DDP. Inference
-is sharded. Default `PHASES=train,infer,eval`, `COLLISION=off`. `COLLISION=both`
-derives off/on dumps from the same forward, then evaluates both. Sensor depth is
-used only for the optional on post-filter; the source network never receives it.
+is sharded. Default `PHASES=train,infer,eval`, `COLLISION=both`. Off/on dumps are derived
+from the same network forward. **Collision-on is the primary benchmark result**
+to match the historical EconomicGrasp/GraspNet reporting protocol; collision-off
+is retained as a secondary network/scoring diagnostic. Sensor depth is used only
+for the collision-on post-filter; the source network never receives it.
 The inherited GraspNet crop/workspace preprocessing is **not** claimed to be
 annotation-independent. This experiment does not resolve that deployment issue.
 
@@ -88,7 +90,9 @@ mgf_p0_1_frozen_online/
   feature_only/train/{protocol,gradient_contract,metrics}.json
   full/train/checkpoint_latest.pt
   cva/train/checkpoint_latest.pt
-  base/test_collision_off/official/<split>/{summary.json,accuracy.npy}
+  base/test_collision_on/official/<split>/{summary.json,accuracy.npy}   # primary
+  base/test_collision_off/official/<split>/{summary.json,accuracy.npy}  # diagnostic
+  <variant>/test_collision_on/official/<split>/...
   <variant>/test_collision_off/official/<split>/...
   comparison/{comparison.md,comparison.json}
 ```
