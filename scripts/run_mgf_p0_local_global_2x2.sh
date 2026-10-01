@@ -106,7 +106,7 @@ for phase in "${PP[@]}"; do
       for split in "${SS[@]}"; do
         echo "[2x2] inference split=$split"
         for shard in "${!IDS[@]}"; do
-          launch "${IDS[$shard]}" "$WORK_ROOT/logs/infer_${split}_${shard}.log"             "$ROOT/mgf_p0_local_global_2x2.py"             --source-checkpoint "$SOURCE_CHECKPOINT"             --full-control-checkpoint "$FULL_CONTROL_CHECKPOINT"             --dataset-root "$DATASET_ROOT"             --output-root "$WORK_ROOT"             --split "$split"             --eval-fraction "$EVAL_FRACTION"             --shard-id "$shard" --num-shards "${#IDS[@]}"             --batch-size "$INFER_BATCH_SIZE" --workers "$WORKERS"             --collision "$COLLISION"             --collision-thresh "$COLLISION_THRESH"             --voxel-size "$COLLISION_VOXEL_SIZE"             --approach-dist "$COLLISION_APPROACH_DIST"             --max-frames "$INFER_MAX_FRAMES"             "${resume[@]}"
+          launch "${IDS[$shard]}" "$WORK_ROOT/logs/infer_${split}_${shard}.log"             "$ROOT/mgf_local_global_2x2.py"             --source-checkpoint "$SOURCE_CHECKPOINT"             --full-control-checkpoint "$FULL_CONTROL_CHECKPOINT"             --dataset-root "$DATASET_ROOT"             --output-root "$WORK_ROOT"             --split "$split"             --eval-fraction "$EVAL_FRACTION"             --shard-id "$shard" --num-shards "${#IDS[@]}"             --batch-size "$INFER_BATCH_SIZE" --workers "$WORKERS"             --collision "$COLLISION"             --collision-thresh "$COLLISION_THRESH"             --voxel-size "$COLLISION_VOXEL_SIZE"             --approach-dist "$COLLISION_APPROACH_DIST"             --max-frames "$INFER_MAX_FRAMES"             "${resume[@]}"
         done
         wait_all
       done
@@ -136,7 +136,7 @@ done
 # Formal comparison requires complete official results. Skip automatically for a
 # smoke run or infer-only invocation.
 if [[ "$INFER_MAX_FRAMES" == 0 && ",$PHASES," == *",eval,"* ]]; then
-  "$PYTHON_BIN" "$ROOT/mgf_p0_local_global_2x2_compare.py"     --root "$WORK_ROOT" --collision "$COLLISION" --bootstrap "$BOOTSTRAP"
+  "$PYTHON_BIN" "$ROOT/mgf_local_global_2x2_compare.py"     --root "$WORK_ROOT" --collision "$COLLISION" --bootstrap "$BOOTSTRAP"
 fi
 
 echo
