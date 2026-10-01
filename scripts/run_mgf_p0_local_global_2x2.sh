@@ -15,9 +15,9 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 PYTHON_BIN=${PYTHON_BIN:-python}
-SOURCE_CHECKPOINT=${SOURCE_CHECKPOINT:-/data2/robotarm/result/grasp/rgbgrasp/dav2_mgf_graspnet20_mixed_matched/train/checkpoint_latest.pt}
 P0_ROOT=${P0_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/mgf_p0_1_frozen_online}
 FULL_CONTROL_CHECKPOINT=${FULL_CONTROL_CHECKPOINT:-$P0_ROOT/full/train/checkpoint_latest.pt}
+SOURCE_CHECKPOINT=${SOURCE_CHECKPOINT:-}
 DATASET_ROOT=${DATASET_ROOT:-/data/robotarm/dataset/graspnet}
 WORK_ROOT=${WORK_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/mgf_p0_local_global_2x2}
 
@@ -44,8 +44,24 @@ export OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-1}
 export PYTHONUNBUFFERED=1
 
 command -v setsid >/dev/null
-[[ -f "$SOURCE_CHECKPOINT" ]] || { echo "[ERROR] Missing source: $SOURCE_CHECKPOINT" >&2; exit 2; }
 [[ -f "$FULL_CONTROL_CHECKPOINT" ]] || { echo "[ERROR] Missing Full control: $FULL_CONTROL_CHECKPOINT" >&2; exit 2; }
+
+# Prefer the exact source path recorded by the Full-control checkpoint. This
+# avoids silently pointing the 2x2 diagnostic at a different matched20 run.
+if [[ -z "$SOURCE_CHECKPOINT" ]]; then
+  SOURCE_CHECKPOINT="$("$PYTHON_BIN" - "$FULL_CONTROL_CHECKPOINT" <<'PY'
+import sys
+import torch
+ck = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
+print(ck["protocol"]["source_checkpoint"])
+PY
+)"
+fi
+[[ -f "$SOURCE_CHECKPOINT" ]] || {
+  echo "[ERROR] Missing source checkpoint recorded by Full control: $SOURCE_CHECKPOINT" >&2
+  echo "        Override SOURCE_CHECKPOINT only if the checkpoint was relocated." >&2
+  exit 2
+}
 [[ "$COLLISION" == off || "$COLLISION" == on || "$COLLISION" == both ]] || {
   echo "[ERROR] COLLISION=off|on|both" >&2; exit 2;
 }
