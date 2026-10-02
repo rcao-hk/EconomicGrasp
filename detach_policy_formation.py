@@ -270,7 +270,8 @@ def train(a):
             generator=torch.Generator().manual_seed(1701+rank+epoch*3)
             trainer.TRAIN_DATALOADER=DataLoader(PairedDataset(trainer.TRAIN_DATASET),batch_size=3,
                 sampler=sampler,num_workers=c.num_workers,collate_fn=prod.collate_fn,drop_last=False,
-                pin_memory=False,persistent_workers=c.num_workers>0,generator=generator)
+                pin_memory=False,persistent_workers=c.num_workers>0,generator=generator,
+                prefetch_factor=1 if c.num_workers>0 else None)
             assert len(trainer.TRAIN_DATALOADER)==2845-epoch_start_batch
             trainer.train_one_epoch(epoch)
             assert global_step==(epoch+1)*2845

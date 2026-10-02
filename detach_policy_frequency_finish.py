@@ -65,8 +65,8 @@ def main(a):
     summary=json.loads((out/'frequency_mechanism.json').read_text())
     summary.update(status='pass',original_batch_replay='frequency_original_batch.json',
         mechanism_figure='figures/frequency_mechanism.png',interpretation={
-            'late_target_band':'weighted channels add coherently: projected/incoherent power about6.26',
-            'late_other_high_frequencies':'strong cancellation: projected/incoherent power about0.0198',
+            'late_target_band_ratio':float(next(r['ratio_coherent_to_incoherent'] for r in projection if r['checkpoint']=='late' and r['region']=='target_B')),
+            'late_other_high_frequency_ratio':float(next(r['ratio_coherent_to_incoherent'] for r in projection if r['checkpoint']=='late' and r['region']=='H_outside_B')),
             'conclusion':'Both target-frequency reinforcement and cancellation outside the band increase relative concentration; ReLU participates in expressing higher-frequency power.',
             'causal_limit':'Forward computation evidence does not identify why training learned these representations; no decoder or pose training ablation was performed.'})
     q.dump(out/'frequency_mechanism.json',summary)
