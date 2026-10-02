@@ -921,6 +921,7 @@ def _build_view_angle_rot_grid(num_view: int, num_angle: int, device, dtype) -> 
 def _build_angle_alignment_perm(
     canonical_rot: torch.Tensor,
     transformed_scene_rot: torch.Tensor,
+    stable_ties: bool = False,
 ) -> torch.Tensor:
     """Map scene canonical angle index -> transformed/object angle index.
 
@@ -952,6 +953,16 @@ def _build_angle_alignment_perm(
     pred_kp = pred_kp.contiguous().view(V, A, -1)
     trans_kp = trans_kp.contiguous().view(V, A, -1)
     trans_kp_sym = trans_kp_sym.contiguous().view(V, A, -1)
+
+    if stable_ties:
+        # CDF only: preserve keypoint distance; exact ties prefer normal
+        # orientation, then the lowest original angle index. Other callers
+        # retain their existing KNN implementation.
+        dn = (pred_kp[:, :, None] - trans_kp[:, None]).square().sum(-1)
+        ds = (pred_kp[:, :, None] - trans_kp_sym[:, None]).square().sum(-1)
+        nd, ni = dn.min(-1)
+        sd, si = ds.min(-1)
+        return torch.where(nd <= sd, ni, si).long()
 
     dis, inds, _ = knn_points(pred_kp, trans_kp, K=1)
     dis_sym, inds_sym, _ = knn_points(pred_kp, trans_kp_sym, K=1)
@@ -1019,6 +1030,38 @@ def _align_topk_angle_depth_labels(
 def _compute_pointwise_dists(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """a, b: [N,3]. Return per-row Euclidean distances [N]."""
     return torch.linalg.norm(a - b, dim=-1)
+
+
+def _select_cdf_query_labels(top_view_index, view_inds, scene_view,
+                             angle_perm, cdf, width, width_valid):
+    """Query scene -> canonical -> unique cached slot -> scene angle.
+
+    A negative top-view entry is padding, never a valid negative label.
+    Cache generation uses topk indices, so non-padding slots must be unique.
+    Multiple scene views may legitimately select the same canonical slot.
+    """
+    n, k = top_view_index.shape
+    v, a = angle_perm.shape
+    if k == 0 or any(x.shape[:3] != (n, k, a) for x in (cdf, width, width_valid)):
+        raise ValueError('Invalid CDF query cache shapes')
+    if bool((top_view_index >= v).any()):
+        raise ValueError('Non-padding top-view index outside canonical view range')
+    ordered = top_view_index.sort(dim=1).values
+    if bool(((ordered[:, 1:] == ordered[:, :-1]) & (ordered[:, 1:] >= 0)).any()):
+        raise ValueError('Duplicate non-padding canonical view slots in CDF cache')
+    object_view = view_inds[scene_view]
+    matches = top_view_index == object_view[:, None]
+    found = matches.any(dim=1)
+    slot = matches.long().argmax(dim=1)
+    row = torch.arange(n, device=scene_view.device)
+    perm = angle_perm[scene_view]
+    result = []
+    for labels in (cdf, width, width_valid):
+        selected = labels[row, slot]
+        selected = selected.gather(1, perm[:, :, None].expand_as(selected))
+        selected = selected.masked_fill(~found[:, None, None], 0)
+        result.append(selected)
+    return (*result, found)
 
 
 # -----------------------------------------------------------------------------
@@ -1573,12 +1616,6 @@ def process_grasp_labels_cdf_width(end_points):
                 view_rot_scene, 0, view_inds
             )
 
-            top_view_scene = -torch.ones_like(top_view_index)
-            row_id, slot_id, scene_view_id = torch.where(
-                view_inds == top_view_index.unsqueeze(-1)
-            )
-            top_view_scene[row_id, slot_id] = scene_view_id
-
             transformed_rot = torch.matmul(
                 pose[:3, :3], canonical_rot.reshape(-1, 3, 3)
             ).view(num_view, num_angle, 3, 3)
@@ -1586,35 +1623,17 @@ def process_grasp_labels_cdf_width(end_points):
                 transformed_rot, 0, view_inds
             )
             angle_perm = _build_angle_alignment_perm(
-                canonical_rot, transformed_rot_scene
+                canonical_rot, transformed_rot_scene, stable_ties=True
             )
-
-            cdf_rows = _align_topk_angle_depth_labels(
-                cdf_rows, top_view_scene, angle_perm
-            )
-            width_rows = _align_topk_angle_depth_labels(
-                width_rows, top_view_scene, angle_perm
-            )
-            width_valid_rows = _align_topk_angle_depth_labels(
-                width_valid_rows, top_view_scene, angle_perm
-            ).bool()
 
             pred_obj_view = pred_view.index_select(0, query_rows)
-            slot_match = top_view_scene == pred_obj_view.unsqueeze(-1)
-            valid_obj_view = slot_match.any(dim=-1)
-            slot = slot_match.to(torch.int64).argmax(dim=-1)
-            row = torch.arange(query_rows.numel(), device=device)
-
-            cdf_selected = cdf_rows[row, slot]
-            width_selected = width_rows[row, slot].to(model_dtype)
-            width_valid_selected = width_valid_rows[row, slot]
-            if bool((~valid_obj_view).any()):
-                cdf_selected = cdf_selected.clone()
-                width_selected = width_selected.clone()
-                width_valid_selected = width_valid_selected.clone()
-                cdf_selected[~valid_obj_view] = 0
-                width_selected[~valid_obj_view] = 0
-                width_valid_selected[~valid_obj_view] = False
+            cdf_selected, width_selected, width_valid_selected, valid_obj_view = (
+                _select_cdf_query_labels(
+                    top_view_index, view_inds, pred_obj_view, angle_perm,
+                    cdf_rows, width_rows, width_valid_rows.bool(),
+                )
+            )
+            width_selected = width_selected.to(model_dtype)
 
             selected_view_graspness.index_copy_(
                 0, query_rows, view_graspness_scene
