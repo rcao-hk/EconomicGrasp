@@ -154,6 +154,14 @@ def train(a):
             torch.save(state,path.with_suffix('.tmp'));path.with_suffix('.tmp').replace(path)
             digest=q.sha(path)
             with (armout/'checkpoint_manifest.jsonl').open('a') as f:f.write(json.dumps(dict(path=str(path),sha256=digest,bytes=path.stat().st_size,position=position.copy()))+'\n')
+            event_path=armout/'formation_event.json'
+            if event_path.exists():
+                event=json.loads(event_path.read_text())
+                if global_step>event['step'] and 'post_state' not in event:
+                    keep=logroot/f'event_post_{global_step:06d}.pt'
+                    if not keep.exists():os.link(path,keep)
+                    event['post_state']=dict(path=str(keep),sha256=digest)
+                    q.dump(event_path,event)
             # Own rolling states only; epoch states and event evidence are retained.
             rolling=sorted(logroot.glob('rolling_*.pt'))
             for prior in rolling[:-6]:
@@ -183,6 +191,23 @@ def train(a):
                         np.savez_compressed(armout/'predictions'/f"step{global_step:06d}_{fr['stem']}.npz",pred=pred)
             with (armout/'formation_curves.jsonl').open('a') as f:
                 for r in rows:f.write(json.dumps(r)+'\n')
+            seen=[r.get('A_B_mm') for r in rows if r['split']=='test_seen' and r['continuity']]
+            if seen and all(v is not None and np.isfinite(v) for v in seen):
+                value=float(np.mean(seen));history_path=armout/'formation_event_monitor.json'
+                history=json.loads(history_path.read_text()) if history_path.exists() else []
+                if not history or history[-1]['step']!=global_step:
+                    threshold=max(2.,3*history[0]['A_B_mm']) if history else max(2.,3*value)
+                    high=value>threshold;history.append(dict(step=global_step,A_B_mm=value,threshold_mm=threshold,high=high))
+                    q.dump(history_path,history)
+                    event_path=armout/'formation_event.json'
+                    if len(history)>1 and high and history[-2]['high'] and not event_path.exists():
+                        retained=[]
+                        for prior in sorted(logroot.glob('rolling_*.pt'))[-3:]:
+                            keep=logroot/('event_'+prior.name)
+                            if not keep.exists():os.link(prior,keep)
+                            retained.append(dict(path=str(keep),sha256=q.sha(keep)))
+                        q.dump(event_path,dict(step=global_step,rule='two consecutive continuity seen mean A_B > max(2mm,3xstep0); diagnostic interval only',
+                            before_and_current=retained,step0=str(logroot/'step0.pt')))
         dist.barrier()
 
     def before(epoch,batch_index,b):
@@ -198,8 +223,17 @@ def train(a):
         global_step+=1;next_batch=batch_index+epoch_start_batch+1
         position.update(step=global_step,epoch=epoch+(next_batch==2845),batch=0 if next_batch==2845 else next_batch)
         losses=trainer.extract_scalar_metrics(ep)
+        forward={k:v for k,v in ep.items() if torch.is_tensor(v) and
+            (k.startswith('batch_') or k in ('depth_net_pred','depth_head_raw_pred','view_score','grasp_cdf_pred_angle_depth','grasp_width_pred_angle_depth','token_sel_idx','xyz_graspable'))}
+        gradient_groups={}
+        if global_step%20==1:
+            for n,p in m.named_parameters():
+                if p.grad is not None:
+                    group='FiLM' if '.pose_aware_adapter.' in n else 'DPT' if n.startswith('depth_net.') else n.split('.')[0]
+                    gradient_groups[group]=gradient_groups.get(group,0.)+float(p.grad.detach().double().square().sum())
         record.write(json.dumps(dict(arm=a.arm,rank=rank,global_step=global_step,**input_record,
             global_grad_norm=float(norm),clip=min(1.,1./(float(norm)+1e-6)),lr=trainer.optimizer.param_groups[0]['lr'],
+            forward_hash=q.tree_hash(forward),postclip_gradient_squared_norm=gradient_groups,
             losses=losses,coverage=q.loss_coverage(ep),elapsed_sec=time.time()-started))+'\n')
         if not torch.isfinite(norm):raise RuntimeError('Nonfinite gradient; do not continue')
         if global_step%250==0:
