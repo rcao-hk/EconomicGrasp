@@ -27,6 +27,19 @@ def restore_rng(r):
     random.setstate(r['python']);np.random.set_state(r['numpy']);torch.set_rng_state(r['cpu']);torch.cuda.set_rng_state(r['cuda'])
 
 
+def runtime_state(m):
+    return dict(rng=rng_state(),buffers={n:b.detach().cpu().clone() for n,b in m.named_buffers()},
+        counters={n:{k:getattr(mod,k) for k in ('_vis_iter','_iter') if hasattr(mod,k)} for n,mod in m.named_modules()})
+
+
+def restore_runtime(m,state):
+    with torch.no_grad():
+        for n,b in m.named_buffers():b.copy_(state['buffers'][n])
+    for n,mod in m.named_modules():
+        for k,v in state['counters'].get(n,{}).items():setattr(mod,k,v)
+    restore_rng(state['rng'])
+
+
 class PairedDataset(Dataset):
     """Sampling randomness is keyed to occurrence, independent of worker prefetch."""
     def __init__(self,base):self.base=base
@@ -133,7 +146,10 @@ def train(a):
         missing=m.load_state_dict(state['model_delta'],strict=False)
         assert set(missing.missing_keys)==frozen and not missing.unexpected_keys
         trainer.optimizer.load_state_dict(state['optimizer_state_dict'])
-        position.update(state['position']);restore_rng(state['rank_rng'][rank]);del state
+        position.update(state['position'])
+        if 'rank_runtime' in state:restore_runtime(m,state['rank_runtime'][rank])
+        else:restore_rng(state['rank_rng'][rank])  # Initial pilot v1; production uses per-rank runtime.
+        del state
     start_step=position['step'];armout=out/a.name;armout.mkdir(exist_ok=True)
     logroot=a.logs/a.name;logroot.mkdir(parents=True,exist_ok=True)
     record=(armout/f'train_rank{rank}.jsonl').open('a',buffering=1)
@@ -141,12 +157,13 @@ def train(a):
     started=time.time();input_record={};global_step=position['step'];epoch_start_batch=0
 
     def checkpoint(label):
-        states=[None]*3;dist.all_gather_object(states,rng_state())
+        states=[None]*3;dist.all_gather_object(states,runtime_state(m))
         if trainer.main:
             path=logroot/(label+'.pt')
             if shutil.disk_usage(logroot).free<1_500_000_000:raise RuntimeError('Less than1.5GB free: checkpoint storage needs attention')
             state=dict(version=1,canonical_path=str(canonical_path),canonical_sha256=manifest['sha256'],
-                arm=a.arm,resolved=resolved(m),position=position.copy(),rank_rng=states,
+                arm=a.arm,resolved=resolved(m),position=position.copy(),rank_runtime=states,
+                rank_rng=[s['rng'] for s in states],
                 sampler_epoch=position['epoch'],loader_next_batch=position['batch'],
                 scheduler=dict(kind='epoch_cosine',max_epoch=21,next_epoch=position['epoch'],base_lr=c.learning_rate),
                 model_delta={n:v.detach().cpu() for n,v in m.state_dict().items() if n not in frozen},
@@ -238,6 +255,8 @@ def train(a):
         if not torch.isfinite(norm):raise RuntimeError('Nonfinite gradient; do not continue')
         if global_step%250==0:
             checkpoint(f'rolling_{global_step:06d}');probes()
+        if a.stop_step and global_step==1 and a.stop_step>1:
+            checkpoint('pilot_000001')
         if a.stop_step and global_step>=a.stop_step:
             checkpoint(f'stop_{global_step:06d}');raise StopAtBudget()
     trainer.on_batch_start=before;trainer.on_optimizer_step=after
