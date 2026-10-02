@@ -845,6 +845,8 @@ class Trainer:
 
         for batch_idx, batch_data_label in enumerate(self.TRAIN_DATALOADER):
             t = time.time()
+            if hasattr(self, 'on_batch_start'):
+                self.on_batch_start(epoch, batch_idx, batch_data_label)
 
             validate_batch_label_contract(
                 batch_data_label,
@@ -896,8 +898,10 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
             bwdopt_start_time = time.perf_counter()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)
             self.optimizer.step()
+            if hasattr(self, 'on_optimizer_step'):
+                self.on_optimizer_step(epoch, batch_idx, end_points, grad_norm)
 
             bwdopt_end_time = time.perf_counter()
             interval_opt_time += (bwdopt_end_time - bwdopt_start_time)
