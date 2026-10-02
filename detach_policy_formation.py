@@ -104,7 +104,7 @@ def prepare(a):
         P4_updates_per_arm=17070,P4_epochs=6,cosine_total_epochs=21,original_updates_per_arm=59745,
         loader_semantics='DistributedSampler original seed0, shuffle and padding; occurrence-keyed RNG independent of prefetch; sample payload hashes logged per rank',
         resume_claim='Input stream reconstructible; numerical restart equivalence must be measured, not claimed bitwise',
-        initial_state_source='constructor once; no Stage1 or trained DPT weights'))
+        initial_state_source='constructor once; no Stage1 or trained DPT weights')
     q.dump(out/'run_contract.json',contract)
     print(json.dumps(dict(stage='prepared',canonical_sha256=canonical['sha256'],frames=len(manifest))),flush=True)
 
