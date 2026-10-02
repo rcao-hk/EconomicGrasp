@@ -127,7 +127,9 @@ def ddp_step(a):
     indices=list(trainer.train_sampler)[:3]
     batch=next(iter(trainer.TRAIN_DATALOADER))
     batch_hash=q.tree_hash(batch)
-    trainer.TRAIN_DATALOADER=[batch]  # Only bounds the existing production loop.
+    # The production transfer/model mutates its input dict in place. Preserve
+    # the original CPU batch for before/after probes and the identity audit.
+    trainer.TRAIN_DATALOADER=[copy.deepcopy(batch)]
     before={n:p.detach().cpu().clone() for n,p in m.named_parameters() if p.requires_grad}
     records=[];clip=torch.nn.utils.clip_grad_norm_
     def record_clip(parameters,max_norm,**kw):
