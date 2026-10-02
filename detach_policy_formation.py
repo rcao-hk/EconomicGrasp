@@ -265,7 +265,7 @@ def train(a):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('stage',choices=['prepare','train'])
-    p.add_argument('--output',type=Path,required=True);p.add_argument('--logs',type=Path)
+    p.add_argument('--output',type=Path,required=True);p.add_argument('--checkpoint-root',dest='logs',type=Path)
     p.add_argument('--arm',choices=['A','B','C']);p.add_argument('--name')
     p.add_argument('--resume',type=Path);p.add_argument('--stop-epoch',type=int,default=6);p.add_argument('--stop-step',type=int)
     a=p.parse_args();prepare(a) if a.stage=='prepare' else train(a)
