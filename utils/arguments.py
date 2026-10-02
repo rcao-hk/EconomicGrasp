@@ -142,6 +142,13 @@ parser.add_argument(
     ),
 )
 
+for _depth_route in ("gse", "seed_xyz", "support"):
+    parser.add_argument(
+        "--detach_depth_" + _depth_route,
+        type=int, choices=(0, 1), default=None,
+        help="CVA-CDF only: override this depth gradient boundary; omitted inherits --detach_depth.",
+    )
+
 parser.add_argument(
     "--pose_depth_mode",
     type=str,

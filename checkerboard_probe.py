@@ -143,7 +143,11 @@ def make_model(prod):
     c=prod.cfgs
     m=prod.economicgrasp_dpt(min_depth=c.min_depth,max_depth=c.max_depth,bin_num=c.bin_num,is_training=True,
         use_obs_depth=c.use_obs_depth,pose_depth_mode=c.pose_depth_mode,use_depth_comp=False,use_cdf=c.use_cdf,
-        detach_depth=bool(c.detach_depth),vis_dir=None,vis_every=c.vis_every).cuda()
+        detach_depth=bool(c.detach_depth),
+        detach_depth_gse=getattr(c,'detach_depth_gse',None),
+        detach_depth_seed_xyz=getattr(c,'detach_depth_seed_xyz',None),
+        detach_depth_support=getattr(c,'detach_depth_support',None),
+        vis_dir=None,vis_every=c.vis_every).cuda()
     return m
 
 
@@ -245,7 +249,7 @@ class Preserve:
     def __enter__(self):
         self.rng=(random.getstate(),np.random.get_state(),torch.get_rng_state(),torch.cuda.get_rng_state_all())
         self.buffers={n:b.detach().clone() for n,b in self.m.named_buffers()}
-        self.flags=[(x,{k:getattr(x,k) for k in ('training','_vis_iter','is_training','detach_depth','detach_depth_grad') if hasattr(x,k)}) for x in self.m.modules()]
+        self.flags=[(x,{k:getattr(x,k) for k in ('training','_vis_iter','is_training','detach_depth','detach_depth_grad','detach_depth_gse','detach_depth_seed_xyz','detach_depth_support') if hasattr(x,k)}) for x in self.m.modules()]
         self.c_detach=self.m.kview_grasp_module.config.detach_depth
         return self
     def __exit__(self,*exc):
@@ -362,6 +366,9 @@ def route(m,name):
     m.spatial_enhancer.detach_depth_grad=name in ('none','noE')
     m.detach_depth=name in ('none','noQ')
     m.kview_grasp_module.config.detach_depth=name in ('none','noC')
+    m.detach_depth_gse=m.spatial_enhancer.detach_depth_grad
+    m.detach_depth_seed_xyz=m.detach_depth
+    m.detach_depth_support=m.kview_grasp_module.config.detach_depth
 
 
 def target_batch(a):
@@ -458,17 +465,10 @@ class PathCapture:
         wrap(self.m,'_select_graspable_seed_queries',seed)
         for mod in self.m.modules():
             if hasattr(mod,'_sample_aux_maps'):wrap(mod,'_sample_aux_maps',aux)
-        self.tracer=sys.gettrace()
-        def trace(frame,event,arg):
-            if event=='line' and frame.f_code.co_filename.endswith('utils/label_generation.py') and frame.f_lineno==1580:
-                v=frame.f_locals;row=v['row_id'].detach().cpu().numpy();slot=v['slot_id'].detach().cpu().numpy();scene=v['scene_view_id'].detach().cpu().numpy()
-                keys=row*v['top_view_scene'].shape[1]+slot;u,c=np.unique(keys,return_counts=True)
-                self.collisions.append(dict(batch_i=v['batch_i'],object_i=v['obj_i'],writes=len(keys),duplicate_destinations=int((c>1).sum()),
-                    max_writes_per_destination=int(c.max()) if len(c) else 0,distinct_scene_views_per_duplicate='torch.where indices are distinct; duplicate assignments have differing values'))
-            return trace if frame.f_code.co_filename.endswith('utils/label_generation.py') else None
-        sys.settrace(trace);return self
+        # The legacy source-line tracer is invalid after the semantic matcher
+        # repair. Label correctness now has its own scalar-reference audit.
+        return self
     def __exit__(self,*exc):
-        sys.settrace(self.tracer)
         for obj,name,old in reversed(self.old):setattr(obj,name,old)
 
 

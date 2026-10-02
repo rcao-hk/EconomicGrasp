@@ -632,6 +632,9 @@ class Trainer:
             use_depth_comp=False,
             use_cdf=self.use_cdf,
             detach_depth=bool(getattr(cfgs, "detach_depth", True)),
+            detach_depth_gse=getattr(cfgs, "detach_depth_gse", None),
+            detach_depth_seed_xyz=getattr(cfgs, "detach_depth_seed_xyz", None),
+            detach_depth_support=getattr(cfgs, "detach_depth_support", None),
             vis_dir=getattr(cfgs, 'vis_dir', None) if self.main else None,
             vis_every=int(getattr(cfgs, 'vis_every', 1000)),
         )
