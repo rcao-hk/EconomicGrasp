@@ -1,0 +1,50 @@
+{
+  "target_repository": "rcao-hk/EconomicGrasp",
+  "base_main_commit": "52d09f925059bec3643610ecf1f1722894627ee5",
+  "intended_branch": "exp/moge-rayrope-grasp20",
+  "remote_branch_created": false,
+  "pushed_to_github": false,
+  "remote_limitation": "Available GitHub actions in this session were read-only; local git clone also failed DNS resolution.",
+  "delivery": "Direct source additions; not a full clone and not a patch/apply bundle.",
+  "python": "3.13.5 (main, Jul 15 2026, 20:25:40) [GCC 14.2.0]",
+  "torch": "2.10.0+cpu",
+  "cuda_available": false,
+  "tests": {
+    "cpu_pytest": "33 passed",
+    "two_process_gloo_validation": "passed: 7 images / 56 candidates, uneven disjoint shards",
+    "python_compileall": "passed",
+    "bash_syntax": "passed"
+  },
+  "not_executed": [
+    "Real-main CUDA baseline parity",
+    "Real GraspNet/CUDA forward/backward smoke",
+    "20-epoch training",
+    "GraspNet inference and official AP",
+    "Remote branch creation/push"
+  ],
+  "scientific_boundaries": [
+    "MoGe-inspired shape/alignment adaptation, not pretrained MoGe or full ROE reproduction",
+    "RayRoPE projected uniform-interval moment with virtual grasp-frame adaptation, not full multi-view RayRoPE",
+    "Frozen DAV2 encoder; trainable new/task heads; numeric geometry detached from grasp loss",
+    "No new feature/action/teacher cache; existing main compact CDF/width dataset labels are required"
+  ],
+  "source_sha256": {
+    "train_moge_rayrope.py": "b7c2623070f202a9b5b1e262abc35b46ff509d3276a05b2c52de7d13a88105ec",
+    "compare_moge_rayrope.py": "2a9d28a8cbdfe17ac5ed25e2d9ee7cd540137d777fe4068f89c01fc30b306a26",
+    "verify_moge_rayrope_baseline.py": "2bd0c3bded876a4d89b0d6b0ac03d2c809d1438d40d0a65b06cc793206f717e9",
+    "inference_moge_rayrope.py": "53bedf8b1eb3880d92c490afb67bfcb18f936e6803016aecbe1e50f397b4655a",
+    "eval_moge_rayrope.py": "514263d28c5d4e58e1d79b547e3c8777990e43e89e314389224a4e74abdab2b7",
+    "scripts/run_moge_rayrope20.sh": "12f20bc95df01a148b4074008bf53196182a618b14bb1a84789ecacce36ad1c4",
+    "scripts/run_moge_rayrope_ablation20.sh": "dddcdb06706cbef8dda9748f75cd781a6c27ed89f044707668489a06c5623bae",
+    "tests/ddp_mr_validation_smoke.py": "276a798efc7eedfe12d79fbb2a5c72e894be45461022c5d88907294854abf200",
+    "tests/test_moge_rayrope.py": "f769a0d59bdf9bc222a4391cfbfc5cb8fc1f36ca517c3744e45315719545ffb7",
+    "moge_rayrope/runtime.py": "e6659776d7da1419b3e0c96ec76ca4377e588a5f76fbeb95ecb61946201dda17",
+    "moge_rayrope/model.py": "c4318f98fa6e19b99d9751c42d2bc4cf49c4ffd6ce02325fedd6ac1d2269cf9a",
+    "moge_rayrope/geometry.py": "572f2e03678b05e781412edc1ec96b4b7c503eee3c6f4c218161173b61395047",
+    "moge_rayrope/__init__.py": "a58defb0dd045f30e5e26630bf5ec8d81a56f6c9a7adbf2d56aa7c538cf2ce04",
+    "moge_rayrope/metrics.py": "58e149809d228a97d9eb46a1403acac0614b5743a0dc3d80ad1bcca7e91dfdef",
+    "moge_rayrope/attention.py": "a6d1f3d0397893aa62656afa5dac72df871d333fd77c75456a471792df6a2630",
+    "moge_rayrope/config.py": "4f3b36359a4fcf2891f2959c2c81432503ee7a91fb596d55c8195582ebc0cb37",
+    "moge_rayrope/objective.py": "cc3cad231c7b8691cfb83c41cf7eecc612e90007b5c9b733a41d9067f0e02fa2"
+  }
+}

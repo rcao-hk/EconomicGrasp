@@ -1,0 +1,3 @@
+[Gloo] Rank 0 is connected to 1 peer ranks. Expected number of connected peer ranks is : 1
+[Gloo] Rank 1 is connected to 1 peer ranks. Expected number of connected peer ranks is : 1
+MR_DDP_VALIDATION_OK images=7 candidates=56, disjoint uneven shards, pooled metrics
