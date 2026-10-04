@@ -227,6 +227,7 @@ def test_factorized_depth_tuple_and_gradient_contract_with_stub_dpt(monkeypatch)
     class TinyDPT(nn.Module):
         def __init__(self,in_channels=384,features=64,out_dim=3,**kw):
             super().__init__(); self.latent=nn.Linear(in_channels,features); self.pred=nn.Linear(features,out_dim)
+            self.scratch=nn.Module(); self.scratch.output_conv2=nn.Sequential(nn.Identity(),nn.ReLU(),nn.Identity())
         def forward(self,feats,ph,pw):
             f=self.latent(feats[-1][0].mean(1))[:,:,None,None].expand(-1,-1,8,8)
             raw=self.pred(f[:,:,0,0])[:,:,None,None].expand(-1,-1,32,32)

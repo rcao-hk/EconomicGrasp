@@ -118,7 +118,15 @@ def validate(model,loader,device,mc,lc):
             ep=model(move_batch(raw,device,labels=True)); _,_,logs=objective(ep,mc,lc)
             stat.update(ep,logs)
         stat.synchronize(device)
-        return stat.report()
+        try:
+            return stat.report()
+        except FloatingPointError:
+            failure_dir=os.getenv('MR_DIAGNOSTIC_FAILURE_DIR')
+            if failure_dir and int(os.getenv('RANK','0'))==0:
+                torch.save(dict(diagnostic_only=True,model=model.state_dict(),
+                    model_config=asdict(mc),loss_config=asdict(lc),loss_sums=stat.loss_sums,
+                    metrics_vector=stat.v),Path(failure_dir)/'failure_model.pt')
+            raise
     finally: model.train(was); restore_rng(state)
 
 

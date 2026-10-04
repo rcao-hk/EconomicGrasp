@@ -56,6 +56,8 @@ class FactorizedMetricDepth(nn.Module):
         self.depthnet.depth_head=DPTHead(in_channels=EMBEDS[cfg.encoder],
             features=FEATURES[cfg.encoder],use_bn=False,out_channels=OUTS[cfg.encoder],
             out_dim=3,use_clstoken=True)
+        # Keep shape-head gradients when its final hidden features are negative.
+        self.depthnet.depth_head.scratch.output_conv2[1]=nn.LeakyReLU(0.01,inplace=False)
         self.pose_aware_adapter=old.pose_aware_adapter if hasattr(old,'pose_aware_adapter') else None
         self.pose_depth_mode=cfg.pose_mode
         self.freeze_backbone_flag=True; self.stride=old.stride

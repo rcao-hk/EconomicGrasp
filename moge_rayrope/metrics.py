@@ -63,10 +63,15 @@ class EpochMetrics:
         v=self.v; tp=np.cumsum(self.pos[::-1]); fp=np.cumsum(self.neg[::-1]); pn=self.pos.sum(); nn=self.neg.sum()
         auc=div((self.pos*(np.cumsum(self.neg)-.5*self.neg)).sum(),pn*nn)
         auprc=div((self.pos[::-1]*tp/np.maximum(tp+fp,1)).sum(),pn)
-        return dict(images=self.images,scalars={k:div(v,self.images) for k,v in self.loss_sums.items()},
+        report=dict(images=self.images,scalars={k:div(v,self.images) for k,v in self.loss_sums.items()},
             cdf_candidates=int(v[0]),cdf_positive_fraction=div(v[1],v[0]),
             utility_mean=div(v[2],v[0]),target_mean=div(v[3],v[0]),
             auroc64=auc,auprc64=auprc,informative_query_fraction=div(v[5],v[4]),
             ranking_regret=div(v[6],v[5]),top1_best_hit=div(v[7],v[5]),
             depth_mae_m=div(v[8],v[9]),foreground_depth_mae_m=div(v[10],v[11]),
             interval_coverage=div(v[12],v[13]),interval_width_m=div(v[14],v[13]))
+
+        bad=[f'scalars.{k}={v}' for k,v in report['scalars'].items() if v is not None and not np.isfinite(v)]
+        bad += [f'{k}={v}' for k,v in report.items() if isinstance(v,(int,float)) and not np.isfinite(v)]
+        if bad: raise FloatingPointError('Nonfinite epoch metrics: '+', '.join(bad))
+        return report

@@ -47,10 +47,10 @@ def known_K_z_shift(points,rays):
     """
     if points.shape != rays.shape or points.shape[1]!=3:
         raise ValueError("Expected point/ray maps [B,3,H,W]")
-    r=rays[:,:2]; p=points.float()
+    r=rays[:,:2].double(); p=points.double()
     rr=r.square().sum(1,keepdim=True)
     numerator=(r*p[:,:2]).sum(1,keepdim=True)-rr*p[:,2:3]
-    return numerator.sum((2,3),keepdim=True)/rr.sum((2,3),keepdim=True).clamp_min(1e-8)
+    return (numerator.sum((2,3),keepdim=True)/rr.sum((2,3),keepdim=True).clamp_min(1e-8)).to(points.dtype)
 
 
 def canonicalize_points(points,rays):
@@ -61,7 +61,8 @@ def canonicalize_points(points,rays):
     """
     t=known_K_z_shift(points,rays)
     shifted=torch.cat((points[:,:2],points[:,2:3]+t),1)
-    scale=shifted[:,:2].square().mean((1,2,3),keepdim=True).sqrt().clamp_min(1e-3)
+    # Compute the gauge in float64: finite large pointmaps can overflow a float32 square.
+    scale=shifted[:,:2].double().square().mean((1,2,3),keepdim=True).clamp_min(1e-6).sqrt().to(points.dtype)
     return shifted/scale,t,scale
 
 
