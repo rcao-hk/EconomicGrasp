@@ -25,6 +25,7 @@
 - 三路全 detach：E/GSE 几何、Q/seed backprojection、C/support depth values。
   depth head 的直接 metric-depth loss 仍保留；原有可训练视觉/抓取模块继续训练。
 - 不加 KD、repair、center offset、confidence gate、新 collision head 或在线 Dex-Net。
+- 正式训练固定 **per-GPU batch size=3**；3GPU 时 global batch=9。训练期 validation workers=16。
 - 主 AP 使用原始 sensor cloud、collision threshold=0.01、voxel=0.01。
   这叫 RGB-only network + 原协议 depth-assisted preprocessing/filtering；
   不能写成 raw-RGB-only 整体系统。
@@ -168,6 +169,8 @@ CDF shape为 `[B,6,Q,12,4]`、width `[B,4,Q,12]`；无 forbidden legacy aliases�
 `D: GVAR E/Q/C detach` 都是1；depth loss有梯度；不把全部depth_net冻结。
 
 对 volume 和 volume_rel 再做**双GPU smoke**，确认 no unused-parameter/collective hang。
+随后至少对 `volume` 做一次 **BATCH_SIZE=3 的单GPU一-batch显存 smoke**，确认正式 per-GPU batch3
+可以运行；若 OOM，先降低 `ACTION_CHUNK`，不要直接把正式 batch 改回1。
 DDP 的 variable-length label lists 必须保持 CPU；不要改 base 的 device_ids=None。
 
 使用 smoke checkpoint 做推理 smoke，不运行 evaluator：
@@ -184,18 +187,22 @@ bash scripts/run_gvar_eval.sh
 
 ## 6. 正式训练
 
-默认每 variant 3GPU × per-GPU batch1，global batch3，20epoch，AdamW lr1e-4、
-cosine schedule、weight decay0、grad clip1，沿用原始监督权重。
+默认每 variant **3GPU × per-GPU batch3，global batch9**，20epoch，AdamW lr1e-4、
+cosine schedule、weight decay0、grad clip1，沿用原始监督权重。训练期 Original Seen validation 的
+`EVAL_NUM_WORKERS=16`。由于 batch size 相比历史 mixed baseline 发生变化，**baseline 也必须在这一
+batch3/global9 协议下重新训练**；历史 batch1/global3 checkpoint 只能作背景参考，不能作为严格的
+GVAR 架构因果对照。
 DINO使用原模型冻结设定；其余原本可训练模块继续训练。
 从 pretrained DINO/DPT 的正常 task initialization 起跑，**不加载 Stage-1/P5/MGF checkpoint**。
 
 推荐先 baseline/slot/volume，随后 volume_fixed 和 volume_rel 补齐因果比较。
 若资源允许也可先全部运行，但每个配置必须使用相同GPU数/global batch和训练计划。
-6GPU条件下可两个训练并行（0,1,2 和 3,4,5），不要把一个配置擅自改成6GPU/global batch6。
+6GPU条件下可两个训练并行（0,1,2 和 3,4,5），每个训练仍保持 per-GPU batch3 / global batch9；
+不要把某个配置擅自改成6GPU，否则 global batch 会变为18并破坏受控比较。
 
 ```bash
 DATASET_ROOT="$DATASET_ROOT" GNTRANS_RGB_ROOT="$GNTRANS_RGB_ROOT" \
-GPUS=0,1,2 VARIANT=volume BATCH_SIZE=1 MAX_EPOCH=20 \
+GPUS=0,1,2 VARIANT=volume BATCH_SIZE=3 MAX_EPOCH=20 EVAL_NUM_WORKERS=16 \
 OUTPUT_ROOT=/data2/robotarm/result/grasp/rgbgrasp/gvar_10pct/train/volume \
 bash scripts/run_gvar_train.sh
 ```
@@ -224,10 +231,11 @@ checkpoint内包含variant、reader参数、完整模型结构参数、detach po
 主模型比较**预先固定 e19**。e9/e14只用于学习轨迹，不从Novel挑最好checkpoint。
 `best_val_loss`不是“best AP”，不要用不同选择策略美化某一个variant。
 
-断点续训（同variant/结构/global batch，启动脚本其他设置保持不变）：
+断点续训（同variant/结构、per-GPU batch3 / global batch9，启动脚本其他设置保持不变）：
 
 ```bash
-VARIANT=volume GPUS=0,1,2 DATASET_ROOT="$DATASET_ROOT" GNTRANS_RGB_ROOT="$GNTRANS_RGB_ROOT" \
+VARIANT=volume GPUS=0,1,2 BATCH_SIZE=3 EVAL_NUM_WORKERS=16 \
+DATASET_ROOT="$DATASET_ROOT" GNTRANS_RGB_ROOT="$GNTRANS_RGB_ROOT" \
 RESUME_CKPT=/path/to/volume/checkpoint_latest.tar \
 OUTPUT_ROOT=/path/to/volume bash scripts/run_gvar_train.sh
 ```
@@ -242,7 +250,7 @@ OUTPUT_ROOT=/path/to/volume bash scripts/run_gvar_train.sh
 ```bash
 DATASET_ROOT="$DATASET_ROOT" \
 CKPT=/data2/robotarm/result/grasp/rgbgrasp/gvar_10pct/train/volume/checkpoint_epoch_019.tar \
-GPUS=0,1,2 BATCH_SIZE=1 NUM_WORKERS=2 EVAL_NUM_WORKERS=8 \
+GPUS=0,1,2 BATCH_SIZE=1 NUM_WORKERS=2 EVAL_NUM_WORKERS=16 \
 OUTPUT_ROOT=/data2/robotarm/result/grasp/rgbgrasp/gvar_10pct/eval/volume/e19 \
 bash scripts/run_gvar_eval.sh
 ```
@@ -250,7 +258,7 @@ bash scripts/run_gvar_eval.sh
 - 一个split一个GPU；GPU不足时分wave；每split780 frames。
 - 自动读取checkpoint配置，不手写不同的reader/pose/head flags。
 - 推理是 `sample_interval=0.1`；官方 `eval.py` 是 `sample_interval=10`。
-- 三split推理完成后串行CPU evaluation，避免同时启动3个大CPU pool。
+- 三split推理完成后串行CPU evaluation；**每个官方 evaluator 使用 16 workers**，避免同时启动3个 16-worker CPU pool。
 - `RUN_INFERENCE=0 RUN_EVAL=1` 可只评测已完整dump。
 - `RUN_INFERENCE=1 RUN_EVAL=0` 仅推理。
 - `RESUME_INFERENCE=1` 只允许同manifest重跑，跳过已验证的同帧dump。
@@ -291,7 +299,7 @@ python summarize_gvar.py \
 ## 9. 遇到问题时的处理
 
 - argparse：新flags必须在legacy `utils.arguments`导入前消耗；不要加到全局parser后随意覆盖cfgs。
-- OOM：先将ACTION_CHUNK从512降到128/64，保持global batch；所有volume配置使用一致chunk。
+- OOM：正式训练首先保持 **per-GPU batch3 / global batch9** 不变，将ACTION_CHUNK从512降到128/64；所有volume配置使用一致chunk。
   activation checkpoint默认开启。不要用减少Q/angle/view候选来“解决”正式实验OOM。
 - CPU/RAM压力：减少workers，检查cached CDF label RAM；不能把variable-length labels移到CUDA。
 - 新reader context缺失：检查proposal_head输出(path1, logits)、group keyword signature；不要静默fallback。
