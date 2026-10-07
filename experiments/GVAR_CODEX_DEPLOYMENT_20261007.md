@@ -25,7 +25,7 @@
 - 三路全 detach：E/GSE 几何、Q/seed backprojection、C/support depth values。
   depth head 的直接 metric-depth loss 仍保留；原有可训练视觉/抓取模块继续训练。
 - 不加 KD、repair、center offset、confidence gate、新 collision head 或在线 Dex-Net。
-- 正式训练固定 **per-GPU batch size=3**；3GPU 时 global batch=9。训练期 validation workers=16。
+- 正式训练固定 **per-GPU batch size=3**；3GPU 时 global batch=9。训练期 validation workers=16。\n- 正式 inference 固定 **batch size=3 / GPU**；官方 evaluator workers=16。
 - 主 AP 使用原始 sensor cloud、collision threshold=0.01、voxel=0.01。
   这叫 RGB-only network + 原协议 depth-assisted preprocessing/filtering；
   不能写成 raw-RGB-only 整体系统。
@@ -182,7 +182,7 @@ OUTPUT_ROOT=/data2/robotarm/result/grasp/rgbgrasp/gvar_smoke_infer/volume \
 bash scripts/run_gvar_eval.sh
 ```
 
-检查 `.npy` 17 columns、有限数值、正确 scene/frame 命名；summary complete=false
+检查 `.npy` 17 columns、有限数值、正确 scene/frame 命名；inference 默认 batch size=3；summary complete=false
 是 smoke 的预期结果，不能将部分样本当作正式AP。
 
 ## 6. 正式训练
@@ -250,12 +250,12 @@ OUTPUT_ROOT=/path/to/volume bash scripts/run_gvar_train.sh
 ```bash
 DATASET_ROOT="$DATASET_ROOT" \
 CKPT=/data2/robotarm/result/grasp/rgbgrasp/gvar_10pct/train/volume/checkpoint_epoch_019.tar \
-GPUS=0,1,2 BATCH_SIZE=1 NUM_WORKERS=2 EVAL_NUM_WORKERS=16 \
+GPUS=0,1,2 BATCH_SIZE=3 NUM_WORKERS=2 EVAL_NUM_WORKERS=16 \
 OUTPUT_ROOT=/data2/robotarm/result/grasp/rgbgrasp/gvar_10pct/eval/volume/e19 \
 bash scripts/run_gvar_eval.sh
 ```
 
-- 一个split一个GPU；GPU不足时分wave；每split780 frames。
+- 一个split一个GPU；GPU不足时分wave；每split780 frames；**每个 inference 进程 batch size=3**。
 - 自动读取checkpoint配置，不手写不同的reader/pose/head flags。
 - 推理是 `sample_interval=0.1`；官方 `eval.py` 是 `sample_interval=10`。
 - 三split推理完成后串行CPU evaluation；**每个官方 evaluator 使用 16 workers**，避免同时启动3个 16-worker CPU pool。
