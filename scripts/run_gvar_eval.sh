@@ -29,7 +29,7 @@ run_inference() {
   if [[ "${RESUME_INFERENCE:-0}" == 1 ]]; then extra+=(--gvar_resume_inference); fi
   local cmd=("$PYTHON" inference_gvar.py --dataset_root "$DATASET_ROOT" --checkpoint_path "$CKPT"
     --save_dir "$out" --test_mode "$split" --camera realsense --sample_interval 0.1
-    --batch_size "${BATCH_SIZE:-1}" --num_workers "${NUM_WORKERS:-2}" --seed "${SEED:-0}"
+    --batch_size "${BATCH_SIZE:-3}" --num_workers "${NUM_WORKERS:-2}" --seed "${SEED:-0}"
     --collision_thresh "${COLLISION_THRESH:-0.01}" --collision_voxel_size "${COLLISION_VOXEL_SIZE:-0.01}"
     --multi_modal --use_cdf --gvar_variant auto --gvar_max_batches "$MAX_BATCHES" "${extra[@]}")
   echo "[GVAR] $split GPU=$gpu -> $out"
@@ -64,7 +64,7 @@ assert len(list(p.glob('scene_*/*/*.npy')))==780, 'Dumps missing or polluted; re
 PY
     echo "[GVAR] sequential CPU evaluation $split"
     "$PYTHON" eval.py --dataset_root "$DATASET_ROOT" --camera realsense --split "$split" \
-      --dump_dir "$out" --sample_interval 10 --num_workers "${EVAL_NUM_WORKERS:-8}" > "$out/evaluation.log" 2>&1
+      --dump_dir "$out" --sample_interval 10 --num_workers "${EVAL_NUM_WORKERS:-16}" > "$out/evaluation.log" 2>&1
     # Delete only raw scene prediction files AFTER a valid AP tensor is saved.
     "$PYTHON" - "$out" "$split" "$REMOVE_DUMP" <<'PY'
 import numpy as np, pathlib, sys
