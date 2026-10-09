@@ -308,3 +308,15 @@ python summarize_gvar.py \
 - width：第一轮固定support envelope，不在输入里取GT width；不得声称full-action exactness。
 - AP完整性：每split必须30scene×26frame×50rank×6threshold；失败split不能被均值自动忽略。
 - 某个variant原始域不改善：如实汇报，不自行开始KD/gate/repair/consistency或G20→GN-Trans矩阵。
+
+## 10. e19 scene-paired analysis（2026-10-09）
+
+已有四组 GVAR 正式 AP（baseline、slot、volume、volume_rel）完成后，
+以 **scene 为 bootstrap cluster** 进行 paired AP/μ/Top-K 分析，
+参见 [GVAR_SCENE_PAIRED_CODEX_20261009.md](GVAR_SCENE_PAIRED_CODEX_20261009.md)。
+
+分析代码为仓库根目录的 `analyze_gvar_scene_paired.py`，
+测试为 `tests/test_gvar_scene_paired.py`。它只读服务器已有
+`gvar_deploy_20261007` 的三 split e19 AP NPY、training 和 inference
+manifests；不重跑训练、推理或官方 evaluator。默认跳过尚未训练的
+volume_fixed，直接补充 volume_rel-vs-volume 的成对置信区间。
