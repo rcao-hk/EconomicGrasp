@@ -9,18 +9,19 @@ cd "$ROOT"
 
 P1_VARIANT="${P1_VARIANT:-U0}"
 case "$P1_VARIANT" in
-  U0) export VARIANT=rayrope_point; export UNCERTAINTY=fixed
+  U0) export VARIANT=rayrope_point RAY_ENCODING=point; export UNCERTAINTY=fixed
       export UNCERTAINTY_LOSS=interval ;;
-  U1) export VARIANT=rayrope; export UNCERTAINTY=fixed
+  U1) export VARIANT=rayrope RAY_ENCODING=expected; export UNCERTAINTY=fixed
       export UNCERTAINTY_LOSS=interval ;;
-  U2) export VARIANT=rayrope_learned; export UNCERTAINTY=learned
+  U2) export VARIANT=rayrope_learned RAY_ENCODING=expected; export UNCERTAINTY=learned
       export UNCERTAINTY_LOSS=interval ;;
-  U3) export VARIANT=rayrope_learned; export UNCERTAINTY=learned
+  U3) export VARIANT=rayrope_learned RAY_ENCODING=expected; export UNCERTAINTY=learned
       export UNCERTAINTY_LOSS=laplace_decoupled ;;
-  U4) export VARIANT=rayrope_learned; export UNCERTAINTY=learned
+  U4) export VARIANT=rayrope_learned RAY_ENCODING=expected; export UNCERTAINTY=learned
       export UNCERTAINTY_LOSS=laplace_joint ;;
   *) echo "Use P1_VARIANT=U0|U1|U2|U3|U4" >&2; exit 2 ;;
 esac
+export USE_MOGE=0 USE_RAYROPE=1
 export WORK_ROOT="${WORK_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/rayrope_mixed_p1/$P1_VARIANT}"
 export TRAIN_FRACTION=0.1
 export EVAL_FRACTION=0.1
