@@ -14,12 +14,15 @@ case "$VARIANT" in
   rayrope_point) DEFAULT_M=0; DEFAULT_R=1; DEFAULT_ENCODING=point; DEFAULT_UNCERTAINTY=fixed ;;
   moge_rayrope_point) DEFAULT_M=1; DEFAULT_R=1; DEFAULT_ENCODING=point; DEFAULT_UNCERTAINTY=fixed ;;
   moge_rayrope_learned) DEFAULT_M=1; DEFAULT_R=1; DEFAULT_ENCODING=expected; DEFAULT_UNCERTAINTY=learned ;;
+  rayrope_learned) DEFAULT_M=0; DEFAULT_R=1; DEFAULT_ENCODING=expected; DEFAULT_UNCERTAINTY=learned ;;
   *) echo "Unknown VARIANT=$VARIANT" >&2; exit 2 ;;
 esac
 USE_MOGE=${USE_MOGE:-$DEFAULT_M}
 USE_RAYROPE=${USE_RAYROPE:-$DEFAULT_R}
 RAY_ENCODING=${RAY_ENCODING:-$DEFAULT_ENCODING}
 UNCERTAINTY=${UNCERTAINTY:-$DEFAULT_UNCERTAINTY}
+UNCERTAINTY_LOSS=${UNCERTAINTY_LOSS:-interval}
+GNTRANS_RGB_ROOT=${GNTRANS_RGB_ROOT:-}
 DATASET_ROOT=${DATASET_ROOT:-/data/robotarm/dataset/graspnet}
 LABEL_FOLDER=${LABEL_FOLDER:-economic_grasp_label_300views_extend_angle_cdf_depth}
 WORK_ROOT=${WORK_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/moge_rayrope20/$VARIANT}
@@ -86,6 +89,8 @@ launch(){ local gpu="$1" log="$2"; shift 2; setsid env CUDA_VISIBLE_DEVICES="$gp
 wait_all(){ local pid; for pid in "${PIDS[@]}"; do wait "$pid" || { cleanup; return 1; }; done; PIDS=(); }
 printf '[MR20] variant=%s MoGe=%s RayRoPE=%s encoding=%s uncertainty=%s GPUs=%s batch/GPU=%s epochs=%s\n' \
  "$VARIANT" "$USE_MOGE" "$USE_RAYROPE" "$RAY_ENCODING" "$UNCERTAINTY" "$GPUS" "$BATCH_SIZE" "$EPOCHS"
+MIX_ARGS=()
+if [[ -n "$GNTRANS_RGB_ROOT" ]]; then MIX_ARGS+=(--gntrans-rgb-root "$GNTRANS_RGB_ROOT"); fi
 for phase in "${PP[@]}"; do
   case "$phase" in
     train)
@@ -94,6 +99,7 @@ for phase in "${PP[@]}"; do
         --dataset-root "$DATASET_ROOT" --label-folder "$LABEL_FOLDER" --output-root "$TRAIN_ROOT" \
         --encoder "$ENCODER" --pose-mode "$POSE_MODE" --use-moge "$USE_MOGE" --use-rayrope "$USE_RAYROPE" \
         --ray-encoding "$RAY_ENCODING" --uncertainty "$UNCERTAINTY" \
+        --uncertainty-loss "$UNCERTAINTY_LOSS" "${MIX_ARGS[@]}" \
         --ray-apply-vo "${RAY_APPLY_VO:-1}" --shape-tokens "${SHAPE_TOKENS:-0}" \
         --fixed-halfwidth "${FIXED_HALFWIDTH:-0.02}" --ray-radius-px "${RAY_RADIUS_PX:-40}" \
         --ray-grid "${RAY_GRID:-7}" --group-chunk "$GROUP_CHUNK" --seeds "$SEEDS" \

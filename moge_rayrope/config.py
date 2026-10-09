@@ -13,6 +13,7 @@ class ModelConfig:
     use_rayrope: bool = False
     ray_encoding: str = "expected"  # none: same attention without RoPE
     uncertainty: str = "fixed"      # point/none do not execute a sigma head
+    uncertainty_loss: str = "interval"  # interval / laplace_decoupled / laplace_joint
     fixed_halfwidth: float = 0.02
     sigma_min: float = 0.001
     sigma_max: float = 0.08
@@ -44,6 +45,12 @@ class ModelConfig:
             raise ValueError("ray_encoding must be none/point/expected")
         if self.uncertainty not in ("fixed", "learned"):
             raise ValueError("uncertainty must be fixed/learned")
+        if self.uncertainty_loss not in ("interval", "laplace_decoupled", "laplace_joint"):
+            raise ValueError("unknown uncertainty_loss")
+        if self.uncertainty_loss != "interval" and not (
+            self.use_rayrope and self.ray_encoding == "expected" and self.uncertainty == "learned"
+        ):
+            raise ValueError("Laplace confidence loss requires expected RayRoPE + learned sigma")
         numeric = (self.min_depth,self.max_depth,self.fixed_halfwidth,
                    self.sigma_min,self.sigma_max,self.interval_coverage,
                    self.ray_radius_px,self.ray_freq_base,

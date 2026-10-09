@@ -27,6 +27,8 @@ def parser():
     p.add_argument('--use-rayrope',type=int,choices=[0,1],default=0)
     p.add_argument('--ray-encoding',choices=['none','point','expected'],default='expected')
     p.add_argument('--uncertainty',choices=['fixed','learned'],default='fixed')
+    p.add_argument('--uncertainty-loss',choices=['interval','laplace_decoupled','laplace_joint'],default='interval')
+    p.add_argument('--gntrans-rgb-root',default='',help='Enable paired mixed-depth training (RS full TSDF + GN-Trans rendered)')
     p.add_argument('--ray-apply-vo',type=int,choices=[0,1],default=1)
     p.add_argument('--shape-tokens',type=int,choices=[0,1],default=0)
     p.add_argument('--pose-mode',choices=['none','global_film'],default='global_film')
@@ -137,13 +139,18 @@ def main():
     if not all(math.isfinite(v) for v in (a.lr,a.weight_decay,a.grad_clip)) or min(a.lr,a.grad_clip)<=0 or a.weight_decay<0:
         raise ValueError('Invalid optimizer')
     mc=ModelConfig(encoder=a.encoder,use_moge=bool(a.use_moge),use_rayrope=bool(a.use_rayrope),
-        ray_encoding=a.ray_encoding,uncertainty=a.uncertainty,ray_apply_vo=bool(a.ray_apply_vo),
+        ray_encoding=a.ray_encoding,uncertainty=a.uncertainty,uncertainty_loss=a.uncertainty_loss,ray_apply_vo=bool(a.ray_apply_vo),
         use_shape_tokens=bool(a.shape_tokens),pose_mode=a.pose_mode,fixed_halfwidth=a.fixed_halfwidth,
         ray_radius_px=a.ray_radius_px,ray_grid=a.ray_grid,group_chunk=a.group_chunk,seeds=a.seeds)
     lc=LossConfig(global_shape=a.shape_global_weight,local_shape=a.shape_local_weight,
                   reprojection=a.reprojection_weight,interval=a.interval_weight)
+    if a.gntrans_rgb_root and (mc.use_moge or not mc.use_rayrope):
+        raise ValueError('P1 mixed experiment is RayRoPE-only, never MoGe')
+    if a.gntrans_rgb_root and (abs(a.train_fraction-.1)>1e-8 or abs(a.eval_fraction-.1)>1e-8):
+        raise ValueError('P1 mixed protocol requires 10% of each train domain and 10% seen validation')
     if mc.use_moge and lc.global_shape<=0: raise ValueError('MoGe pointmap requires global shape supervision')
-    if mc.uncertainty=='learned' and lc.interval<=0: raise ValueError('Learned uncertainty requires interval supervision')
+    if mc.uncertainty=='learned' and mc.uncertainty_loss!='laplace_joint' and lc.interval<=0:
+        raise ValueError('Learned decoupled uncertainty requires a positive interval loss weight')
     if not torch.cuda.is_available(): raise RuntimeError('Use the CUDA/GraspNet server for integration training')
     rank=int(os.getenv('RANK','0')); world=int(os.getenv('WORLD_SIZE','1')); local=int(os.getenv('LOCAL_RANK','0'))
     torch.cuda.set_device(local); device=torch.device('cuda',local)
@@ -158,19 +165,32 @@ def main():
     from dataset.graspnet_dataset import collate_fn
     seed_all(a.seed)
     model=EconomicGraspMoGeRayRoPE(mc).to(device)
-    _,train,_,ts=make_dataset(a.dataset_root,'train',a.train_fraction,True,mc,a.label_folder,bool(a.use_fuse_depth),a.max_train_frames)
-    _,val,_,vs=make_dataset(a.dataset_root,'test_seen',a.eval_fraction,True,mc,a.label_folder,bool(a.use_fuse_depth),a.max_val_frames)
+    depth_source_contract = "historical_realsense_fused"
+    if a.gntrans_rgb_root:
+        from moge_rayrope.mixed import make_mixed_dataset, DEPTH_CONTRACT
+        _, train, ts = make_mixed_dataset(
+            a.dataset_root, a.gntrans_rgb_root, 'train', a.train_fraction,
+            True, mc, a.label_folder, a.max_train_frames, include_trans=True)
+        _, val, vs = make_mixed_dataset(
+            a.dataset_root, a.gntrans_rgb_root, 'test_seen', a.eval_fraction,
+            True, mc, a.label_folder, a.max_val_frames, include_trans=False)
+        depth_source_contract = DEPTH_CONTRACT
+    else:
+        _,train,_,ts=make_dataset(a.dataset_root,'train',a.train_fraction,True,mc,a.label_folder,bool(a.use_fuse_depth),a.max_train_frames)
+        _,val,_,vs=make_dataset(a.dataset_root,'test_seen',a.eval_fraction,True,mc,a.label_folder,bool(a.use_fuse_depth),a.max_val_frames)
     protocol=dict(version=VERSION,main_commit=MAIN_COMMIT,main_files=source_contract,model=asdict(mc),loss=asdict(lc),
         main_options=main_options,dataset_root=str(Path(a.dataset_root).resolve()),label_folder=a.label_folder,
         train_fraction=a.train_fraction,eval_fraction=a.eval_fraction,train_frames=len(train),val_frames=len(val),
         sampling_sha256=digest({'train':ts,'val':vs}),use_fuse_depth=bool(a.use_fuse_depth),
+        gntrans_rgb_root=str(Path(a.gntrans_rgb_root).resolve()) if a.gntrans_rgb_root else None,
+        mixed_depth_supervision=depth_source_contract,
         epochs=a.epochs,seed=a.seed,batch_per_gpu=a.batch_size,world_size=world,effective_batch=a.batch_size*world,
         optimizer='AdamW',torch_version=str(torch.__version__),cuda_version=torch.version.cuda,lr=a.lr,weight_decay=a.weight_decay,grad_clip=a.grad_clip,lr_schedule='cosine_epoch',
         workers=a.workers,eval_workers=a.eval_workers,max_steps=a.max_steps,
         partial_run=bool(a.max_steps or a.max_train_frames or a.max_val_frames),
         initialization='fresh task/geometry modules; frozen pretrained DAV2 encoder; no MoGe pretrained weights',
         annotation_contract='main compact CDF dataset annotations matched online; no feature/action/teacher cache',
-        depth_contract='grasp gradients blocked from metric depth, shape pointmap and interval head',
+        depth_contract='grasp gradients blocked from metric depth, shape pointmap and interval head; U4 confidence-weighted depth supervision remains trainable',
         validation='all DDP ranks, disjoint strided subsets, pooled metrics; latest fixed-budget checkpoint',
         code_sha256=code_fingerprint(),dav2_sha256=sha256_file(ROOT/'checkpoints'/f'depth_anything_v2_{mc.encoder}.pth'))
     signature=digest(protocol); out=Path(a.output_root); out.mkdir(parents=True,exist_ok=True)
