@@ -129,6 +129,8 @@ done
 - `gradient_contract.json` 的 grasp→geometry 最大梯度为 0（容许数值误差），DAV2 frozen；U2/U3 sigma head 确有监督梯度；U4 的 sigma 与 metric-depth decoder 都有有限非零监督梯度。
 - U0 配置 point；U1 固定 h=20mm；U2/U3/U4 learned h∈[1,80]mm。
 - 所有 U-ID 统一模型/CDF label contract；没有改变 top-1 / crop / support / loss 除 U-ID 定义外的项目。
+- 现有原 depth L1 的 valid mask 使用 [0.2,1.0] 闭区间，而 U2–U4 confidence/interval 路径使用 (0.2,1.0) 开区间。正式运行前统计边界像素数量并审计影响；如必须统一，先加测试、同一提交一次性修正五组，不能在部分组训练后再改。
+- 用相同模型、少量固定帧单独核查 inference batch=1 与 batch=3 的 decoded grasps/score 一致性；如果不一致，先定位 batch-dependent RNG / sampling，不能默认 batch size 不影响 AP。正式五组继续锁定 batch=3。
 - 若 smoke 失败，只允许修正确认过的中性实现 bug，记录问题、影响、diff、修复 commit，并重跑相关测试。**代码修复完成后冻结 source fingerprint，再开始正式训练**。不要关掉 asserts 绕过失败。
 - smoke checkpoint 不能用于正式 AP。
 
@@ -230,6 +232,8 @@ P1_VARIANT=U2 PHASES=infer,eval RESUME=1 \
 **主要差值**：U1−U0、U2−U1、U3−U2、U4−U3；最后一项必须描述为 *loss replacement + gradient coupling* 的联合干预。
 
 再整理 depth MAE（all-valid / foreground）、U1–U4 的 empirical coverage/mean interval width、U2–U4 的上限饱和率、CDF ranking regret / AUROC / AUPRC、可用时的 risk–coverage/AUSE，以及 20-epoch 时间、推断 ms/frame 和显存。
+
+注意现有 `compare_moge_rayrope.py` 的默认比较名称可能仍采用早期 20% RS suite，并且可能把 `baseline` 而不是新 U0 作为配对 reference。请修改**仅报告/统计脚本**（不得在正式训练中途修改模型/训练源码），明确以新 U0 为对照，按 checkpoint metadata 而不是目录名校验五组协议，并从 official accuracy.npy 重新计算 AP。
 
 **域分开评估**：现有 validation 为 RS Seen；不要把 RS 上的 interval coverage 宣称成 GN-Trans coverage。必要时增加**只读** GN-Trans paired validation / residual 脚本，不改变训练或 checkpoint 选择。TSDF vs rendered 的监督误差是重要混杂因素，在讨论 U4 结果时单独说明。
 
