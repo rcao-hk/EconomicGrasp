@@ -114,7 +114,7 @@ def make_mixed_dataset(root, gntrans_rgb_root, split, fraction, labels, cfg,
         raise ValueError("Mixed max_frames must be even (equal source counts)")
     max_pairs = (max_frames // 2 if include_trans else max_frames) if max_frames else 0
     ri, ti, schedule = paired_frame_indices(real, trans, fraction, max_pairs)
-    check_depth_sources(real, trans, ri, ti)
+    check_depth_sources(real, trans, ri, ti if include_trans else [])
     if labels:
         def adapter(ds):
             return CVAExtendedLabelAdapter(
