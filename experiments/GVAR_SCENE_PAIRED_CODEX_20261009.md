@@ -98,6 +98,7 @@ python analyze_gvar_scene_paired.py --help
 ## 5. 正式分析命令（默认四组，50,000 次 bootstrap）
 
 ```bash
+set -o pipefail
 ROOT=/data/robotarm/result/grasp/rgbgrasp/log/gvar_deploy_20261007
 OUT="$ROOT/analysis/scene_paired_e19"
 
