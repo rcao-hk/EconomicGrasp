@@ -16,7 +16,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
-VARIANTS = ("baseline", "slot", "volume_fixed", "volume", "volume_rel")
+VARIANTS = ("baseline", "slot", "volume_fixed", "volume", "volume_rel", "volume_fixed_rel")
 ROLE_NAMES = ("left_contact", "right_contact", "closing", "finger_body", "palm", "approach")
 
 
@@ -147,13 +147,13 @@ class ActionDepthAdapter(nn.Module):
 class GripperVolumeReader(nn.Module):
     """Residual evidence update for [B,Q,A,D,H] action queries.
 
-    volume_fixed/volume/volume_rel have IDENTICAL parameters. Geometry inputs in
+    volume_fixed/volume/volume_rel/volume_fixed_rel have IDENTICAL parameters. Geometry inputs in
     non-rel variants are zeros, retaining a capacity-matched comparison. The
     original metric grouping remains upstream: this is not a pure RGB replacement.
     """
     def __init__(self, feat_dim: int, hidden_dim: int, cfg: GVARConfig):
         super().__init__()
-        if cfg.variant not in ("volume_fixed", "volume", "volume_rel"):
+        if cfg.variant not in ("volume_fixed", "volume", "volume_rel", "volume_fixed_rel"):
             raise ValueError("Reader requires a volume variant")
         self.cfg = cfg
         C = cfg.reader_dim
@@ -170,14 +170,14 @@ class GripperVolumeReader(nn.Module):
     def _read_chunk(self, queries, fmap, depth, centers, rotations, K, depths, image_hw):
         cfg = self.cfg
         probe_depths = (torch.full_like(depths, cfg.fixed_insertion_m)
-                        if cfg.variant == "volume_fixed" else depths)
+                        if cfg.variant in ("volume_fixed", "volume_fixed_rel") else depths)
         probes, roles = canonical_probes(probe_depths, cfg)
         xyz, uv, grid, valid = project_probes(centers, rotations, probes, K, image_hw)
         patch = sample_map(fmap, grid)
         meta = torch.cat((probes / cfg.geometry_scale_m,
                           depths[:, None, None].expand(-1, 36, 1) / cfg.geometry_scale_m,
                           valid[..., None].to(probes.dtype)), -1).to(patch.dtype)
-        if cfg.variant == "volume_rel":
+        if cfg.variant in ("volume_rel", "volume_fixed_rel"):
             geom = action_relative_geometry(depth, grid, uv, xyz, centers, rotations, K, valid, cfg.geometry_scale_m)
         else:
             geom = patch.new_zeros((*patch.shape[:2], 6))

@@ -7,10 +7,10 @@ PYTHON="${PYTHON:-python}"
 GPUS="${GPUS:-0,1,2}"
 VARIANT="${VARIANT:-volume}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/log/gvar_${VARIANT}_10pct}"
-BATCH_SIZE="${BATCH_SIZE:-1}"
+BATCH_SIZE="${BATCH_SIZE:-3}"
 MAX_EPOCH="${MAX_EPOCH:-20}"
 NUM_WORKERS="${NUM_WORKERS:-2}"
-EVAL_NUM_WORKERS="${EVAL_NUM_WORKERS:-1}"
+EVAL_NUM_WORKERS="${EVAL_NUM_WORKERS:-16}"
 ACTION_CHUNK="${ACTION_CHUNK:-512}"
 READER_DIM="${READER_DIM:-64}"
 READER_HEADS="${READER_HEADS:-4}"
@@ -20,7 +20,7 @@ SEED="${SEED:-0}"
 RESUME_CKPT="${RESUME_CKPT:-}"
 IFS=',' read -r -a GPUs <<< "${GPUS}"
 [[ "${GPUS}" =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo "Invalid GPUS=${GPUS}" >&2; exit 2; }
-case "${VARIANT}" in baseline|slot|volume_fixed|volume|volume_rel) ;; *) echo "Invalid VARIANT=${VARIANT}" >&2; exit 2;; esac
+case "${VARIANT}" in baseline|slot|volume_fixed|volume|volume_rel|volume_fixed_rel) ;; *) echo "Invalid VARIANT=${VARIANT}" >&2; exit 2;; esac
 extra=(--use_fuse_depth --mix_use_fused_background)
 if [[ -n "${RESUME_CKPT}" ]]; then
   extra+=(--resume --checkpoint_path "${RESUME_CKPT}")
