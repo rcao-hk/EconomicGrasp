@@ -16,7 +16,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
-VARIANTS = ("baseline", "slot", "volume_fixed", "volume", "volume_rel", "volume_fixed_rel")
+VARIANTS = ("baseline", "slot", "volume_fixed", "volume", "volume_rel", "volume_fixed_rel", "volume_hybrid")
 ROLE_NAMES = ("left_contact", "right_contact", "closing", "finger_body", "palm", "approach")
 
 
@@ -75,6 +75,20 @@ def canonical_probes(depths: torch.Tensor, cfg: GVARConfig) -> Tuple[torch.Tenso
     probes = template.unsqueeze(0) + offset.unsqueeze(1)
     roles = torch.arange(6, device=depths.device).repeat_interleave(6)
     return probes, roles
+
+
+def support_probe_depths(depths: torch.Tensor, cfg: GVARConfig, stream: str) -> torch.Tensor:
+    """Distinguish physical support positions for appearance and geometry.
+
+    For the hybrid, *appearance* reads a fixed insertion reference while
+    *geometry* is evaluated at the actual insertion hypothesis. Keeping this
+    explicit avoids interpreting two different 3D positions as one observation.
+    Only the new hybrid uses split streams; existing variants are unchanged.
+    """
+    if stream not in ("rgb", "geometry"):
+        raise ValueError(f"Unknown probe stream {stream!r}")
+    fixed = cfg.variant in ("volume_fixed", "volume_fixed_rel") or (cfg.variant == "volume_hybrid" and stream == "rgb")
+    return torch.full_like(depths, cfg.fixed_insertion_m) if fixed else depths
 
 
 def project_probes(centers, rotations, probes, K, image_hw):
@@ -147,13 +161,13 @@ class ActionDepthAdapter(nn.Module):
 class GripperVolumeReader(nn.Module):
     """Residual evidence update for [B,Q,A,D,H] action queries.
 
-    volume_fixed/volume/volume_rel/volume_fixed_rel have IDENTICAL parameters. Geometry inputs in
+    volume_fixed/volume/volume_rel/volume_fixed_rel/volume_hybrid have IDENTICAL parameters. Geometry inputs in
     non-rel variants are zeros, retaining a capacity-matched comparison. The
     original metric grouping remains upstream: this is not a pure RGB replacement.
     """
     def __init__(self, feat_dim: int, hidden_dim: int, cfg: GVARConfig):
         super().__init__()
-        if cfg.variant not in ("volume_fixed", "volume", "volume_rel", "volume_fixed_rel"):
+        if cfg.variant not in ("volume_fixed", "volume", "volume_rel", "volume_fixed_rel", "volume_hybrid"):
             raise ValueError("Reader requires a volume variant")
         self.cfg = cfg
         C = cfg.reader_dim
@@ -169,20 +183,35 @@ class GripperVolumeReader(nn.Module):
 
     def _read_chunk(self, queries, fmap, depth, centers, rotations, K, depths, image_hw):
         cfg = self.cfg
-        probe_depths = (torch.full_like(depths, cfg.fixed_insertion_m)
-                        if cfg.variant in ("volume_fixed", "volume_fixed_rel") else depths)
-        probes, roles = canonical_probes(probe_depths, cfg)
-        xyz, uv, grid, valid = project_probes(centers, rotations, probes, K, image_hw)
+        # RGB samples and geometric residuals are distinct evidence streams.
+        # In the hybrid only: RGB uses fixed d_ref; geometry uses executed d.
+        # The role/index pairs are *corresponding gripper regions*, not
+        # samples at the same 3D position. RGB metadata records its own fixed
+        # probe xyz; geom features encode their own action-frame surface XYZ,
+        # ray residual and validity. No ground truth enters either stream.
+        rgb_probes, roles = canonical_probes(support_probe_depths(depths, cfg, "rgb"), cfg)
+        xyz, uv, grid, valid = project_probes(centers, rotations, rgb_probes, K, image_hw)
         patch = sample_map(fmap, grid)
-        meta = torch.cat((probes / cfg.geometry_scale_m,
+        meta = torch.cat((rgb_probes / cfg.geometry_scale_m,
                           depths[:, None, None].expand(-1, 36, 1) / cfg.geometry_scale_m,
-                          valid[..., None].to(probes.dtype)), -1).to(patch.dtype)
-        if cfg.variant in ("volume_rel", "volume_fixed_rel"):
-            geom = action_relative_geometry(depth, grid, uv, xyz, centers, rotations, K, valid, cfg.geometry_scale_m)
+                          valid[..., None].to(rgb_probes.dtype)), -1).to(patch.dtype)
+        if cfg.variant in ("volume_rel", "volume_fixed_rel", "volume_hybrid"):
+            if cfg.variant == "volume_hybrid":
+                geom_probes, geom_roles = canonical_probes(support_probe_depths(depths, cfg, "geometry"), cfg)
+                if not torch.equal(roles, geom_roles):
+                    raise RuntimeError("RGB and geometry probe roles must align")
+                geom_xyz, geom_uv, geom_grid, geom_valid = project_probes(
+                    centers, rotations, geom_probes, K, image_hw)
+            else:
+                geom_xyz, geom_uv, geom_grid, geom_valid = xyz, uv, grid, valid
+            geom = action_relative_geometry(depth, geom_grid, geom_uv, geom_xyz,
+                                             centers, rotations, K, geom_valid, cfg.geometry_scale_m)
         else:
             geom = patch.new_zeros((*patch.shape[:2], 6))
         tokens = patch + self.role_embedding(roles)[None] + self.metadata_projection(meta)
         tokens = tokens + self.geometry_projection(geom.to(tokens.dtype))
+        # RGB projection validity controls attention; geometry has its own
+        # known/valid flags inside geom. No claim of joint 3D co-visibility.
         # Zero invalid data; allow one zero key only in all-invalid rows to avoid NaNs.
         tokens = torch.where(valid[..., None], tokens, torch.zeros_like(tokens))
         padding = ~valid

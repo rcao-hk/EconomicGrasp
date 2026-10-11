@@ -20,7 +20,7 @@ SEED="${SEED:-0}"
 RESUME_CKPT="${RESUME_CKPT:-}"
 IFS=',' read -r -a GPUs <<< "${GPUS}"
 [[ "${GPUS}" =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo "Invalid GPUS=${GPUS}" >&2; exit 2; }
-case "${VARIANT}" in baseline|slot|volume_fixed|volume|volume_rel|volume_fixed_rel) ;; *) echo "Invalid VARIANT=${VARIANT}" >&2; exit 2;; esac
+case "${VARIANT}" in baseline|slot|volume_fixed|volume|volume_rel|volume_fixed_rel|volume_hybrid) ;; *) echo "Invalid VARIANT=${VARIANT}" >&2; exit 2;; esac
 extra=(--use_fuse_depth --mix_use_fused_background)
 if [[ -n "${RESUME_CKPT}" ]]; then
   extra+=(--resume --checkpoint_path "${RESUME_CKPT}")

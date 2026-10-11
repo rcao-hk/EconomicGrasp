@@ -30,7 +30,7 @@ def parser():
     p.add_argument('--root',type=Path,required=True,help='GVAR deployment results root')
     p.add_argument('--dataset-root',type=Path,required=True)
     p.add_argument('--selection-json',type=Path,required=True)
-    p.add_argument('--variant',choices=('baseline','slot','volume_fixed','volume','volume_rel','volume_fixed_rel'),default='volume_rel')
+    p.add_argument('--variant',choices=('baseline','slot','volume_fixed','volume','volume_rel','volume_fixed_rel','volume_hybrid'),default='volume_rel')
     p.add_argument('--checkpoint',type=Path,default=None)
     p.add_argument('--output-dir',type=Path,required=True)
     p.add_argument('--epoch',type=int,default=19)

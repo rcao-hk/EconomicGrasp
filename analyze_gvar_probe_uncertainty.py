@@ -23,9 +23,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from models.gripper_volume_reader import GVARConfig, ROLE_NAMES, canonical_probes, project_probes, sample_map
+from models.gripper_volume_reader import GVARConfig, ROLE_NAMES, canonical_probes, project_probes, sample_map, support_probe_depths
 
-VARIANTS=("volume_fixed","volume","volume_rel","volume_fixed_rel")
+VARIANTS=("volume_fixed","volume","volume_rel","volume_fixed_rel","volume_hybrid")
 
 
 def check(condition, msg):
@@ -138,7 +138,8 @@ def records_for_frame(sidecar:Path,grasp:Path,variant:str,scene:int,frame:int,ra
     rotations=torch.from_numpy(raw[:,4:13].reshape(-1,3,3).astype(np.float32))
     insertion=torch.from_numpy(raw[:,3].astype(np.float32))
     check(bool(torch.isfinite(insertion).all() and (insertion>0).all() and (insertion<.2).all()),f'Implausible insertion depths in {grasp}')
-    d_used=(torch.full_like(insertion,cfg.fixed_insertion_m) if variant in ('volume_fixed','volume_fixed_rel') else insertion)
+    # For hybrid, geometry probes follow actual insertion d; RGB support stays fixed.
+    d_used=support_probe_depths(insertion,cfg,'geometry')
     probes,roles=canonical_probes(d_used,cfg)
     xyz,uv,grid,valid=project_probes(centers,rotations,probes,torch.from_numpy(K),(H,W))
     # Bilinear interpolation across invalid/GT holes is forbidden.
