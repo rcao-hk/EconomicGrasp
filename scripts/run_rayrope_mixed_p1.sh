@@ -46,5 +46,5 @@ if [[ "${USE_MOGE:-0}" != 0 ]]; then
   echo "P1 experiment forbids MoGe" >&2; exit 2
 fi
 echo "[P1] $P1_VARIANT: $VARIANT / $UNCERTAINTY / $UNCERTAINTY_LOSS"
-echo "[P1] RealSense original RGB + full TSDF depth; GN-Trans rendered RGB + full rendered depth"
+echo "[P1] RealSense original RGB + rendered foreground / TSDF background; GN-Trans rendered RGB + full rendered depth"
 exec bash scripts/run_moge_rayrope20.sh

@@ -1,8 +1,9 @@
 """Source-explicit paired GraspNet RealSense / GN-Trans RGB training.
 
 This module changes the **depth supervision target**, never the RGB-only model
-input. RealSense: original RGB + full TSDF depth. GN-Trans: rendered RGB +
-full rendered (virtual_scenes) depth. No fallback to fused-background targets.
+input. RealSense: original RGB + rendered object depth + TSDF background depth.
+GN-Trans: rendered RGB + full rendered (virtual_scenes) depth, with no TSDF
+background replacement. Both GT sources are mandatory for RealSense.
 
 The two domains are sampled at identical scene/frame indices. The old
 GraspNetTransDataset implementation uses virtual depth for its preprocessing
@@ -13,29 +14,24 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
 from torch.utils.data import ConcatDataset, Subset
 
 from dataset.graspnet_dataset import GraspNetMultiDataset, GraspNetTransDataset
 from dataset.cdf_label_adapter import CVAExtendedLabelAdapter
 
 
-class RealSenseFullTSDF(GraspNetMultiDataset):
-    """Overrides only the GT target composer; no RGB/model changes."""
+class RealSenseRenderedForegroundTSDFBackground(GraspNetMultiDataset):
+    """Original GraspNet compositor: rendered foreground, TSDF background.
+
+    Reuse the main dataset implementation exactly, including invalid-pixel
+    handling: invalid rendered object depth never falls back to TSDF, and
+    invalid background TSDF never falls back to rendered background.
+    """
 
     def build_fused_gt_depth_m(self, gt_depth_raw, seg_raw, index, factor_depth):
         if not self.use_fuse_depth:
-            raise RuntimeError("Full TSDF requires the explicit TSDF path")
-        path = Path(self.fusedepthpath[index])
-        if not path.is_file():
-            raise FileNotFoundError(f"Required RealSense full TSDF depth: {path}")
-        tsdf = np.asarray(Image.open(path))
-        if tsdf.ndim != 2 or tsdf.shape != gt_depth_raw.shape or tsdf.shape != seg_raw.shape:
-            raise ValueError(f"TSDF/raw/mask depth size mismatch: {path}")
-        fd = float(self.gt_factor_depth) if self.gt_factor_depth is not None else float(factor_depth)
-        if not np.isfinite(fd) or fd <= 0:
-            raise ValueError(f"Invalid depth scale for {path}: {fd}")
-        return tsdf.astype(np.float32) / fd
+            raise RuntimeError("RealSense rendered-foreground/TSDF-background supervision requires use_fuse_depth")
+        return super().build_fused_gt_depth_m(gt_depth_raw, seg_raw, index, factor_depth)
 
 
 class GNTransFullRendered(GraspNetTransDataset):
@@ -57,7 +53,7 @@ def build_bases(root, gntrans_rgb_root, split, cfg, labels=True):
                   voxel_size=.005, remove_outlier=True, augment=False,
                   load_label=bool(labels), min_depth=cfg.min_depth,
                   max_depth=cfg.max_depth, bin_num=256, depth_strides=1)
-    real = RealSenseFullTSDF(
+    real = RealSenseRenderedForegroundTSDFBackground(
         root, use_gt_depth=False, use_fuse_depth=True,
         graspness_mode="scene", extend_angle=True,
         load_grasp_payload=False, **common)
@@ -92,14 +88,24 @@ def paired_frame_indices(real, trans, fraction, max_pairs=0):
 
 def check_depth_sources(real, trans, real_idx, trans_idx):
     """Fail early on absent inputs; never silently substitute another GT."""
-    for ds, idx, color, gt in (
-        (real, real_idx, real.colorpath, real.fusedepthpath),
-        (trans, trans_idx, trans.colorpath, trans.gtdepthpath),
-    ):
-        for i in idx:
-            for path in (color[i], gt[i], ds.labelpath[i], ds.metapath[i]):
-                if not Path(path).is_file():
-                    raise FileNotFoundError(f"Paired-depth data contract requires {path}")
+    # RealSense needs BOTH rendered foreground and TSDF background assets.
+    # GN-Trans needs rendered RGB and full rendered depth; no TSDF fallback.
+    jobs = [
+        (real, real_idx,
+         (real.colorpath, real.gtdepthpath, real.fusedepthpath,
+          real.labelpath, real.metapath)),
+        (trans, trans_idx,
+         (trans.colorpath, trans.gtdepthpath,
+          trans.labelpath, trans.metapath)),
+    ]
+    for ds, indices, source_lists in jobs:
+        for i in indices:
+            for source_paths in source_lists:
+                path = Path(source_paths[i])
+                if not path.is_file():
+                    raise FileNotFoundError(
+                        f"Paired-depth data contract requires {path} ({type(ds).__name__})")
+
 
 
 def make_mixed_dataset(root, gntrans_rgb_root, split, fraction, labels, cfg,
@@ -107,7 +113,7 @@ def make_mixed_dataset(root, gntrans_rgb_root, split, fraction, labels, cfg,
     """Return (raw_bases, dataset, index_schedule).
 
     max_frames truncates the *combined* dataset in balanced paired units.
-    Validation uses include_trans=False and thus RealSense/TSDF only.
+    Validation uses include_trans=False and thus RealSense rendered-FG/TSDF-BG only.
     """
     real, trans = build_bases(root, gntrans_rgb_root, split, cfg, labels)
     if max_frames and include_trans and max_frames % 2:
@@ -134,10 +140,13 @@ def make_mixed_dataset(root, gntrans_rgb_root, split, fraction, labels, cfg,
 
 DEPTH_CONTRACT = {
     "realsense_rgb": "GraspNet/scenes/<scene>/realsense/rgb",
-    "realsense_supervision": "FULL GraspNet tsdf_depth/<scene>/realsense/<frame>_depth.png",
+    "contract_version": 2,
+    "realsense_supervision": "Rendered foreground (seg>0) + TSDF background (seg==0), invalids remain invalid",
+    "realsense_foreground_depth_path": "GraspNet virtual_scenes/<scene>/realsense/<frame>_depth.png",
+    "realsense_background_depth_path": "GraspNet tsdf_depth/<scene>/realsense/<frame>_depth.png",
     "gntrans_rgb": "GN-Trans/scenes/<five-digit-scene>/<frame>_color.png",
     "gntrans_supervision": "FULL GraspNet virtual_scenes/<scene>/realsense/<frame>_depth.png",
     "observed_depth_network_input": False,
-    "background_fusion": False,
+    "background_fusion": "RealSense TSDF background only; GN-Trans uses rendered background",
     "paired_frame_indices": True,
 }

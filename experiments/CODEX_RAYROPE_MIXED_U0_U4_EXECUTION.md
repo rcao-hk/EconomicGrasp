@@ -1,3 +1,5 @@
+> **ARCHIVED — v1 full-TSDF RealSense policy (2026-10-09).** This document records the earlier U0–U4 experiment using RealSense **full TSDF** and GN-Trans full rendered targets. As of 2026-10-12 the branch uses the corrected **v2 RealSense rendered-foreground + TSDF-background** target. **Do not re-run these historical commands as if they reproduce v1;** use [the Point + U3 v2 runbook](CODEX_RAYROPE_MIXED_POINT_U3_V2.md). Historical checkpoints/results remain tied to their original v1 source fingerprint. 
+
 # Codex 工作文档：RayRoPE 新 Mixed Dataset — U0–U4 全量实验
 
 > **目标：** 使用新的 source-specific mixed-depth supervision，在现有 RayRoPE / CVA-CDF 框架下，从头训练 U0–U4 五组模型。每组固定 20 epochs、seed=0 和完全相同的训练/测试预算；完成 10% GraspNet RealSense Seen/Similar/Novel 的 collision on/off 官方评价，生成经 NPY 复核的结果表和机制诊断。

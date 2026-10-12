@@ -1,3 +1,5 @@
+> **ARCHIVED — v1 full-TSDF RealSense policy (2026-10-09).** This document records the earlier U0–U4 experiment using RealSense **full TSDF** and GN-Trans full rendered targets. As of 2026-10-12 the branch uses the corrected **v2 RealSense rendered-foreground + TSDF-background** target. **Do not re-run these historical commands as if they reproduce v1;** use [the Point + U3 v2 runbook](CODEX_RAYROPE_MIXED_POINT_U3_V2.md). Historical checkpoints/results remain tied to their original v1 source fingerprint. 
+
 # RayRoPE mixed-depth confidence study (U0--U4)
 
 ## Scope and data policy

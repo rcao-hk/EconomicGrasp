@@ -1,3 +1,5 @@
+> **ARCHIVED — v1 full-TSDF RealSense policy (2026-10-09).** This document records the earlier U0–U4 experiment using RealSense **full TSDF** and GN-Trans full rendered targets. As of 2026-10-12 the branch uses the corrected **v2 RealSense rendered-foreground + TSDF-background** target. **Do not re-run these historical commands as if they reproduce v1;** use [the Point + U3 v2 runbook](CODEX_RAYROPE_MIXED_POINT_U3_V2.md). Historical checkpoints/results remain tied to their original v1 source fingerprint. 
+
 # Codex 工作单：RayRoPE + 新 Mixed-Depth 数据，运行 U0–U4
 
 > **任务**：在现有 `exp/moge-rayrope-grasp` 分支上，先核查新双源 depth GT，随后按完全统一的训练和测试协议，**真正完成** U0–U4 五组 20-epoch 训练、推断、GraspNet 官方 AP 评价和中文结果报告。不要只做 smoke。

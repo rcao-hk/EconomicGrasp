@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Audit paired RealSense-TSDF and GN-Trans-rendered depth *targets*.
+"""Audit paired RealSense (rendered foreground + TSDF background) and
+GN-Trans (fully rendered) depth supervision.
 
-Raw-depth comparison uses native scene/frame pixel coordinates (no unsafe
-resizing or warp). Optional loader audit also reports actual crop/K differences.
+Compare ACTUAL composed training targets in native coordinates and separately
+report the raw TSDF-versus-rendered discrepancy. Verify that sampled dataset
+gt_depth_m maps exactly to each source composition through its own crop/K.
 No model weights, evaluator or GPU are required.
 """
 from __future__ import annotations
@@ -14,6 +16,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import cv2
 from PIL import Image
 from scipy.io import loadmat
 
@@ -32,13 +35,22 @@ def args_parser():
     return p
 
 
-def _load_depth(path, factor):
+def _load_raw_depth(path):
     x = np.asarray(Image.open(path))
-    if x.ndim != 2:
-        raise ValueError(f"Non-2D depth {path}: {x.shape}")
-    if not np.issubdtype(x.dtype, np.number):
-        raise ValueError(f"Unsupported depth format: {path}")
-    return x.astype(np.float32) / factor
+    if x.ndim != 2 or not np.issubdtype(x.dtype, np.number):
+        raise ValueError(f"Non-2D or unsupported depth {path}: {x.shape} / {x.dtype}")
+    return x
+
+
+def _cropped_target(target_m, crop_box, hw):
+    x0, y0, x1, y1 = [int(v) for v in crop_box]
+    h, w = hw
+    if x0 < 0 or y0 < 0 or x1 > target_m.shape[1] or y1 > target_m.shape[0]:
+        raise ValueError(f"Crop outside depth image: {(x0,y0,x1,y1)}")
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError("Empty crop")
+    return cv2.resize(target_m[y0:y1,x0:x1], (w,h),
+                      interpolation=cv2.INTER_NEAREST).astype(np.float32)
 
 
 def _load_rgb_size(path):
@@ -92,31 +104,57 @@ def main():
         fd = float(np.asarray(meta["factor_depth"]).reshape(-1)[0])
         if not np.isfinite(fd) or fd <= 0:
             raise ValueError(f"Bad factor_depth: scene {sid}, frame {frame}")
-        rs = _load_depth(real.fusedepthpath[ir], fd)
-        gn = _load_depth(trans.gtdepthpath[it], fd)
+        rs_tsdf_raw = _load_raw_depth(real.fusedepthpath[ir])
+        rs_render_raw = _load_raw_depth(real.gtdepthpath[ir])
+        gn_render_raw = _load_raw_depth(trans.gtdepthpath[it])
         seg = np.asarray(Image.open(real.labelpath[ir]))
-        if rs.shape != gn.shape or rs.shape != seg.shape:
-            raise ValueError(f"Unaligned raw depth / segmentation {sid}:{frame}: "
-                             f"{rs.shape}, {gn.shape}, {seg.shape}")
+        if (rs_tsdf_raw.shape != rs_render_raw.shape or
+                rs_render_raw.shape != gn_render_raw.shape or
+                gn_render_raw.shape != seg.shape):
+            raise ValueError(
+                f"Unaligned depth/segmentation scene {sid}:{frame}: "
+                f"{rs_tsdf_raw.shape}/{rs_render_raw.shape}/"
+                f"{gn_render_raw.shape}/{seg.shape}")
         rgb_rs = _load_rgb_size(real.colorpath[ir])
         rgb_gn = _load_rgb_size(trans.colorpath[it])
-        if rgb_rs != rs.shape or rgb_gn != gn.shape:
-            raise ValueError(f"RGB-depth pixel dimensions differ at {sid}:{frame}: "
-                             f"{rgb_rs}/{rgb_gn}/{rs.shape}")
+        if rgb_rs != seg.shape or rgb_gn != seg.shape:
+            raise ValueError(
+                f"RGB/depth dimensions differ at {sid}:{frame}: "
+                f"{rgb_rs}/{rgb_gn}/{seg.shape}")
+
+        # The *actual* training supervision: per-source compose policies.
+        rs = real.build_fused_gt_depth_m(rs_render_raw, seg, ir, fd)
+        gn = trans.build_fused_gt_depth_m(gn_render_raw, seg, it, fd)
+        tsdf = rs_tsdf_raw.astype(np.float32) / fd
+        rendered = rs_render_raw.astype(np.float32) / fd
         fg = seg > 0
+
+        # Hard source contract checks. Invalid source pixels stay zero.
+        expected_rs = np.where(fg & (rendered > 0), rendered,
+                        np.where((~fg) & (tsdf > 0), tsdf, 0.)).astype(np.float32)
+        if not np.allclose(rs, expected_rs, rtol=0., atol=1e-6):
+            raise RuntimeError(f"RealSense rendered-FG/TSDF-BG contract violated at {sid}:{frame}")
+        if not np.allclose(gn, gn_render_raw.astype(np.float32)/fd, rtol=0., atol=1e-6):
+            raise RuntimeError(f"GN-Trans full-rendered contract violated at {sid}:{frame}")
+
         record = {
             "scene": sid, "frame": frame,
-            "rs_tsdf_path": real.fusedepthpath[ir],
-            "gn_render_path": trans.gtdepthpath[it],
+            "rs_rendered_foreground_path": real.gtdepthpath[ir],
+            "rs_tsdf_background_path": real.fusedepthpath[ir],
+            "gn_rendered_full_path": trans.gtdepthpath[it],
             "rs_rgb_path": real.colorpath[ir],
             "gn_rgb_path": trans.colorpath[it],
             "object_fraction": float(fg.mean()),
         }
         for name, region in (("all", np.ones_like(fg, dtype=bool)),
                              ("fg", fg), ("bg", ~fg)):
-            metrics = _compare(rs, gn, region)
-            for k, v in metrics.items():
+            # The main metrics describe the ACTUAL composed supervision.
+            for k, v in _compare(rs, gn, region).items():
                 record[f"{name}_{k}"] = v
+            # Keep the raw TSDF vs rendered discrepancy as separate evidence.
+            for k, v in _compare(tsdf, gn, region).items():
+                record[f"raw_tsdf_vs_rendered_{name}_{k}"] = v
+
         if n < a.loader_audit_pairs:
             r = real.get_data_label(ir)
             t = trans.get_data_label(it)
@@ -128,6 +166,18 @@ def main():
             record["intrinsics_max_abs_diff"] = k_err
             record["cropped_gt_shape_equal"] = bool(np.shape(r["gt_depth_m"]) ==
                                                      np.shape(t["gt_depth_m"]))
+            for tag, sample, full_target in (
+                ("rs", r, rs), ("gn", t, gn)
+            ):
+                observed = np.asarray(sample["gt_depth_m"], dtype=np.float32)
+                expected = _cropped_target(full_target, sample["crop_box"], observed.shape)
+                max_diff = float(np.max(np.abs(observed - expected)))
+                record[f"{tag}_loader_gt_max_abs_error_m"] = max_diff
+                if not np.isfinite(max_diff) or max_diff > 1e-5:
+                    raise RuntimeError(
+                        f"{tag} loader target does not match source-composed GT at "
+                        f"{sid}:{frame}: max_abs={max_diff:.6g}m")
+
         rows.append(record)
         if (n + 1) % 100 == 0:
             print(f"[paired-depth] processed {n+1}/{len(schedule)}", flush=True)
@@ -154,6 +204,12 @@ def main():
         ious = [r[f"{region}_valid_iou"] for r in rows
                 if r[f"{region}_valid_iou"] is not None]
         summary[f"{region}_mean_valid_iou"] = float(np.mean(ious)) if ious else None
+    # Difference of the underlying raw reconstructions (not the training target).
+    for region in ("all", "fg", "bg"):
+        diffs = [r[f"raw_tsdf_vs_rendered_{region}_abs_diff_mean_m"] for r in rows
+                 if r[f"raw_tsdf_vs_rendered_{region}_abs_diff_mean_m"] is not None]
+        summary[f"raw_tsdf_vs_rendered_{region}_mean_abs_difference_m"] = (
+            float(np.mean(diffs)) if diffs else None)
     with path.with_suffix(".json").open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False, allow_nan=False)
         f.write("\n")

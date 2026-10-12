@@ -57,29 +57,62 @@ def test_modes_are_disjoint():
         ModelConfig(use_rayrope=True, ray_encoding="point", uncertainty="learned")
 
 
-def test_full_tsdf_real_vs_full_rendered_gntrans(tmp_path):
-    from moge_rayrope.mixed import RealSenseFullTSDF, GNTransFullRendered
-    raw = np.array([[200, 600], [800, 1000]], dtype=np.uint16)
-    tsdf = np.array([[300, 500], [900, 1100]], dtype=np.uint16)
-    label = np.array([[1, 0], [1, 0]], dtype=np.uint8)
+def test_rendered_foreground_tsdf_background_and_full_rendered_gntrans(tmp_path):
+    from moge_rayrope.mixed import (
+        RealSenseRenderedForegroundTSDFBackground, GNTransFullRendered
+    )
+    rendered = np.array([[200, 600, 0], [800, 1000, 400]], dtype=np.uint16)
+    tsdf = np.array([[300, 500, 700], [900, 1100, 0]], dtype=np.uint16)
+    label = np.array([[1, 0, 1], [1, 0, 0]], dtype=np.uint8)
     target = tmp_path / "tsdf.png"
     Image.fromarray(tsdf).save(target)
-    real = RealSenseFullTSDF.__new__(RealSenseFullTSDF)
+
+    real = RealSenseRenderedForegroundTSDFBackground.__new__(
+        RealSenseRenderedForegroundTSDFBackground)
     real.use_fuse_depth = True
     real.gt_factor_depth = None
     real.fusedepthpath = [str(target)]
-    got_r = real.build_fused_gt_depth_m(raw, label, 0, 1000.)
-    assert np.allclose(got_r, tsdf / 1000.)
-    # Foreground TSDF must *not* silently change back to virtual GT.
-    assert not np.isclose(got_r[0, 0], raw[0, 0]/1000.)
+    real.labelpath = ["label.png"]
+    gt_real = real.build_fused_gt_depth_m(rendered, label, 0, 1000.)
+    expected = np.array([[.2, .5, 0.], [.8, 1.1, 0.]], dtype=np.float32)
+    assert np.allclose(gt_real, expected)
+    # Full TSDF is forbidden in object pixels; rendered background is forbidden
+    # in background pixels. Invalid source pixels must remain invalid.
+    assert not np.isclose(gt_real[0, 0], tsdf[0, 0] / 1000.)
+    assert not np.isclose(gt_real[0, 1], rendered[0, 1] / 1000.)
+    assert gt_real[0, 2] == 0. and gt_real[1, 2] == 0.
+    real.use_fuse_depth = False
+    with pytest.raises(RuntimeError):
+        real.build_fused_gt_depth_m(rendered, label, 0, 1000.)
+
     gn = GNTransFullRendered.__new__(GNTransFullRendered)
     gn.use_fuse_depth = False
     gn.gt_factor_depth = None
-    got_t = gn.build_fused_gt_depth_m(raw, label, 0, 1000.)
-    assert np.allclose(got_t, raw / 1000.)
+    gt_gn = gn.build_fused_gt_depth_m(rendered, label, 0, 1000.)
+    assert np.allclose(gt_gn, rendered / 1000.)
     gn.use_fuse_depth = True
     with pytest.raises(RuntimeError):
-        gn.build_fused_gt_depth_m(raw, label, 0, 1000.)
+        gn.build_fused_gt_depth_m(rendered, label, 0, 1000.)
+
+
+def test_real_requires_both_rendered_and_tsdf_sources(tmp_path):
+    from moge_rayrope.mixed import check_depth_sources
+    source = tmp_path / "present.png"
+    Image.fromarray(np.ones((2, 2), dtype=np.uint16)).save(source)
+    missing = tmp_path / "missing_rendered_depth.png"
+
+    class Fake:
+        colorpath = [str(source)]
+        gtdepthpath = [str(source)]
+        fusedepthpath = [str(source)]
+        labelpath = [str(source)]
+        metapath = [str(source)]
+
+    rs, gn = Fake(), Fake()
+    check_depth_sources(rs, gn, [0], [0])
+    rs.gtdepthpath = [str(missing)]
+    with pytest.raises(FileNotFoundError, match="missing_rendered_depth"):
+        check_depth_sources(rs, gn, [0], [])
 
 
 def test_paired_indices_same_scene_frame():

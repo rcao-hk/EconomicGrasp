@@ -28,7 +28,7 @@ def parser():
     p.add_argument('--ray-encoding',choices=['none','point','expected'],default='expected')
     p.add_argument('--uncertainty',choices=['fixed','learned'],default='fixed')
     p.add_argument('--uncertainty-loss',choices=['interval','laplace_decoupled','laplace_joint'],default='interval')
-    p.add_argument('--gntrans-rgb-root',default='',help='Enable paired mixed-depth training (RS full TSDF + GN-Trans rendered)')
+    p.add_argument('--gntrans-rgb-root',default='',help='Enable paired mixed training (RS rendered FG/TSDF BG + GN-Trans fully rendered)')
     p.add_argument('--ray-apply-vo',type=int,choices=[0,1],default=1)
     p.add_argument('--shape-tokens',type=int,choices=[0,1],default=0)
     p.add_argument('--pose-mode',choices=['none','global_film'],default='global_film')
