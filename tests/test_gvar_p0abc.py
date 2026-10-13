@@ -208,3 +208,25 @@ def test_registration_audit_renders_shared_mask_outline(tmp_path):
     assert 'not proof' in (tmp_path/'registration/REGISTRATION_AUDIT.json').read_text().lower()
     with pytest.raises(ValueError):inspect(root,trans,tmp_path/'different',(165,),(81,))
     assert boundary(seg>0).shape==seg.shape
+
+def test_p0a_reader_checkpoint_preflight(tmp_path):
+    """Saved reader parameters must strict-load and survive R0--R4 unchanged."""
+    cfg=GVARConfig(variant='volume_rel',reader_dim=16,reader_heads=4,action_chunk=16)
+    reader=GripperVolumeReader(feat_dim=8,hidden_dim=32,cfg=cfg)
+    ck={'gvar_contract_version':1,'gvar_config':cfg.to_dict(),
+        'detach_policy':{'E':True,'Q':True,'C':True},'completed_epoch':19,
+        'model_state_dict':{'kview_grasp_module.decoder.reader.'+k:v
+                            for k,v in reader.state_dict().items()}}
+    checkpoint=tmp_path/'e19.tar'
+    torch.save(ck,checkpoint)
+    from verify_gvar_p0a_checkpoint import verify
+    result=verify(checkpoint)
+    assert result['status']=='reader_checkpoint_preflight_passed'
+    assert result['all_reader_state_unchanged']
+    assert result['r0_replay_max_abs']==0.0 and result['r4_hybrid_same_weights_max_abs']==0.0
+    assert set(result['counterfactual_max_abs_delta_from_r0'])=={'r1','r2','r3','r4'}
+    ck['completed_epoch']=20
+    torch.save(ck,checkpoint)
+    with pytest.raises(ValueError,match='completed_epoch=19'):
+        verify(checkpoint)
+

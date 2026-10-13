@@ -72,8 +72,18 @@ run_job() {
   echo "[P0-$KIND] infer GPU=$gpu variant=$variant domain=$domain cf=$mode split=$split"
   if [[ "$DRY_RUN" == 1 ]]; then printf '%q ' "${cmd[@]}"; printf '\n'; return; fi
   [[ -f "$ckpt" ]] || { echo "Missing full e19 checkpoint: $ckpt" >&2; return 1; }
+  # Avoid truncating previous inference/failure evidence on an accidental rerun.
+  if [[ "$RESUME" == 0 && -e "$out/inference.log" ]]; then
+    echo "Existing inference log: $out/inference.log; choose new OUT_ROOT or RESUME=1" >&2
+    return 1
+  fi
   mkdir -p "$out"
-  CUDA_VISIBLE_DEVICES="$gpu" "${cmd[@]}" >"$out/inference.log" 2>&1
+  if [[ "$RESUME" == 1 ]]; then
+    printf '\n[RESUME] %s mode=%s split=%s\n' "$(date -Is)" "$mode" "$split" >>"$out/inference.log"
+    CUDA_VISIBLE_DEVICES="$gpu" "${cmd[@]}" >>"$out/inference.log" 2>&1
+  else
+    (set -C; CUDA_VISIBLE_DEVICES="$gpu" "${cmd[@]}" >"$out/inference.log" 2>&1)
+  fi
 }
 
 if [[ "$RUN_INFERENCE" == 1 ]]; then
@@ -108,10 +118,15 @@ assert s['complete'] and s['valid_dump_count']==780 and s['expected_count']==780
 assert mp['frame_stride']==10 and mp['collision_source']=='original_sensor'
 assert len(list(p.glob('scene_*/*/*.npy')))==780, 'missing or polluted dumps'
 PY
+    # Official AP and evaluation logs are evidence; never silently replace them.
+    if [[ -e "$out/evaluation.log" || -e "$out/ap_${split}_realsense.npy" ]]; then
+      echo "Existing official evaluation: $out; choose a fresh OUT_ROOT" >&2
+      exit 1
+    fi
     echo "[P0-$KIND] serial official evaluator $variant/$domain/$mode/$split"
-    "$PYTHON" eval.py --dataset_root "$DATASET_ROOT" --camera realsense --split "$split" \
+    (set -C; "$PYTHON" eval.py --dataset_root "$DATASET_ROOT" --camera realsense --split "$split" \
       --dump_dir "$out" --sample_interval 10 --num_workers "$EVAL_NUM_WORKERS" \
-      >"$out/evaluation.log" 2>&1
+      >"$out/evaluation.log" 2>&1)
     "$PYTHON" - "$out" "$split" <<'PY'
 import pathlib,sys,numpy as np
 p=pathlib.Path(sys.argv[1])/f'ap_{sys.argv[2]}_realsense.npy'
