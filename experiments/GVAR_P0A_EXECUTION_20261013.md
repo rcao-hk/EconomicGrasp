@@ -7,7 +7,7 @@ Scope: **P0-A only** on `exp/gripper-volume-action-reader`. RayRoPE U3 is owned 
 - `models/gripper_volume_reader.py`: `set_counterfactual(r0...r4)` on a frozen `volume_rel` reader. R0 dynamic feature/metadata/mask, R1 fixed feature only, R2 fixed position metadata only, R3 fixed attention validity mask only, R4 fixed feature+metadata+mask. Predicted relative geometry remains dynamic in all cases.
 - `inference_gvar_p0.py` and `scripts/run_gvar_p0_eval.sh`: identical frozen checkpoint and per-frame sampler across modes, Original RealSense 10% Seen/Similar/Novel, standard sensor-cloud collision, official AP.
 - `analyze_gvar_p0a.py`: scene-paired bootstrap, friction-specific and prefix metrics; `audit_gvar_p0_support.py`: AP-blind Novel probe projection and mask-conflict audit.
-- `verify_gvar_p0a_checkpoint.py`: **new reader-only CPU checkpoint preflight**, strict reader weight loading, R0 replay, R4 vs same-weights Hybrid equivalence, finite R1–R4, and immutable reader state. This is **not** a full-model/server parity test.
+- `verify_gvar_p0a_checkpoint.py`: **new reader-only CPU checkpoint preflight**, strict reader weight loading, R0 replay, R4 vs same-weights Hybrid equivalence, finite R1–R4, and immutable reader state. The optional `--historical-root` gate also verifies the frozen e19 file checksum against all three accepted Original evaluator manifests. This is **not** a full-model/server parity test.
 
 ## Runbook (on the authorized training server, not on GitHub)
 
@@ -18,7 +18,9 @@ Scope: **P0-A only** on `exp/gripper-volume-action-reader`. RayRoPE U3 is owned 
 ```bash
 export ROOT=/data/robotarm/result/grasp/rgbgrasp/log/gvar_deploy_20261007
 python verify_gvar_p0a_checkpoint.py \
-  --checkpoint "$ROOT/train/volume_rel/checkpoint_epoch_019.tar"
+  --checkpoint "$ROOT/train/volume_rel/checkpoint_epoch_019.tar" \
+  --historical-root "$ROOT" \
+  --report "$ROOT/analysis/p0a_preflight_UNIQUE.json"
 ```
 
 4. Use unique result roots (examples below are placeholders; choose non-existing directories), and only **KIND=p0a**:

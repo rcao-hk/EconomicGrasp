@@ -111,18 +111,87 @@ def verify(checkpoint: Path) -> dict:
     }
 
 
+
+def historical_identity(root: Path, checksum: str) -> dict:
+    """Bind the frozen checkpoint to all three prior accepted official runs.
+
+    Reader state_dict strict-load alone cannot distinguish a replaced e19 model
+    from the exact e19 that generated the historical published comparison.
+    Source-code/forward parity is a SEPARATE requirement.
+    """
+    root = Path(root).resolve()
+    train = root / "train" / "volume_rel"
+    def read(path):
+        if not path.is_file():
+            raise FileNotFoundError(f"Historical GVAR file is missing: {path}")
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError(f"Invalid historical GVAR protocol: {path}")
+        return value
+    train_proto = read(train / "gvar_protocol.json")
+    mixed = read(train / "gntrans_mix_protocol.json")
+    if train_proto.get("gvar_config", {}).get("variant") != "volume_rel":
+        raise ValueError("Historical training was not volume_rel")
+    if train_proto.get("detach_policy") != {"E": True, "Q": True, "C": True}:
+        raise ValueError("Historical full E/Q/C detach contract mismatch")
+    for k, want in {"train_original": 2600, "train_gntrans": 2600,
+                    "validation_original_seen": 780, "validation_gntrans": 0,
+                    "world_size": 3, "per_rank_batch": 3, "global_batch": 9,
+                    "seed": 0, "frame_stride": 10}.items():
+        if train_proto.get(k) != want:
+            raise ValueError(f"Historical training mismatch {k}")
+    for k, want in {"original_train_count": 2600, "gntrans_train_count": 2600,
+                    "mixed_train_count": 5200, "paired_scene_frame_sampling": True}.items():
+        if mixed.get(k) != want:
+            raise ValueError(f"Historical mixed sampling mismatch {k}")
+    manifest_sources = []
+    for split in ("test_seen", "test_similar", "test_novel"):
+        folder = root / "eval" / "volume_rel_e19" / split
+        path = folder / "gvar_inference_protocol.json"
+        proto = read(path)
+        summary = read(folder / "gvar_inference_summary.json")
+        expected = {"checkpoint_sha256": checksum, "completed_epoch": 19,
+                    "gvar_config": train_proto["gvar_config"],
+                    "split": split, "camera": "realsense", "batch_size": 3,
+                    "selected_samples": 780, "frame_stride": 10,
+                    "collision_source": "original_sensor", "collision_thresh": .01,
+                    "collision_voxel_size": .01,
+                    "network_geometry": "predicted metric depth"}
+        for k, want in expected.items():
+            if proto.get(k) != want:
+                raise ValueError(f"Historical {split} mismatch {k}")
+        if (summary.get("complete") is not True or
+            summary.get("valid_dump_count") != 780 or
+            summary.get("expected_count") != 780):
+            raise ValueError(f"Historical {split} inference is incomplete")
+        ap = folder / f"ap_{split}_realsense.npy"
+        if not ap.is_file():
+            raise FileNotFoundError(f"Historical {split} official AP missing: {ap}")
+        manifest_sources.append({"split": split, "manifest_sha256": file_sha256(path),
+                                 "frame_fingerprint": proto.get("frame_fingerprint")})
+    return {"status": "matches_all_historical_volume_rel_e19_evaluations",
+            "historical_manifest_sources": manifest_sources,
+            "limit": "Does not certify current source-vs-old-server forward parity"}
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--checkpoint", type=Path, required=True)
     p.add_argument("--report", type=Path)
+    p.add_argument("--historical-root", type=Path, help="Require matching old official e19 AP manifests")
     args = p.parse_args()
     torch.set_num_threads(1)
     result = verify(args.checkpoint)
+    if args.historical_root is not None:
+        result['historical_identity'] = historical_identity(args.historical_root, result['checkpoint_sha256'])
     if args.report is not None:
+        report_text = json.dumps(result, indent=2) + "\n"
         if args.report.exists():
-            p.error(f"Refuse to overwrite existing preflight report: {args.report}")
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+            if args.report.read_text(encoding="utf-8") != report_text:
+                p.error(f"Existing preflight report differs; use a fresh OUT_ROOT: {args.report}")
+        else:
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            with args.report.open('x', encoding='utf-8') as handle:
+                handle.write(report_text)
     print(json.dumps(result, indent=2))
 
 

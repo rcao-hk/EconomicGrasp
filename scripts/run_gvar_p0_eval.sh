@@ -86,6 +86,15 @@ run_job() {
   fi
 }
 
+# P0-A checkpoint identity and historical AP provenance gate (no GPU).
+# This DOES NOT replace old-server/current-code full forward/decode parity.
+if [[ "$KIND" == p0a && "$RUN_INFERENCE" == 1 && "$DRY_RUN" != 1 ]]; then
+  "$PYTHON" verify_gvar_p0a_checkpoint.py \
+    --checkpoint "$ROOT/train/volume_rel/checkpoint_epoch_019.tar" \
+    --historical-root "$ROOT" \
+    --report "$OUT_ROOT/p0a_reader_preflight.json"
+fi
+
 if [[ "$RUN_INFERENCE" == 1 ]]; then
   pids=()
   trap 'for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null || true; done' INT TERM
