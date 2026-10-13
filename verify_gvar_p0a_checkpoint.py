@@ -42,7 +42,7 @@ def _fixture(feat_dim: int, hidden_dim: int):
                        [0., 0., 1.]]])
     yy, xx = torch.meshgrid(torch.linspace(-1, 1, H),
                             torch.linspace(-1, 1, W), indexing="ij")
-    depth = (.52 + .02 * xx + .01 * yy)[None]
+    depth = (.52 + .02 * xx + .01 * yy)[None, None]
     context = {"pregeom": torch.randn(1, feat_dim, 16, 16),
                "centers": centers, "rotations": rotations, "K": K,
                "depth": depth, "image_hw": (H, W)}
