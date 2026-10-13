@@ -16,7 +16,7 @@ Scope: **P0-A only** on `exp/gripper-volume-action-reader`. RayRoPE U3 is owned 
 3. Run the reader-only preflight:
 
 ```bash
-ROOT=/data/robotarm/result/grasp/rgbgrasp/log/gvar_deploy_20261007
+export ROOT=/data/robotarm/result/grasp/rgbgrasp/log/gvar_deploy_20261007
 python verify_gvar_p0a_checkpoint.py \
   --checkpoint "$ROOT/train/volume_rel/checkpoint_epoch_019.tar"
 ```
@@ -24,7 +24,7 @@ python verify_gvar_p0a_checkpoint.py \
 4. Use unique result roots (examples below are placeholders; choose non-existing directories), and only **KIND=p0a**:
 
 ```bash
-DATASET_ROOT=/data/robotarm/dataset/graspnet
+export DATASET_ROOT=/data/robotarm/dataset/graspnet
 GPUS=0 KIND=p0a SPLITS=test_seen MAX_BATCHES=2 RUN_EVAL=0 \
   OUT_ROOT="$ROOT/analysis/p0a_smoke_UNIQUE" bash scripts/run_gvar_p0_eval.sh
 
