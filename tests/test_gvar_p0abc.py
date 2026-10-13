@@ -39,7 +39,8 @@ def _synthetic_p0(root,kind):
                 for split in SPLITS:
                     folder=root/v/domain/mode/split
                     proto={'p0_contract_version':1,'source_domain':domain,
-                        'reader_cf_mode':mode,'gvar_config':{'variant':v},
+                        'reader_cf_mode':mode,'reader_cf_sources':list(COUNTERFACTUAL_SOURCES[mode]),
+                        'gvar_config':{'variant':v},
                         'completed_epoch':19,'camera':'realsense','checkpoint_sha256':ck,
                         'split':split,'dataset_root':'/dataset/graspnet','gntrans_rgb_root':
                           '/dataset/GN-Trans' if domain=='gntrans' else None,
@@ -141,6 +142,17 @@ def test_p0a_rejects_mismatched_protocol(tmp_path):
     with pytest.raises(ProtocolError,match='sample_seed'):
         analyze_cf(root,tmp_path/'out',bootstrap=200)
     assert not (tmp_path/'out').exists()
+
+
+def test_p0a_rejects_mislabeled_sources(tmp_path):
+    root=tmp_path/'cf';_synthetic_p0(root,'p0a')
+    p=root/'volume_rel/original/r2/test_novel/gvar_p0_protocol.json'
+    d=json.loads(p.read_text())
+    d['reader_cf_sources']=['dynamic','dynamic','dynamic']
+    _json(p,d)
+    with pytest.raises(ProtocolError,match='reader_cf_sources'):
+        analyze_cf(root,tmp_path/'report',bootstrap=200)
+    assert not (tmp_path/'report').exists()
 
 
 def test_p0a_rejects_missing_ap(tmp_path):

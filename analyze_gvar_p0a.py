@@ -16,6 +16,16 @@ from analyze_gvar_scene_paired import SPLITS, METRIC_NAMES, scene_metric, paired
 from utils.gvar_p0_analysis import load, paired_protocol, fresh_output, require, write_csv
 
 MODES=('r0','r1','r2','r3','r4')
+# NumPy-only analysis contract, independent of the torch/reader import.
+# Fail if an output claims a different mode from the switches actually run.
+EXPECTED_SOURCES={
+    'r0':['dynamic','dynamic','dynamic'],
+    'r1':['fixed','dynamic','dynamic'],
+    'r2':['dynamic','fixed','dynamic'],
+    'r3':['dynamic','dynamic','fixed'],
+    'r4':['fixed','fixed','fixed'],
+}
+
 
 
 def analyze(root:Path,out:Path,bootstrap=50000,seed=20261009,ci=.95):
@@ -26,6 +36,8 @@ def analyze(root:Path,out:Path,bootstrap=50000,seed=20261009,ci=.95):
     for mode in MODES:
         for split in SPLITS:
             d=all_data[mode,split]
+            require(d['protocol'].get('reader_cf_sources')==EXPECTED_SOURCES[mode],
+                    f'Incorrect reader_cf_sources for {mode}/{split}')
             paired_protocol(canonical if split=='test_seen' else all_data['r0',split],d)
             # All modes must use one and only one frozen trained checkpoint.
             require(d['protocol']['gvar_config']==canonical['protocol']['gvar_config'],
