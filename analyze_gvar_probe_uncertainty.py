@@ -164,7 +164,7 @@ def records_for_frame(sidecar:Path,grasp:Path,variant:str,scene:int,frame:int,ra
     report=[]; valid_count=0
     proj=valid.numpy(); uvn=uv.numpy()
     for n in range(len(raw)):
-        for k in range(36):
+        for k in range(len(roles)):
             fg_pass=bool(proj[n,k] and valid_fg[n,k]); gt_pass=bool(fg_pass and valid_render[n,k]); sensor_pass=bool(fg_pass and valid_sensor[n,k]);
             if gt_pass:valid_count+=1
             report.append({"variant":variant,"scene_id":scene,"frame_id":frame,"selection":selection['selection'],
@@ -180,8 +180,8 @@ def records_for_frame(sidecar:Path,grasp:Path,variant:str,scene:int,frame:int,ra
                 "uncertainty_sigma_m":float(sigma[n,k]) if sigma is not None and gt_pass else None,
                 "source_frame_delta_AP_pp":float(selection['delta_AP_pp'])})
     frame_stats={"scene_id":scene,"frame_id":frame,"variant":variant,"status":"ok","num_grasps":len(raw),
-                 "total_probes":len(raw)*36,"valid_rendered_object_probes":valid_count,
-                 "valid_probe_fraction":valid_count/(len(raw)*36),"rendered_MAE_m":np.mean([r['rendered_error_m'] for r in report if r['rendered_error_m'] is not None]) if valid_count else None,
+                 "total_probes":len(raw)*len(roles),"valid_rendered_object_probes":valid_count,
+                 "valid_probe_fraction":valid_count/(len(raw)*len(roles)),"rendered_MAE_m":np.mean([r['rendered_error_m'] for r in report if r['rendered_error_m'] is not None]) if valid_count else None,
                  "source_frame_delta_AP_pp":float(selection['delta_AP_pp'])}
     return report,frame_stats
 
