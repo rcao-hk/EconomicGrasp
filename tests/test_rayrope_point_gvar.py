@@ -92,3 +92,39 @@ def test_new_fingerprint_is_separate_from_old_moge_rayrope():
     old=old_fingerprint()
     new=code_fingerprint()
     assert len(old)==64 and len(new)==64 and old!=new
+
+
+def test_cdf_gvar_decoder_tensor_contract_and_reader_gradients():
+    """Exercise actual imported CDF decoder/reader path on synthetic CPU tensors."""
+    from models.kview_query_transformer import CenterViewAngleCDFCandidateDecoder
+    from rayrope_gvar.decoder import GripperVolumeCDFDecoder
+    torch.manual_seed(17)
+    Q,A,D=2,2,4
+    original=CenterViewAngleCDFCandidateDecoder(
+        num_angle=A,num_depth=D,in_dim=128,hidden_dim=32,
+        num_layers=1,num_heads=4)
+    cfg=GVARConfig(variant="volume_rel",reader_dim=16,reader_heads=4,
+                   action_chunk=8,activation_checkpoint=False)
+    decoder=GripperVolumeCDFDecoder(original,feat_dim=8,config=cfg)
+    decoder.train()
+    group=torch.randn(1,128,Q*A,requires_grad=True)
+    depth=torch.full((1,1,64,64),.52,requires_grad=True)
+    visual=torch.randn(1,8,16,16,requires_grad=True)
+    context={"pregeom":visual,"centers":torch.tensor(
+                  [[[0.,0.,.5],[.03,0.,.5],[.0,.02,.5],[-.03,0.,.5]]]),
+             "rotations":torch.eye(3).reshape(1,1,3,3).expand(1,Q*A,3,3).clone(),
+             "K":torch.tensor([[[160.,0.,31.5],[0.,160.,31.5],[0.,0.,1.]]]),
+             "depth":depth,"image_hw":(64,64)}
+    ep={"kview_angle_query_base_q":Q,"kview_angle_query_num_angle":A,
+        "_gvar_context":context}
+    out=decoder(group,ep)
+    assert "_gvar_context" not in out
+    w=out["grasp_width_pred_angle_depth"]
+    c=out["grasp_cdf_pred_angle_depth"]
+    assert w.shape==(1,D,Q,A) and c.shape==(1,6,Q,A,D)
+    assert torch.isfinite(w).all() and torch.isfinite(c).all()
+    assert (c[:,1:]-c[:,:-1] >= -1e-6).all()
+    (w.mean()+c.mean()).backward()
+    assert visual.grad is not None and float(visual.grad.abs().sum())>0
+    assert group.grad is not None and float(group.grad.abs().sum())>0
+    assert depth.grad is None
