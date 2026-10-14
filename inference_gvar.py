@@ -67,6 +67,9 @@ def main():
         raise FileNotFoundError("--checkpoint_path is missing or not a file")
     ck = torch.load(cfgs.checkpoint_path, map_location="cpu", weights_only=False)
     config = validate_checkpoint(ck)
+    if G.gvar_num_probes is not None and G.gvar_num_probes != config.num_probes:
+        raise ValueError(f"Requested {G.gvar_num_probes} probes, checkpoint was trained with "
+                         f"{config.num_probes}; retrain rather than changing the count at inference")
     if "--gvar_action_chunk" in EXPLICIT_ARGV:
         config = replace(config, action_chunk=G.gvar_action_chunk)
     if G.gvar_variant != "auto" and G.gvar_variant != config.variant:
