@@ -11,6 +11,11 @@ RUN_INFERENCE="${RUN_INFERENCE:-1}"
 RUN_EVAL="${RUN_EVAL:-1}"
 REMOVE_DUMP="${REMOVE_DUMP:-0}"
 MAX_BATCHES="${MAX_BATCHES:-0}"
+NUM_PROBES="${NUM_PROBES:-}"
+if [[ -n "$NUM_PROBES" && "$NUM_PROBES" != 18 && "$NUM_PROBES" != 36 ]]; then
+  echo "NUM_PROBES must be 18 or 36 when specified" >&2
+  exit 2
+fi
 IFS=',' read -r -a GPUs <<< "${GPUS}"
 IFS=',' read -r -a split_array <<< "${SPLITS}"
 [[ "${GPUS}" =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo "Invalid GPUS" >&2; exit 2; }
@@ -27,6 +32,7 @@ run_inference() {
   local split="$1" gpu="$2" out="${OUTPUT_ROOT}/$1"
   local extra=()
   if [[ "${RESUME_INFERENCE:-0}" == 1 ]]; then extra+=(--gvar_resume_inference); fi
+  if [[ -n "$NUM_PROBES" ]]; then extra+=(--gvar_num_probes "$NUM_PROBES"); fi
   local cmd=("$PYTHON" inference_gvar.py --dataset_root "$DATASET_ROOT" --checkpoint_path "$CKPT"
     --save_dir "$out" --test_mode "$split" --camera realsense --sample_interval 0.1
     --batch_size "${BATCH_SIZE:-3}" --num_workers "${NUM_WORKERS:-2}" --seed "${SEED:-0}"
