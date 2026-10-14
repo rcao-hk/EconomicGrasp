@@ -242,3 +242,22 @@ def test_p0a_reader_checkpoint_preflight(tmp_path):
     with pytest.raises(ValueError,match='completed_epoch=19'):
         verify(checkpoint)
 
+
+@pytest.mark.parametrize("count",(18,36))
+def test_p0_counterfactual_modes_support_both_probe_counts(count):
+    from dataclasses import replace
+    reader,queries,ctx=inputs("volume_rel")
+    reader.cfg=replace(reader.cfg,num_probes=count)
+    hybrid,_,_=inputs("volume_hybrid")
+    hybrid.cfg=replace(hybrid.cfg,num_probes=count)
+    hybrid.load_state_dict(reader.state_dict(),strict=True)
+    reader.eval();hybrid.eval()
+    with torch.no_grad():
+        r0=reader(queries,ctx)
+        reader.set_counterfactual("r0")
+        torch.testing.assert_close(r0,reader(queries,ctx),rtol=0,atol=0)
+        for mode in ("r1","r2","r3","r4"):
+            reader.set_counterfactual(mode)
+            assert torch.isfinite(reader(queries,ctx)).all()
+        torch.testing.assert_close(reader(queries,ctx),hybrid(queries,ctx),rtol=0,atol=0)
+
