@@ -6,7 +6,11 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 PYTHON="${PYTHON:-python}"
 GPUS="${GPUS:-0,1,2}"
 VARIANT="${VARIANT:-volume}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/log/gvar_${VARIANT}_10pct}"
+NUM_PROBES="${NUM_PROBES:-36}"
+[[ "$NUM_PROBES" == 18 || "$NUM_PROBES" == 36 ]] || { echo "NUM_PROBES must be 18 or 36" >&2; exit 2; }
+PROBE_SUFFIX=""
+[[ "$NUM_PROBES" == 18 ]] && PROBE_SUFFIX="_p18"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/log/gvar_${VARIANT}_10pct${PROBE_SUFFIX}}"
 BATCH_SIZE="${BATCH_SIZE:-3}"
 MAX_EPOCH="${MAX_EPOCH:-20}"
 NUM_WORKERS="${NUM_WORKERS:-2}"
@@ -35,6 +39,7 @@ cmd=("${PYTHON}" -m torch.distributed.run --standalone --nproc_per_node="${#GPUs
   --graspness_mode scene --kview_mode A1 --pose_depth_mode global_film --seed "${SEED}"
   --gvar_variant "${VARIANT}" --gvar_reader_dim "${READER_DIM}" --gvar_reader_heads "${READER_HEADS}"
   --gvar_action_chunk "${ACTION_CHUNK}" --gvar_activation_checkpoint "${ACTIVATION_CHECKPOINT}"
+  --gvar_num_probes "${NUM_PROBES}"
   --gvar_max_batches "${MAX_BATCHES}" "${extra[@]}" "$@")
 printf 'CUDA_VISIBLE_DEVICES=%q ' "${GPUS}"; printf '%q ' "${cmd[@]}"; printf '\n'
 if [[ "${DRY_RUN:-0}" == 1 ]]; then exit 0; fi
