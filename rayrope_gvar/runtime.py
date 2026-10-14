@@ -30,6 +30,10 @@ def code_fingerprint():
     files=[]
     files.extend((ROOT/"moge_rayrope").glob("*.py"))
     files.extend((ROOT/"rayrope_gvar").glob("*.py"))
+    # Mirror the archived MR fingerprint's transitive model/dataset/helper coverage,
+    # then add ONLY our isolated joint components and scripts.
+    for directory in ("models","utils","dataset"):
+        files.extend((ROOT/directory).rglob("*.py"))
     files.extend(ROOT/path for path in MAIN_FILES)
     files.extend(ROOT/path for path in (
         "train_rayrope_gvar.py","inference_rayrope_gvar.py",
