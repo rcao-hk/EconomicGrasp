@@ -42,7 +42,7 @@ class GripperVolumeCDFDecoder(CenterViewAngleCDFCandidateDecoder):
         action = self.action_adapter.make_queries(angle_feature)
         if self.reader is not None:
             if context is None:
-                raise RuntimeError("Missing gripper-reader context; instantiate EconomicGraspGVAR")
+                raise RuntimeError("Missing gripper-reader context; instantiate EconomicGraspPointGVAR")
             action = self.reader(action, context)
             end_points.update(self.reader.last_debug)
         action = self.action_adapter.finish(action)
