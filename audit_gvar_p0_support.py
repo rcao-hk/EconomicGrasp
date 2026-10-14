@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P0-A nontraining audit of dynamic-vs-fixed 36-probe support positions.
+"""P0-A nontraining audit of dynamic-vs-fixed configured-probe support positions.
 
 Uses the frozen AP-blind Novel subset, saved RGB checkpoint depth sidecars,
 archived *post-collision* physical grasps and crop-aware K. No learned model
@@ -104,7 +104,7 @@ def analyze(root,selection_json,sidecars,out,topk=20):
         distance=torch.norm(uv_dynamic-uv_fixed,dim=-1).numpy()
         for k in range(len(g)):
             depth_bin=int(round(float(g[k,3])/.01))
-            for j in range(36):
+            for j in range(len(roles)):
                 vf=bool(valid_fixed[k,j]);vd=bool(valid_dynamic[k,j]);kd=bool(known[k,j])
                 records.append({'scene_id':scene,'frame_id':frame,'rank':k+1,
                                 'depth_bin':depth_bin,'role':ROLES[int(roles[j])],
