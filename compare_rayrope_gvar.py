@@ -113,12 +113,35 @@ def analyze(root,output,bootstrap=50000,seed=20261014):
             for split in SPLITS:row[split]=100*float(scene_scores(results[(variant,mode,split)]).mean())
             row["Mean"]=sum(row[s] for s in SPLITS)/3
             absolute.append(row)
+    costs=[]
+    for variant in VARIANTS:
+        base=root/variant
+        gradient=json.loads((base/"train"/"gradient_contract.json").read_text())
+        history=json.loads((base/"train"/"metrics.json").read_text())
+        if len(history)!=20 or [x["epoch"] for x in history]!=list(range(20)):
+            raise RuntimeError(f"{variant}: expected complete 20-epoch metrics history")
+        train_peak=max(float(peak["allocated_bytes"])
+            for epoch in history for peak in epoch["peak_cuda_memory"])
+        forward_seconds=0.;forward_frames=0
+        for shard in range(3):
+            shard_file=base/"test_native"/"test_collision_on"/"test_seen"/f"shard_{shard}.json"
+            saved=json.loads(shard_file.read_text())
+            if saved.get("assigned",0)!=260:
+                raise RuntimeError(f"{variant}: unexpected inference shard assignment")
+            t=saved["timing"]
+            forward_seconds+=float(t["forward_decode_seconds"])
+            forward_frames+=int(t["timed_frames"])
+        costs.append({"variant":variant,
+            "trainable_parameters":int(gradient["trainable_parameters"]),
+            "train_including_validation_hours":sum(float(e["seconds"]) for e in history)/3600,
+            "train_peak_allocated_GiB":train_peak/(1024**3),
+            "forward_decode_ms_per_frame":1000*forward_seconds/forward_frames})
     output.mkdir(parents=True,exist_ok=True)
-    for name,data in (("absolute.csv",absolute),("paired_effects.csv",rows),("scene_effects.csv",scenes)):
+    for name,data in (("absolute.csv",absolute),("paired_effects.csv",rows),("scene_effects.csv",scenes),("costs.csv",costs)):
         with (output/name).open("w",newline="",encoding="utf-8") as f:
             w=csv.DictWriter(f,fieldnames=list(data[0]));w.writeheader();w.writerows(data)
     atomic_json(output/"report.json",{"training_protocols":protocols,"absolute":absolute,
-        "paired_effects":rows,"bootstrap":bootstrap,"seed":seed,
+        "paired_effects":rows,"costs":costs,"bootstrap":bootstrap,"seed":seed,
         "warning":"Single training seed; scene-bootstrap cannot measure seed variability."})
     lines=["# Mixed-v2 Point RayRoPE vs Point+GVAR","","Collision-on is the primary AP protocol.",
            "Both models have fresh heads; 10% RealSense plus 10% GN-Trans, same dataset/seed/epochs.",
@@ -133,7 +156,15 @@ def analyze(root,output,bootstrap=50000,seed=20261014):
     for r in rows:
         lines.append(f"| {r['collision']} | {r['metric']} | {r['split']} | "
                      f"{r['delta_pp']:+.3f} | [{r['ci_low_pp']:+.3f}, {r['ci_high_pp']:+.3f}] |")
-    lines+=["","**Interpretation boundary:** combined model changes the decoded candidate set and",
+    lines+=["","## Model and inference costs","",
+            "| Variant | Trainable params | Train+val (h) | Train peak (GiB) | Forward+decode (ms/frame) |",
+            "|---|---:|---:|---:|---:|"]
+    for c in costs:
+        lines.append(f"| {c['variant']} | {c['trainable_parameters']:,} | "
+                     f"{c['train_including_validation_hours']:.2f} | "
+                     f"{c['train_peak_allocated_GiB']:.2f} | "
+                     f"{c['forward_decode_ms_per_frame']:.2f} |")
+    lines+=["","**Interpretation boundary:** combined model changes the decoded candidate set and"
             "ranking. This is a matched retraining architecture comparison, not same-grasp",
             "reranking; a scene CI does not include retraining seed variability. Both models",
             "use depth-assisted GraspNet preprocessing and original-sensor collision filtering."]
