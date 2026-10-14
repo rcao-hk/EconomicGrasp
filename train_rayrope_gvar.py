@@ -95,7 +95,7 @@ def gradient_contract(model,dataset,device,mc,lc):
                                  ('ray_group','base.kview_grasp_module.group.')):
                 branch_grads[label]=math.sqrt(sum(float(p.grad.double().square().sum())
                     for n,p in model.named_parameters() if n.startswith(prefix) and p.grad is not None))
-            if label=='ray_group' and getattr(model,'gvar_enabled',False):
+            if getattr(model,'gvar_enabled',False):
                 for key,stem in (('gvar_reader','base.kview_grasp_module.decoder.reader.'),
                                  ('gvar_adapter','base.kview_grasp_module.decoder.action_adapter.')):
                     branch_grads[key]=math.sqrt(sum(float(p.grad.double().square().sum())
