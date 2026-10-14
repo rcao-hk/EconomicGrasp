@@ -18,6 +18,9 @@ from torch.utils.checkpoint import checkpoint
 
 VARIANTS = ("baseline", "slot", "volume_fixed", "volume", "volume_rel", "volume_fixed_rel", "volume_hybrid", "volume_inverse_hybrid")
 ROLE_NAMES = ("left_contact", "right_contact", "closing", "finger_body", "palm", "approach")
+# Contact-prioritized 18-point subset of the historical 36-point template.
+# Left/right contact 4+4, closing 4, finger body 2, palm 2, approach 2.
+PROBE_INDICES_18 = (0, 1, 4, 5, 6, 7, 10, 11, 12, 13, 16, 17, 20, 21, 26, 27, 32, 33)
 
 # (appearance evidence position, physical-location metadata, attention mask)
 # The predicted geometry of the volume_rel checkpoint stays DYNAMIC in ALL
@@ -47,6 +50,7 @@ class GVARConfig:
     approach_m: float = 0.05
     fixed_insertion_m: float = 0.025
     geometry_scale_m: float = 0.06
+    num_probes: int = 36  # 18 (contact-prioritized) or historical 36
 
     def __post_init__(self):
         if self.variant not in VARIANTS:
@@ -55,17 +59,24 @@ class GVARConfig:
             raise ValueError("reader_dim must be >=8 and divisible by reader_heads")
         if self.action_chunk < 1 or not 0 <= self.reader_dropout < 1:
             raise ValueError("Invalid reader chunk/dropout")
+        if type(self.num_probes) is not int or self.num_probes not in (18, 36):
+            raise ValueError("num_probes must be exactly 18 or 36")
         for key in ("envelope_width_m", "height_m", "finger_length_m", "finger_thickness_m", "approach_m", "fixed_insertion_m", "geometry_scale_m"):
             value = getattr(self, key)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{key} must be finite and positive")
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        out = asdict(self)
+        # Historical 36-point checkpoint manifests did not contain this field.
+        # Preserve the old serialized protocol exactly for default-36 runs.
+        if self.num_probes == 36:
+            out.pop("num_probes")
+        return out
 
 
 def canonical_probes(depths: torch.Tensor, cfg: GVARConfig) -> Tuple[torch.Tensor, torch.Tensor]:
-    """depths [N] -> probes [N,36,3], roles [36]; metres, not ray-z offsets."""
+    """depths [N] -> probes [N,P,3], role IDs [P], P=18 or 36, metres."""
     if depths.ndim != 1 or not torch.is_floating_point(depths):
         raise ValueError("depths must be a floating [N] tensor")
     w, h, length, thick = cfg.envelope_width_m, cfg.height_m, cfg.finger_length_m, cfg.finger_thickness_m
@@ -83,9 +94,13 @@ def canonical_probes(depths: torch.Tensor, cfg: GVARConfig) -> Tuple[torch.Tenso
     pts.extend([[-length - thick - cfg.approach_m * f, side * (w + thick) / 2, 0.]
                 for f in (0.15, 0.50, 0.85) for side in (-1., 1.)])
     template = depths.new_tensor(pts)
+    roles = torch.arange(6, device=depths.device).repeat_interleave(6)
+    if cfg.num_probes == 18:
+        keep = torch.as_tensor(PROBE_INDICES_18, dtype=torch.long, device=depths.device)
+        template = template.index_select(0, keep)
+        roles = roles.index_select(0, keep)
     offset = torch.stack((depths, torch.zeros_like(depths), torch.zeros_like(depths)), -1)
     probes = template.unsqueeze(0) + offset.unsqueeze(1)
-    roles = torch.arange(6, device=depths.device).repeat_interleave(6)
     return probes, roles
 
 
@@ -213,10 +228,11 @@ class GripperVolumeReader(nn.Module):
         # probe xyz; geom features encode their own action-frame surface XYZ,
         # ray residual and validity. No ground truth enters either stream.
         rgb_probes, roles = canonical_probes(support_probe_depths(depths, cfg, "rgb"), cfg)
+        num_probes = rgb_probes.shape[1]
         xyz, uv, grid, valid = project_probes(centers, rotations, rgb_probes, K, image_hw)
         patch = sample_map(fmap, grid)
         meta = torch.cat((rgb_probes / cfg.geometry_scale_m,
-                          depths[:, None, None].expand(-1, 36, 1) / cfg.geometry_scale_m,
+                          depths[:, None, None].expand(-1, num_probes, 1) / cfg.geometry_scale_m,
                           valid[..., None].to(rgb_probes.dtype)), -1).to(patch.dtype)
         if cfg.variant in ("volume_rel", "volume_fixed_rel", "volume_hybrid", "volume_inverse_hybrid"):
             if cfg.variant in ("volume_hybrid", "volume_inverse_hybrid"):
@@ -242,7 +258,7 @@ class GripperVolumeReader(nn.Module):
                 patch = sample_map(fmap, grid_fixed)
             if metadata_src == "fixed":
                 meta = torch.cat((fixed / cfg.geometry_scale_m,
-                    depths[:, None, None].expand(-1, 36, 1) / cfg.geometry_scale_m,
+                    depths[:, None, None].expand(-1, num_probes, 1) / cfg.geometry_scale_m,
                     valid_fixed[..., None].to(fixed.dtype)), -1).to(patch.dtype)
             if mask_src == "fixed":
                 mask_valid = valid_fixed
@@ -261,7 +277,15 @@ class GripperVolumeReader(nn.Module):
         attended, weights = self.attn(query, tokens, tokens, key_padding_mask=padding, need_weights=True)
         delta = self.out_projection(self.norm(attended[:, 0]))
         delta = torch.where(all_invalid[:, None], torch.zeros_like(delta), delta)
-        role_mass = weights[:, 0].detach().reshape(-1, 6, 6).sum(-1)
+        if cfg.num_probes == 36:
+            # Preserve the original reduction order for legacy e19 parity.
+            role_mass = weights[:, 0].detach().reshape(-1, 6, 6).sum(-1)
+        else:
+            # Unequal role sizes 4/4/4/2/2/2: aggregate by actual role ID.
+            mass = weights[:, 0].detach()
+            role_mass = mass.new_zeros((mass.shape[0], len(ROLE_NAMES)))
+            role_ids = roles.unsqueeze(0).expand(mass.shape[0], -1)
+            role_mass.scatter_add_(1, role_ids, mass)
         role_mass = torch.where(all_invalid[:, None], torch.zeros_like(role_mass), role_mass)
         stats = torch.cat((mask_valid.float().mean(-1, keepdim=True), all_invalid.float()[:, None], role_mass), -1)
         return delta, stats.detach()
@@ -305,7 +329,7 @@ class GripperVolumeReader(nn.Module):
         self.last_debug = {
             "D: GVAR valid projection": totals[0] / max(nstats, 1),
             "D: GVAR all invalid": totals[1] / max(nstats, 1),
-            "D: GVAR probes per action": queries.new_tensor(36.),
+            "D: GVAR probes per action": queries.new_tensor(float(self.cfg.num_probes)),
             "D: GVAR actions": queries.new_tensor(float(Q * A * D)),
         }
         for i, name in enumerate(ROLE_NAMES):
