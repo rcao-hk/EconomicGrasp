@@ -15,7 +15,7 @@ from torch import nn
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from models.gripper_volume_reader import (GVARConfig, ROLE_NAMES, canonical_probes,
+from models.gripper_volume_reader import (GVARConfig, ROLE_NAMES, PROBE_INDICES_18, canonical_probes,
     project_probes, action_relative_geometry, GripperVolumeReader, ActionDepthAdapter, apply_depthwise_heads)
 
 torch.set_num_threads(1)
@@ -190,3 +190,78 @@ def test_shell_dry_runs_do_not_start_experiments(tmp_path):
         p=subprocess.run(['bash',str(ROOT/'scripts'/script)],env=env,capture_output=True,text=True)
         assert p.returncode==0,p.stderr
     assert not (tmp_path/'out').exists()
+
+
+@pytest.mark.parametrize("count",(18,36))
+def test_probe_count_geometry_and_role_distribution(count):
+    cfg=GVARConfig(variant="volume_rel",num_probes=count)
+    p,roles=canonical_probes(torch.tensor([.01,.04]),cfg)
+    assert p.shape==(2,count,3) and roles.shape==(count,)
+    assert torch.equal(torch.bincount(roles,minlength=6),
+                       torch.tensor([4,4,4,2,2,2] if count==18 else [6]*6))
+    torch.testing.assert_close(p[1]-p[0],p.new_tensor([.03,0,0]).expand(count,3))
+    if count==18:
+        full,full_roles=canonical_probes(torch.tensor([.01,.04]),replace(cfg,num_probes=36))
+        torch.testing.assert_close(p,full[:,list(PROBE_INDICES_18)],atol=0,rtol=0)
+        assert torch.equal(roles,full_roles[list(PROBE_INDICES_18)])
+        assert torch.unique(roles).numel()==6
+
+
+@pytest.mark.parametrize("count",(18,36))
+def test_probe_mode_forward_backward_and_debug(count):
+    reader,q,ctx=inputs("volume_rel")
+    reader.cfg=replace(reader.cfg,num_probes=count)
+    y=reader(q,ctx)
+    assert y.shape==q.shape and torch.isfinite(y).all()
+    assert reader.last_debug["D: GVAR probes per action"].item()==count
+    for name in ROLE_NAMES:
+        value=reader.last_debug[f"D: GVAR attention {name}"]
+        assert torch.isfinite(value).all() and (0<=value).all() and (value<=1).all()
+    y.square().mean().backward()
+    assert ctx["pregeom"].grad is not None and ctx["pregeom"].grad.abs().sum()>0
+    assert ctx["depth"].grad is None and ctx["centers"].grad is None
+
+
+@pytest.mark.parametrize("count",(18,36))
+def test_probe_mode_all_invalid_identity(count):
+    reader,q,ctx=inputs("volume_rel")
+    reader.cfg=replace(reader.cfg,num_probes=count)
+    ctx["centers"]=torch.full_like(ctx["centers"],float("nan"))
+    torch.testing.assert_close(reader(q,ctx),q)
+
+
+def test_probe_count_legacy_config_checkpoint_roundtrip():
+    from utils.gvar_runtime import validate_checkpoint
+    cfg36=GVARConfig(variant="volume_rel")
+    cfg18=replace(cfg36,num_probes=18)
+    assert cfg36.to_dict()=={k:v for k,v in cfg18.to_dict().items() if k!="num_probes"}
+    assert cfg18.to_dict()["num_probes"]==18
+    assert GVARConfig(**cfg36.to_dict()).num_probes==36
+    for cfg in (cfg36,cfg18):
+        ck={"gvar_contract_version":1,"gvar_config":cfg.to_dict(),
+            "detach_policy":{"E":True,"Q":True,"C":True}}
+        assert validate_checkpoint(ck,cfg).num_probes==cfg.num_probes
+        with pytest.raises(ValueError,match="configuration mismatch"):
+            validate_checkpoint(ck,replace(cfg,num_probes=18 if cfg.num_probes==36 else 36))
+    for n in (0,17,19,37,True):
+        with pytest.raises(ValueError,match="num_probes"):
+            GVARConfig(num_probes=n)
+
+
+def test_probe_flag_train_eval_dry_run(tmp_path):
+    import os
+    env=dict(os.environ,DATASET_ROOT="/data/graspnet",
+             GNTRANS_RGB_ROOT="/data/GN-Trans",
+             CKPT="/not/a/checkpoint",DRY_RUN="1",
+             NUM_PROBES="18",OUTPUT_ROOT=str(tmp_path/"out"))
+    for script in ("run_gvar_train.sh","run_gvar_eval.sh"):
+        p=subprocess.run(["bash",str(ROOT/"scripts"/script)],env=env,
+                         text=True,capture_output=True)
+        assert p.returncode==0,p.stderr
+        assert "--gvar_num_probes 18" in p.stdout
+    env["NUM_PROBES"]="17"
+    for script in ("run_gvar_train.sh","run_gvar_eval.sh"):
+        p=subprocess.run(["bash",str(ROOT/"scripts"/script)],env=env,
+                         text=True,capture_output=True)
+        assert p.returncode!=0
+
