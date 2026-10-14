@@ -144,6 +144,9 @@ def main():
     ckpath=Path(cfgs.checkpoint_path)
     ck=torch.load(ckpath,map_location='cpu',weights_only=False)
     conf=validate_checkpoint(ck)
+    if original.G.gvar_num_probes is not None and original.G.gvar_num_probes != conf.num_probes:
+        raise ValueError(f"P0 probe count {original.G.gvar_num_probes} differs from "
+                         f"frozen checkpoint count {conf.num_probes}")
     if cfgs.test_mode not in ('test_seen','test_similar','test_novel'):
         raise ValueError('unsupported split')
     if int(ck['completed_epoch'])!=19:
