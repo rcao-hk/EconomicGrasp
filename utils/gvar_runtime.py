@@ -22,6 +22,9 @@ def parse_gvar_args(inference=False):
     parser.add_argument("--gvar_variant", choices=(("auto",) + VARIANTS if inference else VARIANTS), default="auto" if inference else "volume")
     parser.add_argument("--gvar_reader_dim", type=int, default=64)
     parser.add_argument("--gvar_reader_heads", type=int, default=4)
+    parser.add_argument("--gvar_num_probes", type=int, choices=(18, 36),
+                        default=None if inference else 36,
+                        help="18 or 36 probes (inference defaults to checkpoint count)")
     parser.add_argument("--gvar_action_chunk", type=int, default=512)
     parser.add_argument("--gvar_activation_checkpoint", type=int, choices=(0, 1), default=1)
     parser.add_argument("--gvar_max_batches", type=int, default=0, help="Smoke limit; 0=all. Partial dumps must NOT be evaluated.")
@@ -43,7 +46,8 @@ def parse_gvar_args(inference=False):
 def config_from_args(args):
     return GVARConfig(variant=args.gvar_variant, reader_dim=args.gvar_reader_dim,
                       reader_heads=args.gvar_reader_heads, action_chunk=args.gvar_action_chunk,
-                      activation_checkpoint=bool(args.gvar_activation_checkpoint))
+                      activation_checkpoint=bool(args.gvar_activation_checkpoint),
+                      num_probes=args.gvar_num_probes)
 
 
 def atomic_json(path, payload):
