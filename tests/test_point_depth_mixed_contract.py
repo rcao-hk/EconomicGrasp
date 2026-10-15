@@ -45,7 +45,7 @@ def test_mixed_pairing_10pct_and_heldout_seen():
 
 def test_bad_domain_pairing_fails():
     a,b=FakeDataset(0,1),FakeDataset(0,1)
-    b.frameid[10]=23
+    b.frameid[10]=256  # unique, but removes the selected frame 10
     with pytest.raises(RuntimeError,match="frame IDs differ"):
         assert_paired_frames(a,b,scene_stride_indices(a,0.1),
                              scene_stride_indices(b,0.1),"train")
