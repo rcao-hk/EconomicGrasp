@@ -837,12 +837,18 @@ class economicgrasp_depth_baseline(nn.Module):
                  max_depth=2.0,
                  use_obs_depth=False,
                  vis_dir=None,
-                 vis_every=100):
+                 vis_every=100,
+                 pose_depth_mode="none"):
         super().__init__()
         self.is_training = is_training
         self.voxel_size = float(voxel_size)
         self.num_points = int(num_points)
         self.use_obs_depth = bool(use_obs_depth)
+        self.pose_depth_mode = str(pose_depth_mode)
+        if self.pose_depth_mode not in ("none", "global_film", "ray_gravity_film"):
+            raise ValueError(f"Unsupported pose_depth_mode: {self.pose_depth_mode}")
+        if self.use_obs_depth and self.pose_depth_mode != "none":
+            raise ValueError("Pose-aware RGB-only baseline cannot use observed-depth refinement.")
         self.min_depth = float(min_depth)
         self.max_depth = float(max_depth)
         self.encoder = 'vitb'
@@ -867,7 +873,8 @@ class economicgrasp_depth_baseline(nn.Module):
             stride=depth_stride,     # 2 -> 224x224 token debug
             min_depth=min_depth,
             max_depth=max_depth,
-            freeze_backbone=True
+            freeze_backbone=True,
+            pose_depth_mode=self.pose_depth_mode,
         )
 
         if self.use_obs_depth:
@@ -1286,7 +1293,22 @@ class economicgrasp_depth_baseline(nn.Module):
         # ------------------------------------------------------------
         # 1) RGB depth prediction
         # ------------------------------------------------------------
-        depth_net_pred, depth_tok, img_feat, depth_net_raw = self.depth_net(img, return_raw=True)
+        # Only camera pose and RGB enter the metric-depth predictor. In particular,
+        # gt_depth_m and sensor_depth_m are labels/preprocessing data, never inputs.
+        if self.pose_depth_mode == "global_film" and "camera_pose_vec" not in end_points:
+            raise KeyError("global_film baseline requires camera_pose_vec")
+        if self.pose_depth_mode == "ray_gravity_film" and "camera_gravity_vec" not in end_points:
+            raise KeyError("ray_gravity_film baseline requires camera_gravity_vec")
+        depth_net_pred, depth_tok, img_feat, depth_net_raw, pose_aux = self.depth_net(
+            img,
+            camera_pose_vec=end_points.get("camera_pose_vec"),
+            camera_gravity_vec=end_points.get("camera_gravity_vec"),
+            camera_K=K,
+            return_raw=True,
+            return_pose_aux=True,
+        )
+        # Preserve the same DPT FiLM diagnostics as the image-centric branch.
+        end_points.update(pose_aux)
 
         # Ensure shape: (B,1,448,448)
         depth_net_pred = self._as_b1hw(
@@ -1388,6 +1410,10 @@ class economicgrasp_depth_baseline(nn.Module):
         # cloud: (B,20000,3)
         cloud = depth_to_cloud_by_img_idxs(depth_map_pred.detach(), K, img_idxs)
         end_points["point_clouds"] = cloud
+        end_points["depth_map_used_for_geometry"] = (
+            "sensor_fused_depth" if self.use_obs_depth else "depth_net_pred"
+        )
+        end_points["pose_depth_mode"] = self.pose_depth_mode
 
         if self.vis_dir is not None:
             do_vis = (self._vis_iter % self.vis_every == 0)
