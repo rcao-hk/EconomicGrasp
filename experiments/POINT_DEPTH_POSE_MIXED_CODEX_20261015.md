@@ -20,6 +20,24 @@
 
 比较的科学边界：两个抓取 backbone/head 的标签监督、候选策略和计算不同。该实验是共享几何架构与训练数据约束下的 **pipeline-level comparison**，不是完全消除其他因素的严格 representation-only 因果消融。相同 DPT 结构也不保证独立训练后预测深度逐像素一致；补充 MAE 和误差图、检查模型权重与对应数据合同。
 
+### Optional stronger geometry-controlled comparison (separate experiment)
+
+The default above is the requested **fresh joint 10%+10% baseline**: it learns a DPT head with the same architecture/objective but does **not** guarantee the DPT outputs equal independently trained RayRoPE/GVAR. To isolate the downstream point-vs-image representation more directly, the trainer ALSO supports a **separate** optional `--shared_depth_checkpoint` (launcher env `SHARED_DEPTH_CKPT`). It strict-loads `depth_net.*` from a verified, global_film image-centric checkpoint and freezes DPT while training the original point grasp network. No shared-depth mode is enabled by default.
+
+Use this only after checking the source's pose mode, DPT architecture, decoder weights and actual depth-target/scene protocol. The loader records source SHA256; independent point and image models must receive identical RGB/K/pose and produce numerically matching predicted depth before calling them **shared geometry**. Report the shared-frozen experiment separately from fresh joint training; do not conflate it with an identical full training protocol.
+
+Example (optional, after the fresh joint baseline is already complete):
+
+~~~bash
+export SHARED_DEPTH_CKPT=/path/to/verified/rayrope_global_film_e19.tar
+GPUS=0,1,2 BATCH_SIZE=3 MAX_EPOCH=21 \
+OUTPUT_ROOT=/data/robotarm/result/grasp/rgbgrasp/log/point_depth_shared_u3_UNIQUE \
+bash scripts/run_point_depth_pose_mix_train.sh
+unset SHARED_DEPTH_CKPT
+~~~
+
+**Important:** Do not use a RayRoPE `ray_gravity_film` checkpoint here: this branch's controlled default is `global_film` only. The image-centric source and new point-centric model still have different supervised grasp heads and candidate sampling, even with strictly shared depth weights.
+
 ## B. Fixed data/training/test contract
 
 | Item | Value |
@@ -156,4 +174,4 @@ Write POINT_DEPTH_POSE_MIXED_RESULTS_ZH.md with source commit/actual server patc
 
 Conclude whether under closely matched predicted metric geometry and 10%+10% training, converting depth to a point cloud and running classic EconomicGrasp is competitive with image-centric action-conditioned representation. Describe supervision/backbone/point-sampling differences; **do not call this a representation-only isolation**.
 
-**Status at document creation: implementation committed to GitHub; no server CUDA, 21-epoch training or official AP has been executed from this chat.** All numerical AP results for this new branch remain pending.
+**Status at document creation: implementation committed to GitHub; no server CUDA, 21-epoch training or official AP has been executed from this chat.** The shared-depth mode is optional and untested on a real external checkpoint. All numerical AP results for this new branch remain pending.
