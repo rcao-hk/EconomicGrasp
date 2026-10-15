@@ -26,6 +26,8 @@ def _extract_mix_args():
     parser.add_argument("--mix_train_fraction", type=float, default=0.1)
     parser.add_argument("--mix_eval_fraction", type=float, default=0.1)
     parser.add_argument("--gntrans_fused_background", action="store_true")
+    parser.add_argument("--shared_depth_checkpoint", default="", type=str,
+                        help="Optional external CVA/U3 full checkpoint; load/freeze exactly its DPT depth_net")
     args, other = parser.parse_known_args()
     sys.argv = [sys.argv[0], *other]
     return args
@@ -138,6 +140,8 @@ def _dataset_and_manifest():
         gntrans_point_sampling="virtual_rendered_depth_workspace",
         labels_from="standard economic_grasp_label_300views",
         checkpoint_selection="e19 fixed, no Novel or GN-Trans validation selection",
+        shared_depth_checkpoint=str(MIX.shared_depth_checkpoint),
+        depth_training_mode="shared_frozen_depth" if MIX.shared_depth_checkpoint else "fresh_joint",
         original_train_count=len(it),
         gntrans_train_count=len(jt),
         train_count=len(train),
@@ -233,6 +237,36 @@ class PointDepthMixedTrainer:
             pose_depth_mode="global_film",
             vis_dir=None,
         ).to(self.device)
+        self.shared_depth = bool(MIX.shared_depth_checkpoint)
+        if self.shared_depth:
+            p = Path(MIX.shared_depth_checkpoint)
+            if not p.is_file():
+                raise FileNotFoundError(f"Shared depth checkpoint missing: {p}")
+            shared = torch.load(p, map_location="cpu", weights_only=False)
+            if not isinstance(shared, dict):
+                raise TypeError("Shared depth checkpoint must be a checkpoint dict")
+            if str(shared.get("pose_depth_mode", "global_film")) != "global_film":
+                raise RuntimeError("Shared depth source must use pose_depth_mode global_film")
+            state = shared.get("model_state_dict")
+            if not isinstance(state, dict):
+                raise KeyError("Shared depth checkpoint is missing model_state_dict")
+            depth_state = {
+                key[len("depth_net."):]: value
+                for key, value in state.items() if key.startswith("depth_net.")
+            }
+            if not depth_state:
+                raise RuntimeError("Cannot find depth_net.* keys in shared checkpoint")
+            model.depth_net.load_state_dict(depth_state, strict=True)
+            model.depth_net.requires_grad_(False)
+            model.depth_net.eval()
+            h = hashlib.sha256()
+            with p.open("rb") as f:
+                for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
+                    h.update(chunk)
+            self.manifest["shared_depth_checkpoint_sha256"] = h.hexdigest()
+            self.manifest["shared_depth_checkpoint_completed_epoch"] = shared.get("completed_epoch")
+            if self.main:
+                print(f"[SHARED-DEPTH] strict-loaded DPT from {p}; all DPT params frozen", flush=True)
         self.net = model
         if self.distributed:
             self.net = DDP(
@@ -246,22 +280,22 @@ class PointDepthMixedTrainer:
             p for p in model.parameters()
             if p.requires_grad and id(p) not in depth_ids
         ]
-        if not depth_params or not grasp_params:
-            raise RuntimeError("Both DPT decoder/FiLM and original 3D grasp network must train")
-        self.optimizer = optim.AdamW(
-            [
-                {"params": depth_params, "weight_decay":cfgs.depth_weight_decay},
-                {"params": grasp_params, "weight_decay":cfgs.weight_decay},
-            ],
-            lr=cfgs.learning_rate,
-        )
+        if not grasp_params or (not self.shared_depth and not depth_params):
+            raise RuntimeError("Expected trainable 3D grasp network (and DPT for fresh_joint)")
+        param_groups=[{"params":grasp_params,"weight_decay":cfgs.weight_decay}]
+        if depth_params:
+            param_groups.append({"params":depth_params,"weight_decay":cfgs.depth_weight_decay})
+        self.optimizer = optim.AdamW(param_groups,lr=cfgs.learning_rate)
         self.start_epoch = 0
         if cfgs.resume:
             state = torch.load(cfgs.checkpoint_path, map_location="cpu", weights_only=False)
             if state.get("architecture") != self.manifest["architecture"]:
                 raise RuntimeError("Cannot resume unrelated model")
-            if state.get("mixed_protocol", {}).get("original_train_sha256") != self.manifest["original_train_sha256"]:
+            prev=state.get("mixed_protocol", {})
+            if prev.get("original_train_sha256") != self.manifest["original_train_sha256"]:
                 raise RuntimeError("Mixed train indices do not match resume checkpoint")
+            if prev.get("shared_depth_checkpoint_sha256") != self.manifest.get("shared_depth_checkpoint_sha256"):
+                raise RuntimeError("Shared-depth source does not match resume checkpoint")
             model.load_state_dict(state["model_state_dict"], strict=True)
             self.optimizer.load_state_dict(state["optimizer_state_dict"])
             self.start_epoch = int(state["epoch"])
@@ -278,6 +312,10 @@ class PointDepthMixedTrainer:
 
     def one_epoch(self, epoch, training):
         self.net.train(training)
+        if self.shared_depth:
+            # Eval-mode DPT is required for exact shared-depth geometry;
+            # model.train() must not reactivate DPT dropout/stochastic depth.
+            self.unwrap_model().depth_net.eval()
         loader = self.train_loader if training else self.val_loader
         sampler = self.train_sampler if training else self.val_sampler
         if sampler is not None:
