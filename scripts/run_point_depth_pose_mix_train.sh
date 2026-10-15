@@ -22,9 +22,7 @@ for name in USE_FUSE_DEPTH GNTRANS_FUSED_BACKGROUND; do
 done
 IFS=',' read -r -a GPU_ARRAY <<< "$GPUS"
 if [[ ${#GPU_ARRAY[@]} -eq 0 ]]; then echo 'No GPUs specified' >&2; exit 2; fi
-if [[ -e "$OUTPUT_ROOT/point_depth_mixed_protocol.json" ||
-      -e "$OUTPUT_ROOT/checkpoint_latest.tar" ||
-      -e "$OUTPUT_ROOT/train.log" ]]; then
+if [[ -d "$OUTPUT_ROOT" && -n "$(ls -A "$OUTPUT_ROOT")" ]]; then
   echo "Refusing to overwrite a previous run in OUTPUT_ROOT=$OUTPUT_ROOT" >&2
   exit 1
 fi
