@@ -13,6 +13,7 @@ DEPTH_WEIGHT_DECAY="${DEPTH_WEIGHT_DECAY:-0}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0}"
 USE_FUSE_DEPTH="${USE_FUSE_DEPTH:-1}"
 GNTRANS_FUSED_BACKGROUND="${GNTRANS_FUSED_BACKGROUND:-0}"
+SHARED_DEPTH_CKPT="${SHARED_DEPTH_CKPT:-}"
 SEED="${SEED:-0}"
 for name in USE_FUSE_DEPTH GNTRANS_FUSED_BACKGROUND; do
   if [[ "${!name}" != "0" && "${!name}" != "1" ]]; then
@@ -32,6 +33,10 @@ export CUDA_VISIBLE_DEVICES="$GPUS"
 extra=()
 if [[ "$USE_FUSE_DEPTH" == 1 ]]; then extra+=(--use_fuse_depth); fi
 if [[ "$GNTRANS_FUSED_BACKGROUND" == 1 ]]; then extra+=(--gntrans_fused_background); fi
+if [[ -n "$SHARED_DEPTH_CKPT" ]]; then
+  if [[ ! -f "$SHARED_DEPTH_CKPT" ]]; then echo "Missing SHARED_DEPTH_CKPT=$SHARED_DEPTH_CKPT" >&2; exit 1; fi
+  extra+=(--shared_depth_checkpoint "$SHARED_DEPTH_CKPT")
+fi
 echo "[MIXED-POINT] GPUS=$GPUS batch_per_gpu=$BATCH_SIZE epochs=$MAX_EPOCH"
 echo "[MIXED-POINT] Original fused background=$USE_FUSE_DEPTH GN-Trans fused background=$GNTRANS_FUSED_BACKGROUND"
 (set -o pipefail; torchrun --standalone --nproc_per_node="${#GPU_ARRAY[@]}" \
@@ -58,4 +63,8 @@ echo "[MIXED-POINT] Original fused background=$USE_FUSE_DEPTH GN-Trans fused bac
   --pose_depth_mode global_film \
   --seed "$SEED" \
   "${extra[@]}" 2>&1 | tee "$OUTPUT_ROOT/train.log")
-echo "[MIXED-POINT] Finished; frozen test checkpoint $OUTPUT_ROOT/checkpoint_epoch_019.tar"
+if [[ "$MAX_EPOCH" -ge 20 ]]; then
+  echo "[MIXED-POINT] Finished; frozen test checkpoint $OUTPUT_ROOT/checkpoint_epoch_019.tar"
+else
+  echo "[MIXED-POINT] Smoke/short training finished; NO official e19 checkpoint expected"
+fi
