@@ -77,6 +77,10 @@ def _load_checkpoint_strict(model, path):
         raise ValueError("Checkpoint is missing the complete GraspNet training contract")
     if contract.get("head")!=HEAD_ARGS.point_head:
         raise ValueError("Mismatching head in embedded full100 protocol")
+    if contract.get("max_train_batches",0)!=0 or contract.get("max_val_batches",0)!=0:
+        raise ValueError("Smoke/partial-training checkpoints are not eligible for official AP")
+    if contract.get("pose_depth_mode")!="global_film":
+        raise ValueError("Unexpected depth conditioning protocol in checkpoint")
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     return contract
 
