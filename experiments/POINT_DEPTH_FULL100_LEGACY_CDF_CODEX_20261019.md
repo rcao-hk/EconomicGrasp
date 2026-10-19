@@ -52,10 +52,10 @@ CDF bins 0 表示六个摩擦阈值全失败，1..6 表示首次成功的0.2/0.4
 | Training scenes | GraspNet Original 0000..0099 |
 | Full training frames | 100 scenes ×256 = **25,600 每 epoch**；单一 Original 域 |
 | Val | Original test_seen scenes 0100..0129；每scene 0,10,..250＝**780 frames**；不选Novel checkpoint |
-| GPU/seed | 3×RTX3090 24GB，per rank BS3，global BS9，seed0（例，先检查空闲情况） |
+| GPU/seed | 目标为单节点3×RTX3090 24GB、per-rank BS3（global BS9）、seed0；允许经 smoke 验收按 **3→2→1 GPU** 降级，两个 head 必须同一最终配置 |
 | Steps/epochs | 21 epochs e0..e20，**e19 predeclared**为主评测，e20存档 |
 | Loss/optimizer | AdamW, LR1e−4 cosine, weight_decay0, depth_weight_decay0, grad clipping1.0 |
-| DDP samples | 25,600 nominal；3rank padding到25,602，记录真实消耗 |
+| DDP samples | 25,600 nominal；3 rank 时 DistributedSampler padding 到25,602；2 rank/1 rank 均为25,600。日志必须记录实际 world size、global batch 与 optimizer steps/epoch |
 | 10% test | Seen/Similar/Novel 每split 30scene×26frame=780 |
 | Optional full test | 每split30scene×256frame=7,680 |
 | Collision | Original sensor 0.01 threshold，0.01m voxel |
@@ -104,37 +104,91 @@ Single GPU与DDP smoke须验证：
 - loss finite、valid ratio非零或解释为何为空、CDF正例比例/width有效比例合理、预测深度mean/std无塌缩；多rank执行不卡死。
 - 检查 CDF 特殊单元样本能把唯一高utility动作解码为正确angle与1-4cm insertion及宽度单位。
 
-## 6. Step 2：两个模型 smoke → fresh 100% 正式训练
+## 6. Step 2：单卡→双卡→三卡验收、可回退的 fresh 100% 训练
+
+**执行准则：默认目标是3 GPU；只有 Legacy 与 CDF 两个 head 在相同 GPU 数、相同 per-rank batch、相同训练协议下都通过 forward、backward、optimizer、validation、checkpoint 的 smoke，才允许以该配置正式训练。多卡失败时按 3→2→1 降级，而不是无限调 NCCL。** 所有目录使用真实不存在的 UNIQUE 路径；以下 GPU 编号只作示例，先检查实际空闲卡。
+
+首先检查单卡、双卡，再执行三卡 smoke。短程 smoke 限制 batch，不是完整 epoch、不是正式 checkpoint，不能送入官方 AP。
 
 ~~~bash
 export DATASET_ROOT=/data/robotarm/dataset/graspnet
 
-# 不消耗完整epoch的短smoke；每个head单独输出
+# (A) 单卡：两种 head 顺序跑；torchrun nproc=1，不创建 DDP wrapper
 GPUS=0 HEADS=legacy,cdf MAX_EPOCH=1 BATCH_SIZE=2 \
-MAX_TRAIN_BATCHES=2 MAX_VAL_BATCHES=2 \
-OUTPUT_ROOT=/data/robotarm/result/grasp/rgbgrasp/log/point_full100_smoke_UNIQUE \
+MAX_TRAIN_BATCHES=2 MAX_VAL_BATCHES=2 NUM_WORKERS=0 EVAL_NUM_WORKERS=0 \
+OUTPUT_ROOT=/data/robotarm/result/grasp/rgbgrasp/log/point_full100_1gpu_smoke_UNIQUE \
 bash scripts/run_point_depth_pose_graspnet100_train.sh
 
-# 两GPU同步梯度和CPU标签DDP smoke
+# (B) 双卡：至少两次 backward/step 与 validation，排查 rank/ME/NCCL
+TORCH_DISTRIBUTED_DEBUG=DETAIL NCCL_DEBUG=INFO \
 GPUS=0,1 HEADS=legacy,cdf MAX_EPOCH=1 BATCH_SIZE=2 \
-MAX_TRAIN_BATCHES=2 MAX_VAL_BATCHES=2 \
-OUTPUT_ROOT=/data/robotarm/result/grasp/rgbgrasp/log/point_full100_ddp_smoke_UNIQUE \
+MAX_TRAIN_BATCHES=2 MAX_VAL_BATCHES=2 NUM_WORKERS=0 EVAL_NUM_WORKERS=0 \
+OUTPUT_ROOT=/data/robotarm/result/grasp/rgbgrasp/log/point_full100_2gpu_smoke_UNIQUE \
 bash scripts/run_point_depth_pose_graspnet100_train.sh
 
-# 完整训练：25,600帧/epoch，两组各21epochs；串行，不混训练权重
-GPUS=0,1,2 HEADS=legacy,cdf MAX_EPOCH=21 BATCH_SIZE=3 SEED=0 \
-MAX_TRAIN_BATCHES=0 MAX_VAL_BATCHES=0 \
-OUTPUT_ROOT=/data/robotarm/result/grasp/rgbgrasp/log/point_pose_full100_UNIQUE \
+# (C) 三卡：更长的 10-batch DDP smoke，同时使用目标 per-rank BS3 做显存验收
+TORCH_DISTRIBUTED_DEBUG=DETAIL NCCL_DEBUG=INFO \
+GPUS=0,1,2 HEADS=legacy,cdf MAX_EPOCH=1 BATCH_SIZE=3 \
+MAX_TRAIN_BATCHES=10 MAX_VAL_BATCHES=2 NUM_WORKERS=0 EVAL_NUM_WORKERS=0 \
+OUTPUT_ROOT=/data/robotarm/result/grasp/rgbgrasp/log/point_full100_3gpu_smoke_UNIQUE \
 bash scripts/run_point_depth_pose_graspnet100_train.sh
 ~~~
 
-真实full100数据量远大于之前的mixed5200/epoch，不要未经实际smoke吞吐估算确定时间。保持双方相同步数、初始化规则和数据抽样合同；记录checkpoint SHA、source SHA、显存峰值、实际训练时间、Val depth MAE、grasp valid ratio 和不稳定现象。必须检查 e19 checkpoint strict load。
+**smoke 验收清单：**
+- 每个模式、每个 rank 使用其独立的 local CUDA device；MinkowskiEngine sparse coordinates/features、backbone outputs、loss 均在正确设备，不发生跨 GPU 混用。
+- 每 rank 完成所请求的 train steps（包括 backward、optimizer.step）、Seen validation、checkpoint 保存，loss 与梯度有限且两种 head 具有合理的有效标签；没有 collective mismatch、NCCL timeout、CUDA illegal memory access 或 ME coordinate-manager 错误。
+- CDF 的变长 cache 保持 CPU resident，匹配时只向对应 GPU 搬运选中行；DDP(device_ids=None) 的语义不可为消除报错而未经论证随意修改。
+- 下一轮正式训练的 **实际 GPU 数和 BATCH_SIZE** 都必须在 smoke 中测试过；单/双卡 smoke 的 BS2 通过并不保证正式 BS3 不会 OOM。如果拟以双卡或单卡 BS3 正式训练，先在相同卡数、BS3 下补跑 5–10 batch smoke（使用独立输出根目录）。
+
+### DDP 失败后的 fallback 决策（强制，适用于两个 head）
+
+| 情况 | 后续决策 |
+|---|---|
+| 两个 head 均通过 3 GPU、目标 batch smoke | 使用同一 3 GPU 设置正式训练两组 |
+| 3 GPU 任一 head 失败，但两组均通过 2 GPU | 在 2 GPU 上用**相同** batch/seed/21 epochs 训练两组；若目标 batch 尚未验收，先补双卡相应 batch smoke |
+| 2 GPU 也有 DDP 失败，而两组单卡均正常 | 回退 **1 GPU**；两个 head 使用完全相同的 batch、seed、21 epochs 和数据集合 |
+| 只是一种 head OOM 或报错 | 先分类修复或统一降低 per-rank batch，并重跑两种 head 的 smoke；不要一组3卡、一组单卡直接比较 |
+| 任一 head 单 GPU 也无法完成 | 停止该实验；修正数据、CUDA extension 或模型问题，不得以一组不完整结果替代正式对照 |
+
+排错按 **单卡本体错误 → local device / ME kernel → GPU OOM → DDP/NCCL collective** 顺序记录失败 rank、首个 Python/CUDA 异常、nvidia-smi 与完整日志，明确区分 root cause 与后续 NCCL timeout。允许有限度修复并回归，**不应无限等待超时、kill 非本作业进程、清空其他实验的显存或重建正在使用的环境**。
+
+**公平性要求：两个 head 必须最终在共同最高可用配置中完成 fresh training。** 如果 Legacy 已在 3 卡完成而 CDF 只能 2 或 1 卡，不可直接把二者当作训练协议一致的主对照；应当在共同回退配置下重新运行 Legacy，保留旧结果做辅助分析。失败/中断后重新选择全新的训练输出根目录，不覆盖或混用旧 checkpoints；两组均固定训练21 epochs并取 e19。
+
+**优化步数变化必须如实披露：** 本训练器目前不支持 gradient accumulation，改变 GPU 数、per-rank batch 会改变 effective global batch 和每 epoch 的 optimizer.step 数。例如相同 per-rank BS3 时，3卡 global9、2卡 global6、1卡 global3。保持两个 head **采用相同** GPU数及 BS 是内部公平比较的最低要求，但不能把回退运行声称为与预设3卡/global9完全等价的优化协议；尤其不可静默更改学习率、loss weights 或 epoch 数。若以后确实需要严格保持 global batch，应单独实现、测试梯度累积，而非在此处假定已支持。
+
+### 正式训练命令（三选一；仅运行已完成对应 smoke 验收的配置）
+
+~~~bash
+# 首选：两组各完整25,600帧/epoch，共21 epochs，顺序执行
+GPUS=0,1,2 HEADS=legacy,cdf MAX_EPOCH=21 BATCH_SIZE=3 SEED=0 \
+MAX_TRAIN_BATCHES=0 MAX_VAL_BATCHES=0 \
+OUTPUT_ROOT=/data/robotarm/result/grasp/rgbgrasp/log/point_pose_full100_3gpu_UNIQUE \
+bash scripts/run_point_depth_pose_graspnet100_train.sh
+
+# 三卡失败时：优先使用两卡共同通过的配置
+GPUS=0,1 HEADS=legacy,cdf MAX_EPOCH=21 BATCH_SIZE=3 SEED=0 \
+MAX_TRAIN_BATCHES=0 MAX_VAL_BATCHES=0 \
+OUTPUT_ROOT=/data/robotarm/result/grasp/rgbgrasp/log/point_pose_full100_2gpu_UNIQUE \
+bash scripts/run_point_depth_pose_graspnet100_train.sh
+
+# 两卡也失败时：单卡 fallback（如 BS3 OOM，则两者均降至已验收的 BS2/BS1）
+GPUS=0 HEADS=legacy,cdf MAX_EPOCH=21 BATCH_SIZE=3 SEED=0 \
+MAX_TRAIN_BATCHES=0 MAX_VAL_BATCHES=0 \
+OUTPUT_ROOT=/data/robotarm/result/grasp/rgbgrasp/log/point_pose_full100_1gpu_UNIQUE \
+bash scripts/run_point_depth_pose_graspnet100_train.sh
+~~~
+
+**注意：上面 3 段命令仅列备选配置，不应全部运行。** 单卡/双卡的 BS3 须先额外 smoke 验收；如果使用 BS2 或 BS1，需在正式命令中对两个 head 一起修改 BATCH_SIZE，并重新检查实际每 epoch optimizer steps。
+
+真实 full100 数据量远大于之前 mixed5200/epoch，必须根据通过的 smoke 测量吞吐、估算训练时间。结果报告记录：3/2/1 GPU 各方案是否通过、失败错误和修复情况、最终选择的 GPU 数/卡号、per-rank/global batch、每 epoch 样本填充/steps、学习率策略、实际 source SHA、checkpoint SHA256、peak GPU memory、wall time、Seen val depth MAE、grasp valid ratio。严格核验 e19 checkpoint；不得基于 test Novel AP 调整配置。
+
 
 ## 7. Step 3：配对推理＋官方AP
 
 ~~~bash
 export DATASET_ROOT=/data/robotarm/dataset/graspnet
-export TRAIN_ROOT=/data/robotarm/result/grasp/rgbgrasp/log/point_pose_full100_UNIQUE
+# 使用上一步真正完成并验收的 3GPU/2GPU/1GPU 正式输出根目录
+export TRAIN_ROOT=/data/robotarm/result/grasp/rgbgrasp/log/point_pose_full100_CHOSEN_UNIQUE
 
 # inference smoke，不能运行官方AP
 GPUS=0 HEADS=legacy,cdf SPLITS=test_seen TEST_FRACTION=0.1 \
@@ -168,7 +222,7 @@ python tools/summarize_point_depth_pose_ap.py \
 
 生成 POINT_DEPTH_FULL100_LEGACY_CDF_RESULTS_ZH.md，必须包含：
 - 主/父分支和实际训练源码 SHA，数据/label-cache和checkpoint SHA，pass/fail日志；
-- 100% Original train数量、Original Seen Val数量和e19声明；
+- 100% Original train数量、Original Seen Val数量和e19声明；单→双→三卡 smoke 通过情况、DDP/NCCL/ME故障及 fallback 原因，最终 GPU 数、batch/global batch、optimizer steps/epoch 和两组 head 的协议一致性；
 - 两版本 Seen/Similar/Novel/Mean AP、AP0.4/0.8、prefix Top1/5/10/20/50、分scene bootstrap CI；
 - DPT foreground MAE/valid像素/variance、grasp matched ratio、CDF positive/width valid；
 - 模型params、GPU peak、training walltime、inference latency；
