@@ -20,8 +20,8 @@ def read_results(root: Path):
     for split in SPLITS:
         path=root/split/f"ap_{split}_realsense.npy"
         arr=np.load(path, allow_pickle=False)
-        if arr.shape!=(30,26,50,6) or not np.isfinite(arr).all():
-            raise ValueError(f"{path}: requires finite [30,26,50,6], got {arr.shape}")
+        if arr.ndim!=4 or arr.shape[0]!=30 or arr.shape[1] not in (26,256) or arr.shape[2:]!=(50,6) or not np.isfinite(arr).all():
+            raise ValueError(f"{path}: requires finite [30,26|256,50,6], got {arr.shape}")
         arrays[split]=arr.astype(np.float64,copy=False)
     return arrays
 
@@ -45,6 +45,8 @@ def paired_scene_bootstrap(arrays,ref_arrays,replicates=50000,seed=20261009):
     per_split={}
     for split in SPLITS:
         a=arrays[split][...,:5].mean(axis=(1,2,3))
+        if arrays[split].shape!=ref_arrays[split].shape:
+            raise ValueError(f"Paired AP requires matching frames per scene: {split}")
         b=ref_arrays[split][...,:5].mean(axis=(1,2,3))
         diff=100*(a-b)
         indices=rng.integers(0,30,size=(replicates,30))
@@ -78,10 +80,13 @@ def main():
         p.error("--bootstrap must be >=100")
     ours=read_results(args.root)
     report={
-        "dataset":"GraspNet-1Billion Original RealSense 10% official AP arrays",
+        "dataset":"GraspNet-1Billion Original RealSense official AP arrays",
+        "frames_per_scene":int(next(iter(ours.values())).shape[1]),
         "splits":{split:metrics(arr) for split,arr in ours.items()},
         "mean_ap_pct":float(np.mean([metrics(arr)["mean_ap_pct_mu_0p2_to_1p0"] for arr in ours.values()])),
     }
+    if len({arr.shape for arr in ours.values()})!=1:
+        raise ValueError("Three official AP arrays use different evaluation fractions")
     if args.reference_root:
         reference=read_results(args.reference_root)
         report["reference_root"]=str(args.reference_root.resolve())
