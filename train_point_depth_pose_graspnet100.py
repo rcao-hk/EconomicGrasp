@@ -310,6 +310,9 @@ class Trainer:
             if limit and step>=limit:
                 break
             batch=move_to_gpu(batch,self.device,FULL.point_head)
+            # Reuse CVA-CDF's costly diagnostics sparsely, never as supervision.
+            if FULL.point_head=="cdf":
+                batch["cva_compute_diagnostics"]=(step%100==0)
             if training:
                 output=self.net(batch)
                 loss,output=self.loss_fn(output)
@@ -335,6 +338,15 @@ class Trainer:
                 output["C: Valid Points"].detach().double(),
             ))
             totals[:4]+=vals
+            if self.main and FULL.point_head=="cdf" and step%100==0:
+                print("[POINT100-CDF-DIAG] "+json.dumps({
+                    k:float(output[k].detach().cpu()) for k in (
+                        "D: CDF Positive Ratio",
+                        "D: Width Depth valid ratio",
+                        "D: CDF Selection Regret",
+                        "D: CDF Monotonic Violation",
+                    ) if k in output
+                },sort_keys=True),flush=True)
             if self.main and training and (step+1)%25==0:
                 print(f"[POINT100] {FULL.point_head} e{epoch} step {step+1}/{len(loader)} "
                       f"loss={loss.item():.5f} grasp_valid={float(vals[-1]):.1f}",
