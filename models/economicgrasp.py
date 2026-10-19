@@ -5,7 +5,9 @@ import MinkowskiEngine as ME
 
 from models.backbone import TDUnet
 from models.modules_economicgrasp import GraspableNet, ViewNet, Cylinder_Grouping_Global_Interaction, Grasp_Head_Local_Interaction
-from utils.label_generation import process_grasp_labels, batch_viewpoint_params_to_matrix
+from utils.label_generation import (process_grasp_labels, process_grasp_labels_cdf_width,
+                                    batch_viewpoint_params_to_matrix)
+from models.point_grasp_cdf_head import PointGraspCDFHead
 from libs.pointnet2.pointnet2_utils import furthest_point_sample, gather_operation
 from utils.arguments import cfgs
 import os
@@ -13,7 +15,8 @@ import json
 
 
 class economicgrasp(nn.Module):
-    def __init__(self, cylinder_radius=0.05, seed_feat_dim=512, is_training=True, voxel_size=0.005):
+    def __init__(self, cylinder_radius=0.05, seed_feat_dim=512, is_training=True,
+                 voxel_size=0.005, use_cdf=False):
         super().__init__()
         self.is_training = is_training
         self.seed_feature_dim = seed_feat_dim
@@ -22,6 +25,7 @@ class economicgrasp(nn.Module):
         self.M_points = cfgs.m_point
         self.num_view = cfgs.num_view
         self.voxel_size = voxel_size
+        self.use_cdf = bool(use_cdf)
 
         # Backbone
         self.backbone = TDUnet(in_channels=3, out_channels=self.seed_feature_dim, D=3)
@@ -37,7 +41,15 @@ class economicgrasp(nn.Module):
                                                             seed_feature_dim=self.seed_feature_dim)
 
         # Depth and Score searching
-        self.grasp_head = Grasp_Head_Local_Interaction(num_angle=self.num_angle, num_depth=self.num_depth)
+        if self.use_cdf:
+            self.grasp_head = PointGraspCDFHead(
+                in_channels=256, num_angle=self.num_angle,
+                num_depth=self.num_depth, num_thresholds=6,
+            )
+        else:
+            self.grasp_head = Grasp_Head_Local_Interaction(
+                num_angle=self.num_angle, num_depth=self.num_depth,
+            )
 
     def forward(self, end_points):
         seed_xyz = end_points['point_clouds']  # use all sampled point cloud, [B, point_num (15000)， 3]
@@ -253,7 +265,10 @@ class economicgrasp(nn.Module):
             # map the scene sampled points to the labeled object points
             # (note that the labeled object points and the sampled points
             # may not 100% match due to the sampling and argumentation)
-            grasp_top_views_rot, end_points = process_grasp_labels(end_points)
+            if self.use_cdf:
+                grasp_top_views_rot, end_points = process_grasp_labels_cdf_width(end_points)
+            else:
+                grasp_top_views_rot, end_points = process_grasp_labels(end_points)
         else:
             grasp_top_views_rot = end_points['grasp_top_view_rot']
 
