@@ -838,13 +838,15 @@ class economicgrasp_depth_baseline(nn.Module):
                  use_obs_depth=False,
                  vis_dir=None,
                  vis_every=100,
-                 pose_depth_mode="none"):
+                 pose_depth_mode="none",
+                 point_use_cdf=False):
         super().__init__()
         self.is_training = is_training
         self.voxel_size = float(voxel_size)
         self.num_points = int(num_points)
         self.use_obs_depth = bool(use_obs_depth)
         self.pose_depth_mode = str(pose_depth_mode)
+        self.point_use_cdf = bool(point_use_cdf)
         if self.pose_depth_mode not in ("none", "global_film", "ray_gravity_film"):
             raise ValueError(f"Unsupported pose_depth_mode: {self.pose_depth_mode}")
         if self.use_obs_depth and self.pose_depth_mode != "none":
@@ -899,7 +901,8 @@ class economicgrasp_depth_baseline(nn.Module):
             cylinder_radius=cylinder_radius,
             seed_feat_dim=seed_feat_dim,
             is_training=is_training,
-            voxel_size=voxel_size
+            voxel_size=voxel_size,
+            use_cdf=self.point_use_cdf,
         )
 
         self.vis_dir = vis_dir
