@@ -15,6 +15,8 @@ USE_FUSE_DEPTH="${USE_FUSE_DEPTH:-1}"
 GNTRANS_FUSED_BACKGROUND="${GNTRANS_FUSED_BACKGROUND:-0}"
 SHARED_DEPTH_CKPT="${SHARED_DEPTH_CKPT:-}"
 SEED="${SEED:-0}"
+TRAIN_FRACTION="${TRAIN_FRACTION:-0.1}"
+EVAL_FRACTION="${EVAL_FRACTION:-0.1}"
 for name in USE_FUSE_DEPTH GNTRANS_FUSED_BACKGROUND; do
   if [[ "${!name}" != "0" && "${!name}" != "1" ]]; then
     echo "${name} must be 0 or 1" >&2; exit 2
@@ -35,7 +37,7 @@ if [[ -n "$SHARED_DEPTH_CKPT" ]]; then
   if [[ ! -f "$SHARED_DEPTH_CKPT" ]]; then echo "Missing SHARED_DEPTH_CKPT=$SHARED_DEPTH_CKPT" >&2; exit 1; fi
   extra+=(--shared_depth_checkpoint "$SHARED_DEPTH_CKPT")
 fi
-echo "[MIXED-POINT] GPUS=$GPUS batch_per_gpu=$BATCH_SIZE epochs=$MAX_EPOCH"
+echo "[MIXED-POINT] GPUS=$GPUS batch_per_gpu=$BATCH_SIZE epochs=$MAX_EPOCH train_fraction=$TRAIN_FRACTION val_fraction=$EVAL_FRACTION"
 echo "[MIXED-POINT] Original fused background=$USE_FUSE_DEPTH GN-Trans fused background=$GNTRANS_FUSED_BACKGROUND"
 (set -o pipefail; torchrun --standalone --nproc_per_node="${#GPU_ARRAY[@]}" \
   train_point_depth_pose_mixed_ddp.py \
@@ -52,8 +54,8 @@ echo "[MIXED-POINT] Original fused background=$USE_FUSE_DEPTH GN-Trans fused bac
   --num_workers "$NUM_WORKERS" \
   --eval_num_workers "$EVAL_NUM_WORKERS" \
   --ckpt_save_interval 5 \
-  --mix_train_fraction 0.1 \
-  --mix_eval_fraction 0.1 \
+  --mix_train_fraction "$TRAIN_FRACTION" \
+  --mix_eval_fraction "$EVAL_FRACTION" \
   --min_depth 0.2 \
   --max_depth 1.0 \
   --depth_prob_loss_weight 10 \
