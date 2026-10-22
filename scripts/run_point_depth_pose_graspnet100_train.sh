@@ -5,6 +5,10 @@ set -euo pipefail
 : "${OUTPUT_ROOT:?Set a NEW experiment output root}"
 GPUS="${GPUS:-0,1,2}"
 HEADS="${HEADS:-legacy,cdf}"
+TRAIN_DOMAIN="${TRAIN_DOMAIN:-original}"
+MIX_TRAIN_FRACTION="${MIX_TRAIN_FRACTION:-0.5}"
+GNTRANS_RGB_ROOT="${GNTRANS_RGB_ROOT:-}"
+GNTRANS_FUSED_BACKGROUND="${GNTRANS_FUSED_BACKGROUND:-0}"
 MAX_EPOCH="${MAX_EPOCH:-21}"
 BATCH_SIZE="${BATCH_SIZE:-3}"
 NUM_WORKERS="${NUM_WORKERS:-3}"
@@ -20,8 +24,26 @@ if ((${#GPU_ARRAY[@]}<1)); then echo "No GPUs given" >&2; exit 2; fi
 if [[ "$MAX_TRAIN_BATCHES" != 0 || "$MAX_VAL_BATCHES" != 0 ]]; then
   echo "[SMOKE] Limited batches: results must NOT be used as official checkpoints"
 fi
+case "$TRAIN_DOMAIN" in
+  original) ;;
+  mixed)
+    : "${GNTRANS_RGB_ROOT:?Set GNTRANS_RGB_ROOT for TRAIN_DOMAIN=mixed}"
+    [[ -d "$GNTRANS_RGB_ROOT" ]] || { echo "Missing GN-Trans RGB root: $GNTRANS_RGB_ROOT" >&2; exit 2; }
+    ;;
+  *) echo "TRAIN_DOMAIN must be original or mixed, got: $TRAIN_DOMAIN" >&2; exit 2 ;;
+esac
+if [[ "$GNTRANS_FUSED_BACKGROUND" != 0 && "$GNTRANS_FUSED_BACKGROUND" != 1 ]]; then
+  echo "GNTRANS_FUSED_BACKGROUND must be 0 or 1" >&2; exit 2
+fi
 export CUDA_VISIBLE_DEVICES="$GPUS"
-extra=()
+extra=(--train_domain "$TRAIN_DOMAIN")
+if [[ "$TRAIN_DOMAIN" == mixed ]]; then
+  extra+=(--gntrans_rgb_root "$GNTRANS_RGB_ROOT"
+          --mix_train_fraction "$MIX_TRAIN_FRACTION")
+  if [[ "$GNTRANS_FUSED_BACKGROUND" == 1 ]]; then
+    extra+=(--gntrans_fused_background)
+  fi
+fi
 if [[ -n "$SHARED_DEPTH_CKPT" ]]; then
   [[ -f "$SHARED_DEPTH_CKPT" ]] || { echo "Missing shared depth checkpoint" >&2; exit 2; }
   extra+=(--shared_depth_checkpoint "$SHARED_DEPTH_CKPT")
@@ -36,7 +58,7 @@ done
 for head in "${HEAD_ARRAY[@]}"; do
   run="$OUTPUT_ROOT/$head"
   mkdir -p "$run"
-  echo "[POINT100] start head=$head GPUS=$GPUS batch_per_gpu=$BATCH_SIZE epochs=$MAX_EPOCH"
+  echo "[POINT-DEPTH] domain=$TRAIN_DOMAIN head=$head GPUS=$GPUS batch_per_gpu=$BATCH_SIZE epochs=$MAX_EPOCH fraction=$MIX_TRAIN_FRACTION"
   (set -o pipefail; torchrun --standalone --nproc_per_node="${#GPU_ARRAY[@]}" \
     train_point_depth_pose_graspnet100.py \
     --point_head "$head" \
