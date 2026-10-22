@@ -67,42 +67,16 @@ python -m pytest -q tests/test_point_depth_training_protocol.py tests/test_point
 
 人工审计：两个域相同100scene ×128 frames，Original与GN-Trans RGB、virtual_graspness、virtual depth、rendered/TSDF targets及标准/扩展grasp cache完整；CDF labels有效且object payload只由adapter加载，width mm→m不重复换算。报告每个域foreground depth target、sample count和hash。
 
-## 4. Step 1：1→2→3 GPU smoke 与fallback
+## 4. Step 1：直接启动三卡正式训练（不做分阶段 GPU smoke）
 
-**先分别对两个域取真实batch验证forward/backward和监督标签。** ConcatDataset shuffle后仅训练4个batch不能保证两个域都进入这4个batch，因此data-only预检必须按域直接抽样；必要时补手动构造各域一个batch做梯度smoke。
+**本轮不进行单卡→双卡→三卡的 smoke 阶梯，也不需要先运行有限 batch 的 GPU smoke。** Step 0 的 Python 语法/CPU 单测、两域配对数量与标签缓存检查仍然保留，确认数据路径、GPU 空闲与独立输出目录后，直接以正式3卡协议启动 Legacy 和 Point-CDF 两组训练。
+
+默认训练协议：RS50%（12,800帧）＋GN-Trans50%（12,800帧）、每epoch名义25,600帧、Original Seen 780帧 validation；3 GPUs × BS3，AdamW/cosine、21 epochs，固定 e19 评测。两个 head **顺序运行**且各自独立训练，不能共用或覆盖 checkpoint。
 
 ~~~bash
 export DATASET_ROOT=/data/robotarm/dataset/graspnet
 export GNTRANS_RGB_ROOT=/data/robotarm/dataset/GN-Trans
 
-TRAIN_DOMAIN=mixed MIX_TRAIN_FRACTION=0.5 GNTRANS_FUSED_BACKGROUND=0 \
-GPUS=0 HEADS=legacy,cdf MAX_EPOCH=1 BATCH_SIZE=2 NUM_WORKERS=0 EVAL_NUM_WORKERS=0 \
-MAX_TRAIN_BATCHES=4 MAX_VAL_BATCHES=2 \
-OUTPUT_ROOT=/data/robotarm/result/grasp/rgbgrasp/log/point_mixed50_1gpu_smoke_UNIQUE \
-bash scripts/run_point_depth_pose_graspnet100_train.sh
-
-TORCH_DISTRIBUTED_DEBUG=DETAIL NCCL_DEBUG=INFO \
-TRAIN_DOMAIN=mixed MIX_TRAIN_FRACTION=0.5 GNTRANS_FUSED_BACKGROUND=0 \
-GPUS=0,1 HEADS=legacy,cdf MAX_EPOCH=1 BATCH_SIZE=2 NUM_WORKERS=0 EVAL_NUM_WORKERS=0 \
-MAX_TRAIN_BATCHES=4 MAX_VAL_BATCHES=2 \
-OUTPUT_ROOT=/data/robotarm/result/grasp/rgbgrasp/log/point_mixed50_2gpu_smoke_UNIQUE \
-bash scripts/run_point_depth_pose_graspnet100_train.sh
-
-TORCH_DISTRIBUTED_DEBUG=DETAIL NCCL_DEBUG=INFO \
-TRAIN_DOMAIN=mixed MIX_TRAIN_FRACTION=0.5 GNTRANS_FUSED_BACKGROUND=0 \
-GPUS=0,1,2 HEADS=legacy,cdf MAX_EPOCH=1 BATCH_SIZE=3 NUM_WORKERS=0 EVAL_NUM_WORKERS=0 \
-MAX_TRAIN_BATCHES=10 MAX_VAL_BATCHES=2 \
-OUTPUT_ROOT=/data/robotarm/result/grasp/rgbgrasp/log/point_mixed50_3gpu_smoke_UNIQUE \
-bash scripts/run_point_depth_pose_graspnet100_train.sh
-~~~
-
-必须检查各rank的CUDA/ME设备、有限loss、grasp与FiLM gradients、CPU CDF labels、DDP optimizer和validation、保存checkpoint、rank同步。若3GPU失败则在两个head均通过的2GPU配置运行；2GPU失败回退1GPU。减小batch时必须两个head一致、重新smoke并报告global batch/steps变化。若单GPU也失败则停止正式训练，不伪造结果。
-
-## 5. Step 2：正式Mixed50训练与10% Original官方AP
-
-仅在smoke验收后执行，GPU IDs及输出路径必须按实际空闲资源改成未使用目录。两组head顺序运行，各训练21 epochs，固定e19作为评价checkpoint（e20归档）。
-
-~~~bash
 TRAIN_DOMAIN=mixed MIX_TRAIN_FRACTION=0.5 GNTRANS_FUSED_BACKGROUND=0 \
 GPUS=0,1,2 HEADS=legacy,cdf MAX_EPOCH=21 BATCH_SIZE=3 SEED=0 \
 MAX_TRAIN_BATCHES=0 MAX_VAL_BATCHES=0 \
@@ -110,18 +84,23 @@ OUTPUT_ROOT=/data/robotarm/result/grasp/rgbgrasp/log/point_pose_rs50_gntrans50_U
 bash scripts/run_point_depth_pose_graspnet100_train.sh
 ~~~
 
-正式预测/评估仅Original RealSense：test_seen、test_similar、test_novel每个30scene×26frame=780，固定同样样本选择与sensor collision，CPU evaluator串行。两版本各自e19 checkpoint且训练manifest必须标train_domain=mixed。
+**不另做 smoke，但正式训练的早期日志必须正常：** 两个 head 的首批及后续训练 loss finite、DPT/FiLM 与 grasp loss 的输出合理、CDF 有效标签与 width 单位无异常、各 rank 没有 device mismatch、MinkowskiEngine 异常或 NCCL collective mismatch，checkpoint/validation 按既有脚本记录。这是正式训练期间的常规错误监测，**不作为额外预训练阶段或人为中断条件**。
+
+**仅在实际出现故障时 fallback：**
+
+- 若3卡 DDP/MinkowskiEngine/NCCL 运行失败，保留日志和已有输出并排查首个 root-cause 异常；确认环境后可尝试2卡训练；若仍失败再改1卡。**不要求每一种卡数事先跑 smoke。**
+- 若需要降低 GPU 数或 per-rank batch，两个 head 的最终正式训练必须采用**同一个** GPU 数、batch、seed、数据与epoch合同。如果 Legacy 在3卡完成、CDF 只能2卡，则应在共同的2卡配置下重新训练 Legacy；不能将两个不同全局batch的结果作为严格匹配的主对照。
+- 当前没有 gradient accumulation，改变3→2→1 GPU 会改变 global batch（BS3时为9→6→3）与 optimizer steps/epoch；记录最终训练设置，不得声称与默认3卡训练的优化过程等价。
+- 单卡仍存在基础模型/数据错误时停止正式实验并明确标注 BLOCKED；不得以不完整训练的checkpoint作官方AP。失败或回退应选择新的输出根目录，不 reset、覆盖或清理原结果。
+
+## 5. Step 2：正式10% Original RealSense inference＋官方评测
+
+两组21 epochs正式训练完成后，使用各自固定 e19 checkpoint。**本轮不执行单独的两批 inference smoke**，直接在全新输出目录运行10% Original RealSense Seen/Similar/Novel 官方推断与AP；已有脚本会核查 checkpoint 的 head/domain/e19，以及每split完整780帧后才启动 evaluator。
 
 ~~~bash
+export DATASET_ROOT=/data/robotarm/dataset/graspnet
 export TRAIN_ROOT=/data/robotarm/result/grasp/rgbgrasp/log/point_pose_rs50_gntrans50_UNIQUE
 
-# smoke，不运行AP
-EXPECTED_TRAIN_DOMAIN=mixed GPUS=0 HEADS=legacy,cdf SPLITS=test_seen \
-TEST_FRACTION=0.1 MAX_BATCHES=2 EVAL=0 \
-OUTPUT_ROOT=/data/robotarm/result/grasp/rgbgrasp/eval/point_mixed50_smoke_UNIQUE \
-bash scripts/run_point_depth_pose_graspnet100_eval.sh
-
-# 正式10%测试及官方AP
 EXPECTED_TRAIN_DOMAIN=mixed GPUS=0,1,2 HEADS=legacy,cdf \
 TEST_FRACTION=0.1 SPLITS=test_seen,test_similar,test_novel \
 BATCH_SIZE=3 NUM_WORKERS=4 EVAL_NUM_WORKERS=16 \
@@ -135,10 +114,9 @@ python tools/summarize_point_depth_pose_ap.py \
  --output /data/robotarm/result/grasp/rgbgrasp/eval/point_mixed50_ap10_UNIQUE/comparison.json
 ~~~
 
-输出官方finite shape [30,26,50,6]、Seen/Similar/Novel/Mean AP、AP0.4/0.8、Top1/5/10/20/50、scene-paired CI。报告两种head监督、GN-Trans point sampling与Original不完全相同、checkpoint depth质量可能不同等限制。不可拿训练数据不同的旧100%Original/GVAR模型计算直接单因子差值。
-
+结果要求：Official finite AP tensor [30,26,50,6]，Seen/Similar/Novel/Mean AP、AP0.4/AP0.8、Top1/5/10/20/50与scene-paired CI。评测只对Original RealSense，同样帧选择、同样sensor-depth辅助workspace/collision与NMS。若训练中曾回退GPU配置，必须在报告中披露；不可拿训练域不同的旧100% Original或GVAR结果做单因子因果对比。
 ## 6. 交付验收
 
-创建独立中文结果报告 POINT_DEPTH_RS50_GNTRANS50_LEGACY_CDF_RESULTS_ZH.md：每域样本+SHA、训练/val loss与depth MAE、两head checkpoint SHA、GPU smoke/fallback、模型推理耗时、full official AP、scene CIs和失败场景。仅使用真实结果；未完成部分标PENDING。
+创建独立中文结果报告 POINT_DEPTH_RS50_GNTRANS50_LEGACY_CDF_RESULTS_ZH.md：每域样本+SHA、训练/val loss与depth MAE、两head checkpoint SHA、实际 GPU 数与global batch、实际故障/fallback（如有）、模型推理耗时、10% RealSense官方AP、scene CIs和失败场景。不额外提交1/2/3卡 smoke 报告；仅使用真实结果，未完成部分标PENDING。
 
-**状态：本回合仅在GitHub更新代码/工作单，未在远程GPU执行上述实验。**
+**状态：仅更新本 Codex 工作文档的执行顺序；未在远程GPU启动训练、推理或评测。**
