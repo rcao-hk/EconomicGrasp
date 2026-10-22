@@ -87,22 +87,48 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def make_dataset(split):
+def make_dataset(split, *, domain="original"):
+    """Construct Original or GN-Trans dataset with a sole CDF cache owner."""
     cdf=FULL.point_head=="cdf"
-    base=GraspNetMultiDataset(
-        cfgs.dataset_root,camera=cfgs.camera,split=split,
+    common=dict(
+        camera=cfgs.camera,split=split,
         num_points=cfgs.num_point,voxel_size=cfgs.voxel_size,
         remove_outlier=True,augment=False,load_label=True,
-        use_gt_depth=False,use_fuse_depth=bool(cfgs.use_fuse_depth),
-        graspness_mode="scene",min_depth=cfgs.min_depth,
-        max_depth=cfgs.max_depth,bin_num=cfgs.bin_num,
-        depth_strides=1,extend_angle=cdf,load_grasp_payload=not cdf,
+        min_depth=cfgs.min_depth,max_depth=cfgs.max_depth,
+        bin_num=cfgs.bin_num,depth_strides=1,
     )
+    if domain=="original":
+        base=GraspNetMultiDataset(
+            cfgs.dataset_root,use_gt_depth=False,
+            use_fuse_depth=bool(cfgs.use_fuse_depth),
+            graspness_mode="scene",extend_angle=cdf,
+            load_grasp_payload=not cdf,**common,
+        )
+    elif domain=="gntrans":
+        if split!="train":
+            raise ValueError("GN-Trans is training-only; validation uses Original")
+        base=GraspNetTransDataset(
+            cfgs.dataset_root,FULL.gntrans_rgb_root,
+            use_gt_depth=True,**common,
+        )
+        # Legacy: original grasp payload. CDF: the adapter alone owns labels.
+        base.extend_angle=cdf
+        base.load_grasp_payload=not cdf
+        if FULL.gntrans_fused_background:
+            base.use_fuse_depth=True
+            base.fusedepthpath=[
+                os.path.join(cfgs.dataset_root,"tsdf_depth",scene,cfgs.camera,
+                             f"{int(frame):04d}_depth.png")
+                for scene,frame in zip(base.scenename,base.frameid)
+            ]
+        else:
+            base.use_fuse_depth=False  # GN-Trans full rendered (Mixed-v2)
+    else:
+        raise ValueError(f"Unknown image training domain: {domain}")
     if not cdf:
         return base
     return CVAExtendedLabelAdapter(
-        base,dataset_root=cfgs.dataset_root,
-        use_cdf=True,
+        base,dataset_root=cfgs.dataset_root,use_cdf=True,
         label_folder="economic_grasp_label_300views_extend_angle_cdf_depth",
         num_angle=cfgs.num_angle,num_depth=cfgs.num_depth,
     )
