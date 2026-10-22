@@ -100,10 +100,10 @@ if [[ "$EVAL" == 1 ]]; then
       if [[ -e "$dst/evaluation.log" || -e "$dst/ap_${split}_realsense.npy" ]]; then
         echo "Existing official evaluation evidence; refuse overwrite: $dst" >&2; exit 1
       fi
-      python - "$dst" "$split" "$head" "$EXPECTED" <<'PY'
+      python - "$dst" "$split" "$head" "$EXPECTED" "$EXPECTED_TRAIN_DOMAIN" <<'PY'
 import json,sys
 from pathlib import Path
-p=Path(sys.argv[1]); split=sys.argv[2]; head=sys.argv[3]; expected=int(sys.argv[4])
+p=Path(sys.argv[1]); split=sys.argv[2]; head=sys.argv[3]; expected=int(sys.argv[4]); expected_domain=sys.argv[5]
 summary=json.loads((p/"inference_summary.json").read_text())
 protocol=json.loads((p/"inference_protocol.json").read_text())
 frames=list(p.glob("scene_*/realsense/*.npy"))
@@ -113,6 +113,8 @@ if protocol["point_head"]!=head or protocol["test_mode"]!=split or protocol["dat
     raise SystemExit("Head/split/frame contract mismatch")
 if protocol["train_domain"] not in ("original","mixed"):
     raise SystemExit("Missing validated training domain")
+if expected_domain!="auto" and protocol["train_domain"]!=expected_domain:
+    raise SystemExit(f"Wrong training domain for official evaluator: expected {expected_domain}")
 PY
       echo "[POINT100] serial official AP head=$head split=$split stride=$EVAL_STRIDE"
       (set -C; python eval.py \
