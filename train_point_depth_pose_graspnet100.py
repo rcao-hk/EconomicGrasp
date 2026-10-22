@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Full 100% Original GraspNet RealSense training for legacy/CDF point baselines.
+"""Dual-head point-centric training on full Original or paired Original/GN-Trans.
 
 Only the final point grasp head and its label/loss/decode contract differ.
 All models: RGB + global_film DAV2/DPT metric depth, detached backprojected
 point cloud, original EconomicGrasp3D Minkowski backbone/center/view/grouping.
 
-Default: train all 100 scenes x 256 frames, Original Seen 10% validation.
+Default: full 100-scene Original; mixed mode: per-scene matched Original/GN-Trans frames. Validation is always Original Seen 10%.
 Use --max_train_batches/--max_val_batches ONLY for preflight smoke runs.
 """
 from __future__ import annotations
@@ -65,9 +65,9 @@ from utils.arguments import cfgs
 from utils.point_depth_mixed_contract import (
     scene_stride_indices,scene_frame_signature,assert_paired_frames,
 )
-from utils.point_depth_training_protocol import expected_frames_per_domain
+from utils.point_depth_training_protocol import expected_frames_per_domain, validate_training_protocol
 
-CONTRACT_VERSION=1
+CONTRACT_VERSION=2
 PARENT_BRANCH="exp/point-depth-pose-aware-mixed"
 
 
@@ -296,6 +296,11 @@ class Trainer:
             "git_source_sha":source_sha(),
             "parent_branch":PARENT_BRANCH,
         }
+        # Fail before costly network/DDP initialization if nominal 25,600 frames
+        # actually came from a wrong or unpaired Original/GN-Trans mixture.
+        validate_training_protocol(
+            self.protocol,head=FULL.point_head,source="full100_protocol",
+        )
 
         self.train_sampler=(
             DistributedSampler(train,num_replicas=self.world_size,
@@ -379,6 +384,13 @@ class Trainer:
                 "original_train_scene_frame_sha256","gntrans_train_scene_frame_sha256",
                 "gntrans_fused_background",
             ):
+                old_original=prior.get("train_domain","original")=="original"
+                new_original=self.protocol["train_domain"]=="original"
+                if old_original and new_original and key not in prior and key in (
+                    "mix_train_fraction","original_train_scene_frame_sha256",
+                    "gntrans_train_scene_frame_sha256","gntrans_fused_background",
+                ):
+                    continue  # pre-mixed full100 manifest compatibility
                 default="original" if key=="train_domain" else None
                 if prior.get(key,default)!=self.protocol.get(key):
                     raise RuntimeError(f"Resume mismatch in {key}")
