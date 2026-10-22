@@ -8,6 +8,7 @@ GPUS="${GPUS:-0,1,2}"
 HEADS="${HEADS:-legacy,cdf}"
 SPLITS="${SPLITS:-test_seen,test_similar,test_novel}"
 TEST_FRACTION="${TEST_FRACTION:-0.1}"
+EXPECTED_TRAIN_DOMAIN="${EXPECTED_TRAIN_DOMAIN:-auto}"
 BATCH_SIZE="${BATCH_SIZE:-3}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 EVAL_NUM_WORKERS="${EVAL_NUM_WORKERS:-16}"
@@ -26,6 +27,10 @@ elif [[ "$TEST_FRACTION" == 1.0 ]]; then
 else
   echo "TEST_FRACTION must be 0.1 or 1.0 to use official matching evaluation slices" >&2; exit 2
 fi
+case "$EXPECTED_TRAIN_DOMAIN" in
+  auto|original|mixed) ;;
+  *) echo "EXPECTED_TRAIN_DOMAIN must be auto, original or mixed" >&2; exit 2 ;;
+esac
 if [[ "$MAX_BATCHES" != 0 && "$EVAL" == 1 ]]; then
   echo "Smoke cannot run official evaluation" >&2; exit 2
 fi
@@ -60,7 +65,7 @@ run_one () {
   echo "[POINT100] inference head=$head split=$split gpu=$gpu fraction=$TEST_FRACTION"
   (set -C; CUDA_VISIBLE_DEVICES="$gpu" MAX_BATCHES="$MAX_BATCHES" \
     python inference_point_depth_pose_graspnet100.py \
-    --point_head "$head" \
+    --point_head "$head" --expected_train_domain "$EXPECTED_TRAIN_DOMAIN" \
     --checkpoint_path "$TRAIN_ROOT/$head/checkpoint_epoch_019.tar" \
     --dataset_root "$DATASET_ROOT" --camera realsense \
     --test_mode "$split" --save_dir "$dst" \
@@ -106,6 +111,8 @@ if len(frames)!=expected or summary["processed_frames"]!=expected or summary["sm
     raise SystemExit(f"Incomplete/smoke grasp dump {head}/{split}: {len(frames)}/{expected}")
 if protocol["point_head"]!=head or protocol["test_mode"]!=split or protocol["dataset_count"]!=expected:
     raise SystemExit("Head/split/frame contract mismatch")
+if protocol["train_domain"] not in ("original","mixed"):
+    raise SystemExit("Missing validated training domain")
 PY
       echo "[POINT100] serial official AP head=$head split=$split stride=$EVAL_STRIDE"
       (set -C; python eval.py \
