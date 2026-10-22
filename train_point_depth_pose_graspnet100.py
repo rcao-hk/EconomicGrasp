@@ -189,15 +189,42 @@ class Trainer:
         self.directory=Path(cfgs.log_dir)
         self.directory.mkdir(parents=True,exist_ok=True)
 
-        train=make_dataset("train")
-        seen=make_dataset("test_seen")
+        original=make_dataset("train",domain="original")
+        seen=make_dataset("test_seen",domain="original")
         val_idx=scene_stride_indices(seen,FULL.val_fraction)
-        self.train_dataset=train
-        self.val_dataset=Subset(seen,val_idx)
-        if len(train)!=25600:
-            raise RuntimeError(f"Expected all 25,600 Original train frames; got {len(train)}")
+        if len(original)!=25600:
+            raise RuntimeError(f"Expected all 25,600 Original train frames, got {len(original)}")
         if FULL.val_fraction==0.1 and len(val_idx)!=780:
             raise RuntimeError(f"Expected Seen validation 780, got {len(val_idx)}")
+
+        trans_idx=[]
+        trans_sig=None
+        if FULL.train_domain=="mixed":
+            trans=make_dataset("train",domain="gntrans")
+            orig_idx=scene_stride_indices(original,FULL.mix_train_fraction)
+            trans_idx=scene_stride_indices(trans,FULL.mix_train_fraction)
+            paired=assert_paired_frames(original,trans,orig_idx,trans_idx,"mixed train")
+            expected=expected_frames_per_domain(FULL.mix_train_fraction)
+            if min(len(orig_idx),len(trans_idx),paired)!=expected or max(len(orig_idx),len(trans_idx))!=expected:
+                raise RuntimeError("Mixed-domain subsampling count mismatch")
+            train=ConcatDataset([Subset(original,orig_idx),Subset(trans,trans_idx)])
+            trans_sig=scene_frame_signature(trans,trans_idx)
+        else:
+            orig_idx=list(range(len(original)))
+            train=original
+
+        original_sig=scene_frame_signature(original,orig_idx)
+        if FULL.train_domain=="mixed" and original_sig!=trans_sig:
+            raise RuntimeError("Original/GN-Trans selected (scene,frame) signatures disagree")
+        if len(train)!=len(orig_idx)+len(trans_idx):
+            raise RuntimeError("Mixed training dataset count mismatch")
+        self.train_dataset=train
+        self.val_dataset=Subset(seen,val_idx)
+        train_sig=(original_sig if FULL.train_domain=="original"
+            else hashlib.sha256(json.dumps({
+                "domain":"mixed","fraction":FULL.mix_train_fraction,
+                "original":original_sig,"gntrans":trans_sig,
+            },sort_keys=True).encode("utf-8")).hexdigest())
 
         self.protocol={
             "contract_version":CONTRACT_VERSION,
