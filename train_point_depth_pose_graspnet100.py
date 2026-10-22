@@ -382,7 +382,9 @@ class Trainer:
                 "head","training_scene_frame_sha256","validation_scene_frame_sha256",
                 "shared_depth_checkpoint_sha256","train_domain","mix_train_fraction",
                 "original_train_scene_frame_sha256","gntrans_train_scene_frame_sha256",
-                "gntrans_fused_background",
+                "gntrans_fused_background","gntrans_rgb_root","gntrans_depth_target",
+                "train_frame_count","training_fraction","batch_size_per_rank",
+                "world_size","global_batch_size","seed","learning_rate",
             ):
                 old_original=prior.get("train_domain","original")=="original"
                 new_original=self.protocol["train_domain"]=="original"
