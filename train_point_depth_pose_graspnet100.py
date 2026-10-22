@@ -228,14 +228,39 @@ class Trainer:
 
         self.protocol={
             "contract_version":CONTRACT_VERSION,
-            "dataset":"GraspNet-1Billion Original RealSense",
-            "training_fraction":1.0,
+            "dataset":(
+                "GraspNet-1Billion Original RealSense" if FULL.train_domain=="original"
+                else "GraspNet-1Billion Original RealSense + GN-Trans paired RGB"
+            ),
+            "train_domain":FULL.train_domain,
+            "training_fraction":1.0 if FULL.train_domain=="original" else FULL.mix_train_fraction,
+            "mix_train_fraction":FULL.mix_train_fraction if FULL.train_domain=="mixed" else None,
             "train_frame_count":len(train),
             "train_scene_count":100,
+            "original_train_count":len(orig_idx),
+            "gntrans_train_count":len(trans_idx),
+            "original_train_scene_frame_sha256":original_sig,
+            "gntrans_train_scene_frame_sha256":trans_sig,
+            "paired_scene_frame_sampling":FULL.train_domain=="mixed",
+            "gntrans_rgb_root":(
+                str(Path(FULL.gntrans_rgb_root).resolve()) if FULL.train_domain=="mixed" else None
+            ),
+            "gntrans_fused_background":(
+                FULL.gntrans_fused_background if FULL.train_domain=="mixed" else None
+            ),
+            "original_depth_target":"rendered_foreground_plus_TSDF_background",
+            "gntrans_depth_target":(
+                "rendered_foreground_plus_TSDF_background"
+                if FULL.gntrans_fused_background else "full_rendered"
+            ) if FULL.train_domain=="mixed" else None,
+            "original_point_sampling":"RealSense_sensor_depth_workspace",
+            "gntrans_point_sampling":(
+                "GNTrans_virtual_rendered_depth_workspace" if FULL.train_domain=="mixed" else None
+            ),
             "validation_split":"test_seen",
             "validation_fraction":FULL.val_fraction,
             "validation_frame_count":len(val_idx),
-            "training_scene_frame_sha256":scene_frame_signature(train,list(range(len(train)))),
+            "training_scene_frame_sha256":train_sig,
             "validation_scene_frame_sha256":scene_frame_signature(seen,val_idx),
             "head":FULL.point_head,
             "point_backbone":"original EconomicGrasp3D Minkowski TDUnet; original point/view/cylinder grouping",
@@ -259,6 +284,7 @@ class Trainer:
             "world_size":self.world_size,"global_batch_size":cfgs.batch_size*self.world_size,
             "nominal_samples_per_epoch":len(train),
             "distributed_sampler_padded_samples_per_epoch":math.ceil(len(train)/self.world_size)*self.world_size,
+            "optimizer_steps_per_epoch":math.ceil(math.ceil(len(train)/self.world_size)/cfgs.batch_size),
             "optimizer":"AdamW",
             "learning_rate":float(cfgs.learning_rate),
             "weight_decay":float(cfgs.weight_decay),
@@ -347,15 +373,20 @@ class Trainer:
         if cfgs.resume:
             ck=torch.load(cfgs.checkpoint_path,map_location="cpu",weights_only=False)
             prior=ck.get("full100_protocol",{})
-            for key in ("head","training_scene_frame_sha256","validation_scene_frame_sha256",
-                        "shared_depth_checkpoint_sha256"):
-                if prior.get(key)!=self.protocol.get(key):
+            for key in (
+                "head","training_scene_frame_sha256","validation_scene_frame_sha256",
+                "shared_depth_checkpoint_sha256","train_domain","mix_train_fraction",
+                "original_train_scene_frame_sha256","gntrans_train_scene_frame_sha256",
+                "gntrans_fused_background",
+            ):
+                default="original" if key=="train_domain" else None
+                if prior.get(key,default)!=self.protocol.get(key):
                     raise RuntimeError(f"Resume mismatch in {key}")
             model.load_state_dict(ck["model_state_dict"],strict=True)
             self.optimizer.load_state_dict(ck["optimizer_state_dict"])
             self.start_epoch=int(ck["epoch"])
         if self.main:
-            manifest=self.directory/"point_depth_full100_protocol.json"
+            manifest=self.directory/"point_depth_training_protocol.json"
             if manifest.exists() and not cfgs.resume:
                 raise FileExistsError(manifest)
             if not manifest.exists():
