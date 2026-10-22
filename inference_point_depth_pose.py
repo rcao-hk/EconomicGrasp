@@ -24,6 +24,7 @@ from dataset.graspnet_dataset import GraspNetMultiDataset, collate_fn
 from models.economicgrasp_depth import economicgrasp_depth_baseline, pred_decode
 from utils.arguments import cfgs
 from utils.collision_detector import ModelFreeCollisionDetectorTorch
+from utils.point_depth_training_protocol import checkpoint_training_protocol
 from utils.point_depth_mixed_contract import (
     network_rgb_pose_inputs,
     scene_frame_signature,
@@ -55,15 +56,11 @@ def _load_checkpoint_strict(model, path):
     if not path.is_file():
         raise FileNotFoundError(path)
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    if checkpoint.get("architecture") != "economicgrasp_depth_baseline":
-        raise ValueError("Not a point-centric depth-baseline checkpoint")
-    if checkpoint.get("pose_depth_mode") != cfgs.pose_depth_mode:
-        raise ValueError("Checkpoint pose mode differs from model mode")
-    if checkpoint.get("completed_epoch") != 19:
-        raise ValueError("Official 10% inference must use fixed completed_epoch=19")
-    contract = checkpoint.get("mixed_protocol")
-    if not isinstance(contract, dict) or contract.get("train_count") != 5200:
-        raise ValueError("Checkpoint is missing the 10%+10% mixed training contract")
+    domain,contract,source=checkpoint_training_protocol(
+        checkpoint,expected_head="legacy"
+    )
+    if domain!="mixed" or source!="mixed_protocol":
+        raise ValueError("Historical inference_point_depth_pose.py expects legacy mixed_protocol")
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     return contract
 
@@ -136,6 +133,9 @@ def inference():
         "completed_epoch":19,
         "checkpoint_sha256":_file_sha256(cfgs.checkpoint_path),
         "checkpoint_mixed_protocol":contract,
+        "train_domain":"mixed",
+        "train_fraction":contract.get("train_fraction"),
+        "training_frame_count":contract.get("train_count"),
         "test_mode":cfgs.test_mode,
         "sample_interval_fraction":float(cfgs.sample_interval),
         "dataset_count":len(selected),
