@@ -8,6 +8,8 @@
 - 默认实验：**100% Original GraspNet-1Billion RealSense TRAIN**；首先执行10% matching TEST，随后需要时可以执行100% TEST。**不使用 GN-Trans**。
 - 不准改 main、覆盖/删除任何 RayRoPE/GVAR/mixed experiments，也不得把 smoke 当正式 AP。
 
+**2026-10-22 更新：** 当前同一分支也支持 RS50%＋GN-Trans50% mixed training（Legacy 和 CDF 两个head）。该模式有独立工作单 [POINT_DEPTH_RS50_GNTRANS50_LEGACY_CDF_CODEX_20261022.md](./POINT_DEPTH_RS50_GNTRANS50_LEGACY_CDF_CODEX_20261022.md)，并使用 TRAIN_DOMAIN=mixed、MIX_TRAIN_FRACTION=0.5。**本文件余下的 Original-only 命令仍然有效；两种设置不得混用输出目录或将25,600帧的名义数量误认为同一来源合同。** 新统一 trainer 的协议清单命名为 point_depth_training_protocol.json，checkpoint仍保留 full100_protocol 兼容字段并通过 train_domain 判定训练来源。
+
 ## 1. 研究问题和两组方法的严格边界
 
 目的：给此前的 RGB→pose-aware DPT depth→predicted points→EconomicGrasp 添加与 CVA-CDF 尽可能接近的 **joint angle×depth evaluator-aligned CDF + depth-wise width**，评估原点云 backbone 的性能上限，减少 score/width 监督不同带来的不公平。
