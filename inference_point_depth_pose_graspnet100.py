@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Original GraspNet inference for legacy/CDF point baseline (full-data-trained e19).
+"""Original GraspNet inference for both point heads, Original-only or mixed e19.
 
-Training uses ALL 100 Original GraspNet scenes x 256 frames; evaluation 10% or 100%.
+Training may use full Original or paired Original/GN-Trans; test is Original
+RealSense at the requested evaluation fraction.
 
 RGB, calibration/pose and image-space sample indices reach the network; all
 metric XYZ sent to the grasp backbone come from the detached predicted DPT
@@ -20,6 +21,7 @@ import sys
 
 _p=argparse.ArgumentParser(add_help=False)
 _p.add_argument("--point_head",choices=("legacy","cdf"),required=True)
+_p.add_argument("--expected_train_domain",choices=("auto","original","mixed"),default="auto")
 HEAD_ARGS,_remaining=_p.parse_known_args()
 sys.argv=[sys.argv[0],*_remaining]
 
@@ -33,6 +35,7 @@ from models.economicgrasp_depth import economicgrasp_depth_baseline, pred_decode
 from models.point_grasp_cdf_head import decode_point_cdf
 from utils.arguments import cfgs
 from utils.collision_detector import ModelFreeCollisionDetectorTorch
+from utils.point_depth_training_protocol import checkpoint_training_protocol
 from utils.point_depth_mixed_contract import (
     network_rgb_pose_inputs,
     scene_frame_signature,
@@ -60,29 +63,20 @@ class DeterministicDataset(Dataset):
 
 
 def _load_checkpoint_strict(model, path):
-    path = Path(path)
+    path=Path(path)
     if not path.is_file():
         raise FileNotFoundError(path)
-    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    if checkpoint.get("architecture") != "economicgrasp_depth_baseline":
-        raise ValueError("Not a point-centric depth-baseline checkpoint")
-    if checkpoint.get("pose_depth_mode") != cfgs.pose_depth_mode:
-        raise ValueError("Checkpoint pose mode differs from model mode")
-    if checkpoint.get("completed_epoch") != 19:
-        raise ValueError("Official full-data comparison must use fixed completed_epoch=19")
-    if checkpoint.get("point_head") != HEAD_ARGS.point_head:
-        raise ValueError("Wrong point head selected for checkpoint")
-    contract = checkpoint.get("full100_protocol")
-    if not isinstance(contract,dict) or contract.get("train_frame_count")!=25600:
-        raise ValueError("Checkpoint is missing the complete GraspNet training contract")
-    if contract.get("head")!=HEAD_ARGS.point_head:
-        raise ValueError("Mismatching head in embedded full100 protocol")
-    if contract.get("max_train_batches",0)!=0 or contract.get("max_val_batches",0)!=0:
-        raise ValueError("Smoke/partial-training checkpoints are not eligible for official AP")
-    if contract.get("pose_depth_mode")!="global_film":
-        raise ValueError("Unexpected depth conditioning protocol in checkpoint")
-    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
-    return contract
+    ckpt=torch.load(path,map_location="cpu",weights_only=False)
+    domain,protocol,manifest_key=checkpoint_training_protocol(
+        ckpt,expected_head=HEAD_ARGS.point_head,
+    )
+    if HEAD_ARGS.expected_train_domain!="auto" and HEAD_ARGS.expected_train_domain!=domain:
+        raise ValueError(
+            f"Expected training domain {HEAD_ARGS.expected_train_domain}, "
+            f"but checkpoint declares {domain}"
+        )
+    model.load_state_dict(ckpt["model_state_dict"],strict=True)
+    return domain,protocol,manifest_key
 
 
 def _file_sha256(path):
@@ -144,7 +138,7 @@ def inference():
         point_use_cdf=HEAD_ARGS.point_head=="cdf",
         vis_dir=None,
     ).cuda()
-    contract=_load_checkpoint_strict(model,cfgs.checkpoint_path)
+    train_domain,contract,manifest_key=_load_checkpoint_strict(model,cfgs.checkpoint_path)
     model.eval()
     max_batches=int(os.environ.get("MAX_BATCHES","0"))
     if max_batches<0:
@@ -153,9 +147,19 @@ def inference():
         "architecture":"economicgrasp_depth_baseline",
         "completed_epoch":19,
         "checkpoint_sha256":_file_sha256(cfgs.checkpoint_path),
-        "checkpoint_full100_protocol":contract,
+        "checkpoint_manifest_key":manifest_key,
+        "checkpoint_training_protocol":contract,
         "point_head":HEAD_ARGS.point_head,
-        "trained_on":"100percent_Original_GraspNet_RealSense",
+        "train_domain":train_domain,
+        "train_fraction":(
+            contract.get("mix_train_fraction",contract.get("train_fraction",1.0))
+            if train_domain=="mixed" else 1.0
+        ),
+        "training_frame_count":contract.get("train_frame_count",contract.get("train_count")),
+        "trained_on":(
+            "paired_Original_GraspNet_plus_GNTrans" if train_domain=="mixed"
+            else "100percent_Original_GraspNet_RealSense"
+        ),
         "test_mode":cfgs.test_mode,
         "sample_interval_fraction":float(cfgs.sample_interval),
         "dataset_count":len(selected),
