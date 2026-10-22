@@ -24,6 +24,10 @@ import time
 def _extra_options():
     p=argparse.ArgumentParser(add_help=False)
     p.add_argument("--point_head", choices=("legacy","cdf"), required=True)
+    p.add_argument("--train_domain",choices=("original","mixed"),default="original")
+    p.add_argument("--gntrans_rgb_root",default="")
+    p.add_argument("--mix_train_fraction",type=float,default=0.5)
+    p.add_argument("--gntrans_fused_background",action="store_true")
     p.add_argument("--val_fraction", type=float, default=0.1)
     p.add_argument("--max_train_batches", type=int, default=0)
     p.add_argument("--max_val_batches", type=int, default=0)
@@ -34,6 +38,12 @@ def _extra_options():
         raise ValueError("val_fraction must be (0,1]")
     if min(x.max_train_batches,x.max_val_batches)<0:
         raise ValueError("max batches must be >=0")
+    if not (0.0 < x.mix_train_fraction <= 1.0):
+        raise ValueError("mix_train_fraction must be in (0,1]")
+    if x.train_domain=="mixed" and not x.gntrans_rgb_root:
+        raise ValueError("--gntrans_rgb_root required for mixed training")
+    if x.train_domain=="original" and x.gntrans_fused_background:
+        raise ValueError("--gntrans_fused_background requires mixed training")
     return x
 
 
@@ -43,16 +53,19 @@ import numpy as np
 import torch
 from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler, Subset
+from torch.utils.data import ConcatDataset, DataLoader, DistributedSampler, Subset
 
 import train_ddp as dist_utils
-from dataset.graspnet_dataset import GraspNetMultiDataset,collate_fn
+from dataset.graspnet_dataset import GraspNetMultiDataset,GraspNetTransDataset,collate_fn
 from dataset.cdf_label_adapter import CVAExtendedLabelAdapter
 from models.economicgrasp_depth import economicgrasp_depth_baseline
 from models.loss_economicgrasp_depth import get_loss as legacy_loss
 from models.loss_point_depth_cdf import get_point_cdf_loss
 from utils.arguments import cfgs
-from utils.point_depth_mixed_contract import scene_stride_indices,scene_frame_signature
+from utils.point_depth_mixed_contract import (
+    scene_stride_indices,scene_frame_signature,assert_paired_frames,
+)
+from utils.point_depth_training_protocol import expected_frames_per_domain
 
 CONTRACT_VERSION=1
 PARENT_BRANCH="exp/point-depth-pose-aware-mixed"
