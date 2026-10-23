@@ -91,7 +91,7 @@ Record `gntrans_gc6d_mix_protocol.json`, GC6D filtered-list SHA256, training log
 
 ```bash
 DATASET_ROOT="$DATASET_ROOT" GNTRANS_RGB_ROOT="$GNTRANS_RGB_ROOT" \
-CKPT=/data2/robotarm/result/grasp/rgbgrasp/log/cva_cdf_triple_10pct/checkpoint_19.tar \
+CKPT=/data2/robotarm/result/grasp/rgbgrasp/log/cva_cdf_triple_10pct/checkpoint.tar \
 GPUS=0,1,2,3,4,5 \
 OUTPUT_ROOT=/data2/robotarm/result/grasp/rgbgrasp/cva_cdf_triple_10pct_eval/e19 \
 SAMPLE_INTERVAL=0.1 DATASETS=both \
@@ -101,7 +101,7 @@ ENABLE_INFERENCE=1 ENABLE_EVAL=1 \
 bash run_gntrans_gc6d_mix_cva_cdf_eval.sh
 ```
 
-Note that `checkpoint_19.tar` is available only if the corresponding epoch checkpoint is actually saved (`CKPT_SAVE_INTERVAL` governs interval saves; default 5 saves epoch indices 0,5,10,15, while `checkpoint.tar` is updated every epoch). For default 20 epochs use `checkpoint.tar` or an existing `checkpoint_15.tar`; **never invent a checkpoint path**.
+The default saver writes `checkpoint.tar` each epoch; optional `checkpoint_*.tar` snapshots are written at epoch indices divisible by `CKPT_SAVE_INTERVAL` (e.g. 0,5,10,15 at 20 epochs with interval 5). Check the filesystem for the desired epoch before launching inference.
 
 Evaluation uses the *same original GraspNet 3D geometry* for both RGB domains and the existing official GraspNet evaluator, with `eval.py --sample_interval 10`. Keep clean/trans domains and seen/similar/novel splits separate. Running `ENABLE_INFERENCE=0 ENABLE_EVAL=1` must reuse complete prediction dumps without deleting them.
 
@@ -110,7 +110,7 @@ Evaluation uses the *same original GraspNet 3D geometry* for both RGB domains an
 ## Codex acceptance checklist
 
 - [ ] `python -m compileall -q train_cva_gntrans_gc6d_mix_ddp.py check_gc6d_cdf_mix_data.py dataset/gc6d_dataset.py dataset/generate_economic_gc6d.py`; `bash -n run_gntrans_gc6d_mix_cva_cdf_train.sh run_gntrans_gc6d_mix_cva_cdf_eval.sh`.
-- [ ] Unit test CDF encoding exactly at friction thresholds; collision and out-of-width candidates have bin 0.
+- [ ] Run `python -m unittest discover -s tests -p 'test_gc6d_cdf_mix.py' -v`; verify friction threshold boundaries, invalid/collision and out-of-width candidates map to bin 0, the full-depth view gather, camera-vector convention, and CDF adapter alignment.
 - [ ] Verify split JSON has 232 unique training scenes and indexes exactly 3016 frames.
 - [ ] Verify all CDF cache files, no `obj_ids` vs scene GT pose mismatch, no label/point ordering corruption.
 - [ ] Validate dataset contract with mixed 3-source batch: same keys/shapes, `object_poses_list` length matches CDF payload lists; CPU-resident lists preserved under DDP.
