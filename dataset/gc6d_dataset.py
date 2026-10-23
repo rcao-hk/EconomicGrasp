@@ -1104,6 +1104,10 @@ class GraspClutter6DMultiDataset(Dataset):
             "dataset_idx": np.int64(index),
         }
         ret_dict.update(grasp_payload)
+        if self.load_grasp_payload:
+            # Preserve the original GC6D labeled-loader metadata. The mixed
+            # CVA-CDF mode omits this extra key for identical mixed batches.
+            ret_dict["img_id"] = np.int64(img_id)
         return ret_dict
 
 
