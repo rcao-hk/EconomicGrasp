@@ -129,9 +129,11 @@ def read_split_scene_ids(dataset_root: Path, split: str) -> List[int]:
     return sorted({int(x) for x in vals})
 
 
-def output_folder_name(keeping_views_numbers: int, extend_angle: bool, save_folder: Optional[str]) -> str:
+def output_folder_name(keeping_views_numbers: int, extend_angle: bool, save_folder: Optional[str], cache_cdf_depth_labels: bool = False) -> str:
     if save_folder is not None:
         return str(save_folder)
+    if cache_cdf_depth_labels:
+        return f"economic_grasp_label_{int(keeping_views_numbers)}views_extend_angle_cdf_depth"
     if extend_angle:
         return f"economic_grasp_label_{int(keeping_views_numbers)}views_extend_angle"
     return f"economic_grasp_label_{int(keeping_views_numbers)}views"
@@ -386,6 +388,45 @@ def _gather_top_views_3d(x: torch.Tensor, view_index: torch.Tensor) -> torch.Ten
     return torch.gather(x, 1, idx)
 
 
+def _gather_top_views_4d(x: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    """Gather full angle/depth labels: [P,V,A,D] -> [P,K,A,D]."""
+    return torch.gather(
+        x, 1, index.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, x.shape[-2], x.shape[-1])
+    )
+
+
+def _parse_cdf_thresholds(spec: str) -> torch.Tensor:
+    values = [float(x) for x in str(spec).split(",") if x.strip()]
+    if not values or len(values) > 254:
+        raise ValueError("CDF thresholds must contain 1..254 values.")
+    if any(not np.isfinite(x) or x <= 0 for x in values):
+        raise ValueError(f"Invalid CDF thresholds: {values}")
+    if any(a >= b for a, b in zip(values, values[1:])):
+        raise ValueError("CDF thresholds must increase strictly.")
+    return torch.tensor(values, dtype=torch.float32)
+
+
+def _build_cdf_depth_labels(
+    raw_friction: torch.Tensor,
+    widths: torch.Tensor,
+    collisions: torch.Tensor,
+    thresholds: torch.Tensor,
+    max_grasp_width: float,
+):
+    """Same CDF convention as generate_economic_cdf_depth.py; 0=all-threshold failure."""
+    if raw_friction.shape != widths.shape or widths.shape != collisions.shape:
+        raise ValueError("GC6D raw friction/width/collision shapes differ.")
+    thresholds = thresholds.to(raw_friction.device, raw_friction.dtype)
+    success = (
+        torch.isfinite(raw_friction) & torch.isfinite(widths)
+        & (raw_friction > 0) & (raw_friction <= thresholds[-1])
+        & (widths >= 0) & (widths <= float(max_grasp_width))
+        & (~collisions)
+    )
+    first = torch.bucketize(raw_friction.contiguous(), thresholds, right=False) + 1
+    return torch.where(success, first, torch.zeros_like(first)).to(torch.uint8), success
+
+
 def to_uint8_clipped(x: np.ndarray, scale: float = 1.0, name: str = "") -> np.ndarray:
     y = np.asarray(x, dtype=np.float32) * float(scale)
     if np.any(y < 0) or np.any(y > 255):
@@ -411,6 +452,11 @@ def generate_one_scene(scene_id: int, cfg) -> SceneResult:
 
     try:
         if cfg.skip_done and out_path.exists():
+            if cfg.cache_cdf_depth_labels:
+                with np.load(out_path, allow_pickle=False) as existing:
+                    required = {"obj_ids", "cdf_bins", "widths_depth_mm", "width_valids_depth", "cdf_thresholds"}
+                    if not required.issubset(set(existing.files)):
+                        raise ValueError(f"--skip_done encountered non-CDF cache: {out_path}")
             return SceneResult(scene_id, True, True, f"skip_done: {out_path}", {"scene_id": scene_id})
 
         scene_dir = dataset_root / "scenes" / f"{int(scene_id):06d}"
@@ -442,6 +488,7 @@ def generate_one_scene(scene_id: int, cfg) -> SceneResult:
         scene_points = []
         scene_pointid = []
         scene_scores = []
+        scene_raw_friction = []
         scene_width = []
         scene_collisions = []
 
@@ -462,7 +509,8 @@ def generate_one_scene(scene_id: int, cfg) -> SceneResult:
 
             points = torch.from_numpy(points_np).to(cfg.device)
             width = torch.from_numpy(offsets_np[..., 2]).to(cfg.device)
-            scores = torch.from_numpy(scores_np).to(cfg.device)
+            raw_friction = torch.from_numpy(scores_np).to(cfg.device)
+            scores = raw_friction.clone()
             collision = torch.from_numpy(collision_np.astype(np.bool_)).to(cfg.device)
 
             # Collision grasps are invalid for score learning; keep collision tensor separately.
@@ -484,6 +532,8 @@ def generate_one_scene(scene_id: int, cfg) -> SceneResult:
                 scene_points.append(points[filter_mask].cpu())
                 scene_pointid.append(torch.ones(keep_n, dtype=torch.long) * int(local_i))
                 scene_scores.append(scores[filter_mask].cpu())
+                if cfg.cache_cdf_depth_labels:
+                    scene_raw_friction.append(raw_friction[filter_mask].cpu())
                 scene_width.append(width[filter_mask].cpu())
                 scene_collisions.append(collision[filter_mask].cpu())
 
@@ -498,9 +548,11 @@ def generate_one_scene(scene_id: int, cfg) -> SceneResult:
                 "shape": "x".join(map(str, tuple(scores_np.shape))),
             })
 
-            del points, width, scores, collision
+            del points, width, scores, raw_friction, collision
 
         if len(scene_points) == 0:
+            if cfg.cache_cdf_depth_labels:
+                raise RuntimeError(f"GC6D scene {scene_id:06d} has no CDF-supervisable points.")
             # Save an empty but structurally valid label file.
             out_path.parent.mkdir(parents=True, exist_ok=True)
             save_empty_label(out_path, cfg.extend_angle)
@@ -519,6 +571,10 @@ def generate_one_scene(scene_id: int, cfg) -> SceneResult:
         scene_points_t = torch.cat(scene_points, dim=0).to(cfg.device)
         scene_pointid_t = torch.cat(scene_pointid, dim=0).to(cfg.device)
         scene_scores_t = torch.cat(scene_scores, dim=0).to(cfg.device)
+        scene_raw_friction_t = (
+            torch.cat(scene_raw_friction, dim=0).to(cfg.device)
+            if cfg.cache_cdf_depth_labels else None
+        )
         scene_width_t = torch.cat(scene_width, dim=0).to(cfg.device)
         scene_collisions_t = torch.cat(scene_collisions, dim=0).to(cfg.device)
 
@@ -528,6 +584,12 @@ def generate_one_scene(scene_id: int, cfg) -> SceneResult:
         grasp_view_valid_mask = (scene_scores_t <= float(cfg.view_fric_thresh)) & (scene_scores_t > 0)
         grasp_view_graspness = grasp_view_valid_mask.float().sum(dim=-1).sum(dim=-1) / float(A * D)  # [Ns,V]
         grasp_view_graspness = _normalize_view_graspness(grasp_view_graspness)
+
+        if cfg.cache_cdf_depth_labels:
+            cdf_bins_t, cdf_width_valid_t = _build_cdf_depth_labels(
+                scene_raw_friction_t, scene_width_t, scene_collisions_t,
+                _parse_cdf_thresholds(cfg.cdf_thresholds), cfg.max_grasp_width,
+            )
 
         # Normalize score: smaller friction is better; EconomicGrasp uses larger-is-better score.
         label_mask = (scene_scores_t > 0) & (scene_width_t <= float(cfg.max_grasp_width))
@@ -553,6 +615,12 @@ def generate_one_scene(scene_id: int, cfg) -> SceneResult:
             scene_width_out = _gather_top_views_3d(scene_width_out, index)
             scene_collision_selected = _gather_top_views_3d(scene_collision_selected.to(torch.uint8), index).bool()
             scene_valids = _gather_top_views_3d(scene_valids.to(torch.uint8), index).bool()
+            if cfg.cache_cdf_depth_labels:
+                cdf_bins_t = _gather_top_views_4d(cdf_bins_t, index)
+                cdf_width_valid_t = _gather_top_views_4d(cdf_width_valid_t.to(torch.uint8), index)
+                scene_width_depth_t = _gather_top_views_4d(scene_width_t, index)
+                if cfg.save_raw_friction:
+                    scene_raw_friction_t = _gather_top_views_4d(scene_raw_friction_t, index)
         else:
             scene_rotations = _gather_top_views_2d(scene_rotations, index)
             scene_depth = _gather_top_views_2d(scene_depth, index)
@@ -592,8 +660,24 @@ def generate_one_scene(scene_id: int, cfg) -> SceneResult:
             save_dict["num_angle"] = np.array([A], dtype=np.uint8)
             save_dict["num_depth"] = np.array([D], dtype=np.uint8)
 
+        if cfg.cache_cdf_depth_labels:
+            thresholds = _parse_cdf_thresholds(cfg.cdf_thresholds)
+            save_dict["cdf_bins"] = cdf_bins_t.cpu().numpy().astype(np.uint8)
+            save_dict["cdf_thresholds"] = thresholds.numpy().astype(np.float32)
+            save_dict["cdf_num_thresholds"] = np.asarray([len(thresholds)], dtype=np.uint8)
+            save_dict["cdf_label_version"] = np.asarray([1], dtype=np.uint8)
+            save_dict["widths_depth_mm"] = np.rint(
+                np.clip(scene_width_depth_t.cpu().numpy(), 0, float(cfg.max_grasp_width)) * 1000
+            ).astype(np.uint16)
+            save_dict["width_valids_depth"] = cdf_width_valid_t.cpu().numpy().astype(np.uint8)
+            save_dict["max_grasp_width"] = np.asarray([cfg.max_grasp_width], dtype=np.float32)
+            if cfg.save_raw_friction:
+                save_dict["friction_raw"] = scene_raw_friction_t.cpu().numpy().astype(np.float16)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(out_path, **save_dict)
+        if cfg.compressed:
+            np.savez_compressed(out_path, **save_dict)
+        else:
+            np.savez(out_path, **save_dict)
 
         if cfg.save_alias_scene6:
             alias = output_root / f"scene_{int(scene_id):06d}_labels.npz"
@@ -732,10 +816,17 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--dataset_root", default=os.environ.get("GC6D_ROOT"))
     p.add_argument("--split", default="train", help="train/test/all or explicit scene ids like '5,7,10-20'.")
     p.add_argument("--scene_ids", default=None, help="Override --split.")
+    p.add_argument("--scene_ids_file", default=None,
+                   help="JSON scene-ID list (e.g. filtered train split); overrides --split.")
     p.add_argument("--camera", default="realsense-d435", choices=list(CAMERA_OFFSETS.keys()) + list(CAMERA_ALIASES.keys()))
 
     p.add_argument("--keeping_views_numbers", type=int, default=300)
     p.add_argument("--extend_angle", action="store_true")
+    p.add_argument("--cache_cdf_depth_labels", action="store_true",
+                   help="Store GraspNet-compatible CDF score and full-depth width targets; requires --extend_angle.")
+    p.add_argument("--cdf_thresholds", default="0.2,0.4,0.6,0.8,1.0,1.2")
+    p.add_argument("--save_raw_friction", action="store_true")
+    p.add_argument("--compressed", action="store_true")
     p.add_argument("--save_folder", default=None)
     p.add_argument("--output_root", default=None,
                    help="Default: dataset_root/<economic_grasp_label_{K}views[_extend_angle]>")
@@ -776,12 +867,25 @@ def main() -> None:
 
     torch.set_num_threads(max(1, int(cfg.torch_num_threads)))
 
-    if cfg.scene_ids:
+    if cfg.cache_cdf_depth_labels and not cfg.extend_angle:
+        raise ValueError("--cache_cdf_depth_labels requires --extend_angle")
+    _parse_cdf_thresholds(cfg.cdf_thresholds)
+    if cfg.scene_ids_file and cfg.scene_ids:
+        raise ValueError("Use only one of --scene_ids and --scene_ids_file.")
+    if cfg.scene_ids_file:
+        with open(cfg.scene_ids_file, "r", encoding="utf-8") as fin:
+            ids = json.load(fin)
+        if not isinstance(ids, list):
+            raise ValueError("--scene_ids_file must be a JSON array of scene IDs.")
+        scene_ids = sorted(set(int(x) for x in ids))
+    elif cfg.scene_ids:
         scene_ids = parse_int_list(cfg.scene_ids)
     else:
         scene_ids = read_split_scene_ids(Path(cfg.dataset_root), cfg.split)
 
-    save_folder = output_folder_name(cfg.keeping_views_numbers, cfg.extend_angle, cfg.save_folder)
+    save_folder = output_folder_name(
+        cfg.keeping_views_numbers, cfg.extend_angle, cfg.save_folder, cfg.cache_cdf_depth_labels
+    )
     if cfg.output_root is None:
         cfg.output_root = str(Path(cfg.dataset_root) / save_folder)
     cfg.output_root = str(Path(cfg.output_root).expanduser())
@@ -798,6 +902,8 @@ def main() -> None:
 
     results = run(scene_ids, cfg)
     summarize_and_write(results, output_root, cfg.write_stats)
+    if cfg.cache_cdf_depth_labels and any(not r.ok for r in results):
+        raise SystemExit("GC6D CDF cache generation failed for one or more scenes.")
 
 
 if __name__ == "__main__":
