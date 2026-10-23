@@ -380,6 +380,7 @@ class GraspClutter6DMultiDataset(Dataset):
         scene_name_format: str = "plain6",
         strict_label_check: bool = True,
         fallback_to_depth_mask_on_empty: bool = False,
+        load_grasp_payload: bool = True,
     ):
         self.root = Path(root)
         self.camera = canonical_camera(camera)
@@ -393,6 +394,7 @@ class GraspClutter6DMultiDataset(Dataset):
         self.use_fuse_depth = bool(use_fuse_depth)
         self.graspness_mode = str(graspness_mode)
         self.extend_angle = bool(extend_angle)
+        self.load_grasp_payload = bool(load_grasp_payload)
 
         # If remove_outlier is explicitly passed, map it to mask_mode for
         # backward compatibility. Otherwise trust mask_mode.
@@ -722,6 +724,28 @@ class GraspClutter6DMultiDataset(Dataset):
         )
         return scene_id, img_id, ann_id, scene_gt, cam_info, K, factor_depth
 
+    @staticmethod
+    def build_camera_orientation_metadata(cam_info: dict):
+        """Return GraspNet-compatible view/up orientation (GC6D world +Z up).
+
+        BOP cam_R_w2c maps world directions to the camera frame. Audit the
+        GC6D world-up convention before interpreting pose-aware results.
+        """
+        if "cam_R_w2c" not in cam_info:
+            raise KeyError("GC6D scene_camera lacks cam_R_w2c for pose-depth FiLM.")
+        R_w2c = np.asarray(cam_info["cam_R_w2c"], dtype=np.float32).reshape(3, 3)
+        if not np.isfinite(R_w2c).all():
+            raise ValueError("Non-finite GC6D cam_R_w2c.")
+        pose_vec = -(R_w2c.T[:, 2])
+        gravity_vec = R_w2c @ np.array([0., 0., 1.], dtype=np.float32)
+        for name, vec in (("pose", pose_vec), ("gravity", gravity_vec)):
+            n = float(np.linalg.norm(vec))
+            if not np.isfinite(n) or n < 1e-8:
+                raise ValueError(f"Invalid GC6D {name} orientation.")
+            vec /= n
+        tilt = np.float32(np.degrees(np.arccos(np.clip(float(pose_vec[2]), -1., 1.))))
+        return pose_vec.astype(np.float32), gravity_vec.astype(np.float32), tilt
+
     def _build_current_object_meta(self, scene_id: int, img_id: int, grasp_labels_npz=None):
         """Build cls_indexes and poses in the same order as economic label pointid."""
         scene_gt = self._load_scene_gt(scene_id)
@@ -896,6 +920,9 @@ class GraspClutter6DMultiDataset(Dataset):
         gt_depth_m_resized = cv2.resize(gt_depth_crop, (Wr, Hr), interpolation=cv2.INTER_NEAREST).astype(np.float32)
 
         K_resized = self.resize_intrinsics_with_crop(intrinsic, crop_box, out_hw=self.resize_shape)
+        camera_pose_vec, camera_gravity_vec, camera_tilt_deg = (
+            self.build_camera_orientation_metadata(cam_info)
+        )
         depth_prob_gt, depth_prob_w = self.build_depth_prob_gt(gt_depth_m_resized)
 
         H, W, valid_flat, cloud_masked, seg_masked = self._mask_and_sample(depth, seg, cloud, mask)
@@ -967,43 +994,71 @@ class GraspClutter6DMultiDataset(Dataset):
             pix_flat, (H, W), crop_box, out_hw=self.resize_shape
         )
 
-        # -----------------------------
-        # Economic grasp labels
-        # -----------------------------
-        grasp_labels = np.load(self.grasp_labels[scene])
-        points = grasp_labels["points"]
-        rotations = grasp_labels["rotations"].astype(np.int32)
-        depth_l = grasp_labels["depth"].astype(np.int32)
-        scores = grasp_labels["scores"].astype(np.float32) / 10.0
-        widths = grasp_labels["widths"].astype(np.float32) / 1000.0
-        topview = grasp_labels["topview"].astype(np.int32)
-        view_graspness = grasp_labels["vgraspness"].astype(np.float32)
-        pointid = grasp_labels["pointid"]
-        collisions = grasp_labels["collisions"].astype(np.float32)
+        grasp_payload = {}
+        if not self.load_grasp_payload:
+            # Sole-owner CVA adapter will read dense labels; read only the
+            # matching scene object's ordered IDs here, from the same cache.
+            cache_path = self.grasp_labels[scene]
+            with np.load(cache_path, allow_pickle=False) as cache:
+                if "obj_ids" not in cache.files:
+                    raise KeyError(
+                        f"GC6D CVA-CDF cache lacks obj_ids (object-order audit): {cache_path}"
+                    )
+                obj_idxs, poses = self._build_current_object_meta(scene_id, img_id, cache)
+            object_poses_list = [
+                poses[:, :, i].astype(np.float32, copy=True)
+                for i in range(len(obj_idxs))
+            ]
+        else:
+            # -----------------------------
+            # Economic grasp labels
+            # -----------------------------
+            grasp_labels = np.load(self.grasp_labels[scene])
+            points = grasp_labels["points"]
+            rotations = grasp_labels["rotations"].astype(np.int32)
+            depth_l = grasp_labels["depth"].astype(np.int32)
+            scores = grasp_labels["scores"].astype(np.float32) / 10.0
+            widths = grasp_labels["widths"].astype(np.float32) / 1000.0
+            topview = grasp_labels["topview"].astype(np.int32)
+            view_graspness = grasp_labels["vgraspness"].astype(np.float32)
+            pointid = grasp_labels["pointid"]
+            collisions = grasp_labels["collisions"].astype(np.float32)
 
-        obj_idxs, poses = self._build_current_object_meta(scene_id, img_id, grasp_labels)
+            obj_idxs, poses = self._build_current_object_meta(scene_id, img_id, grasp_labels)
 
-        object_poses_list = []
-        grasp_points_list = []
-        grasp_rotations_list = []
-        grasp_depth_list = []
-        grasp_widths_list = []
-        grasp_scores_list = []
-        view_graspness_list = []
-        top_view_index_list = []
-        grasp_collision_list = []
+            object_poses_list = []
+            grasp_points_list = []
+            grasp_rotations_list = []
+            grasp_depth_list = []
+            grasp_widths_list = []
+            grasp_scores_list = []
+            view_graspness_list = []
+            top_view_index_list = []
+            grasp_collision_list = []
 
-        for i, obj_idx in enumerate(obj_idxs):
-            object_poses_list.append(poses[:, :, i])
-            mask_i = (pointid == i)
-            grasp_points_list.append(points[mask_i])
-            grasp_rotations_list.append(rotations[mask_i])
-            grasp_depth_list.append(depth_l[mask_i])
-            grasp_scores_list.append(scores[mask_i])
-            grasp_widths_list.append(widths[mask_i])
-            view_graspness_list.append(view_graspness[mask_i])
-            top_view_index_list.append(topview[mask_i])
-            grasp_collision_list.append(collisions[mask_i])
+            for i, obj_idx in enumerate(obj_idxs):
+                object_poses_list.append(poses[:, :, i])
+                mask_i = (pointid == i)
+                grasp_points_list.append(points[mask_i])
+                grasp_rotations_list.append(rotations[mask_i])
+                grasp_depth_list.append(depth_l[mask_i])
+                grasp_scores_list.append(scores[mask_i])
+                grasp_widths_list.append(widths[mask_i])
+                view_graspness_list.append(view_graspness[mask_i])
+                top_view_index_list.append(topview[mask_i])
+                grasp_collision_list.append(collisions[mask_i])
+
+            grasp_labels.close()
+            grasp_payload = dict(
+                grasp_points_list=grasp_points_list,
+                grasp_rotations_list=grasp_rotations_list,
+                grasp_depth_list=grasp_depth_list,
+                grasp_widths_list=grasp_widths_list,
+                grasp_scores_list=grasp_scores_list,
+                view_graspness_list=view_graspness_list,
+                top_view_index_list=top_view_index_list,
+                grasp_collision_list=grasp_collision_list,
+            )
 
         if self.augment:
             cloud_sampled, object_poses_list = self.augment_data(cloud_sampled, object_poses_list)
@@ -1028,14 +1083,6 @@ class GraspClutter6DMultiDataset(Dataset):
 
             # economic grasp labels
             "object_poses_list": object_poses_list,
-            "grasp_points_list": grasp_points_list,
-            "grasp_rotations_list": grasp_rotations_list,
-            "grasp_depth_list": grasp_depth_list,
-            "grasp_widths_list": grasp_widths_list,
-            "grasp_scores_list": grasp_scores_list,
-            "view_graspness_list": view_graspness_list,
-            "top_view_index_list": top_view_index_list,
-            "grasp_collision_list": grasp_collision_list,
 
             # debug / bookkeeping
             "sampled_masked_idxs": idxs.astype(np.int64),
@@ -1048,12 +1095,15 @@ class GraspClutter6DMultiDataset(Dataset):
             "depth_prob_gt": depth_prob_gt.astype(np.float32),
             "depth_prob_weight": depth_prob_w.astype(np.float32),
             "sensor_depth_m": sensor_depth_m_resized.astype(np.float32),
+            "camera_pose_vec": camera_pose_vec,
+            "camera_gravity_vec": camera_gravity_vec,
+            "camera_tilt_deg": camera_tilt_deg,
 
             "scene_idx": np.int64(scene_id),
             "anno_idx": np.int64(ann_id),
-            "img_id": np.int64(img_id),
             "dataset_idx": np.int64(index),
         }
+        ret_dict.update(grasp_payload)
         return ret_dict
 
 
