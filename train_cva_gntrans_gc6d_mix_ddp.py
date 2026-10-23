@@ -177,6 +177,9 @@ class GraspNetGNTransGC6DMixedTrainer(pair.GNTransMixedTrainer):
             "gc6d_scene_ids_sha256": hashlib.sha256(
                 ",".join(map(str, ids)).encode("ascii")
             ).hexdigest(),
+            "gc6d_scene_ids_file_sha256": hashlib.sha256(
+                split_path.read_bytes()
+            ).hexdigest(),
             "gc6d_camera": base_dataset.camera,
             "gc6d_cdf_label_folder": label_folder,
             "gc6d_scene_count": len(ids),
@@ -189,14 +192,20 @@ class GraspNetGNTransGC6DMixedTrainer(pair.GNTransMixedTrainer):
             "source_weights": "natural-frame-count; not oversampled",
             "training_input": "RGB only; other modalities supervision only",
             "in_training_validation": "original+gntrans test_seen subsets",
-            "filter_provenance": "scene IDs supplied by audited file; content SHA recorded",
+            "filter_provenance": "audited scene-ID file; raw-file and canonical-ID SHA256 recorded",
             "model_intervention": "none; dataset expansion only",
         })
         if self.main:
             self.log_string("[GNTRANS-GC6D-MIX] " + json.dumps(self.mix_protocol, sort_keys=True))
+            protocol_json = json.dumps(self.mix_protocol, indent=2, sort_keys=True)
             (Path(cfgs.log_dir) / "gntrans_gc6d_mix_protocol.json").write_text(
-                json.dumps(self.mix_protocol, indent=2, sort_keys=True),
-                encoding="utf-8",
+                protocol_json, encoding="utf-8",
+            )
+            # The inherited two-source trainer has already written this path;
+            # refresh it so there is no stale 5200-sample manifest next to
+            # the actual three-source 8216-sample run.
+            (Path(cfgs.log_dir) / "gntrans_mix_protocol.json").write_text(
+                protocol_json, encoding="utf-8",
             )
 
 
