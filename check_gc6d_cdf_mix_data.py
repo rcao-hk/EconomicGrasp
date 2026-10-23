@@ -123,10 +123,32 @@ def main():
             f"GC6D has {len(errors)} missing frame files; first ten:\n"
             + "\n".join(errors[:10])
         )
+    # Check the object identities in *every* frame against the scene-level
+    # cache, not only the first frame selected by --load_one.
+    samples_by_scene = {}
+    for scene_id, img_id, ann_id in base.samples:
+        samples_by_scene.setdefault(int(scene_id), []).append((int(img_id), int(ann_id)))
     per_scene = {}
     for scene in sorted(seen):
+        scene_id = int(scene)
         path = root / a.gc6d_label_folder / f"{scene}_labels.npz"
         per_scene[scene] = check_cache(path, full=a.check_all_caches)
+        with np.load(path, allow_pickle=False) as cache:
+            cache_ids = {int(x) for x in cache["obj_ids"].tolist()}
+        pose_file = root / "scenes" / f"{scene_id:06d}" / "scene_gt.json"
+        with pose_file.open("r", encoding="utf-8") as fin:
+            scene_gt = json.load(fin)
+        for image_id, anno_id in samples_by_scene[scene_id]:
+            frame = str(image_id)
+            if frame not in scene_gt:
+                raise KeyError(f"GC6D scene {scene} missing scene_gt frame {frame}")
+            frame_ids = {int(obj["obj_id"]) for obj in scene_gt[frame]}
+            missing = sorted(cache_ids - frame_ids)
+            if missing:
+                raise ValueError(
+                    f"GC6D cache obj_ids absent from scene_gt: scene={scene} "
+                    f"ann={anno_id} img={image_id} missing={missing}"
+                )
     if len(seen) != a.expected_scenes:
         raise ValueError(f"Scene count mismatch: indexed {len(seen)} vs {a.expected_scenes}")
 
@@ -162,6 +184,7 @@ def main():
         "sampled_obj_count_range": [min(per_scene.values()), max(per_scene.values())],
         "load_one_pass": bool(a.load_one),
         "all_caches_shape_checked": bool(a.check_all_caches),
+        "all_frames_pose_ids_checked": True,
     }
     print("[GC6D-CDF-PREFLIGHT] " + json.dumps(result, indent=2))
     if a.output_json:
