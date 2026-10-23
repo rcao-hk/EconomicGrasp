@@ -6,7 +6,8 @@ set -euo pipefail
 
 : "${DATASET_ROOT:?Set DATASET_ROOT to GraspNet root}"
 : "${GNTRANS_RGB_ROOT:?Set GNTRANS_RGB_ROOT to GN-Trans RGB root}"
-: "${CKPT:?Set CKPT to a completed triple-mix checkpoint}"
+# The delegated launcher requires CKPT only for ENABLE_INFERENCE=1.
+# Evaluation-only mode can reuse existing dumps without a checkpoint.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
