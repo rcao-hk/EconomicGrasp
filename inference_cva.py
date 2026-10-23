@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader, Subset
 from graspnetAPI import GraspGroup
 
 from utils.arguments import cfgs
+from models.grasp_designs import design_options, validate_checkpoint_design
 from utils.collision_detector import ModelFreeCollisionDetectorTorch
 from dataset.graspnet_dataset import GraspNetMultiDataset, collate_fn
 from models.economicgrasp_bip3d import (
@@ -62,6 +63,7 @@ def _load_checkpoint_strict(model, checkpoint_path: str) -> None:
             f"CVA model checkpoint not found: {checkpoint_path}"
         )
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    validate_checkpoint_design(model, checkpoint)
     state = (
         checkpoint["model_state_dict"]
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint
@@ -133,6 +135,7 @@ def inference() -> None:
     )
     
     model = economicgrasp_dpt(
+        **design_options(cfgs),
         min_depth=cfgs.min_depth,
         max_depth=cfgs.max_depth,
         bin_num=cfgs.bin_num,

@@ -32,6 +32,7 @@ def _parse_gc6d_flags():
     parser.add_argument("--gc6d_expected_scenes", type=int, default=232)
     parser.add_argument("--gc6d_expected_frames", type=int, default=3016)
     parser.add_argument("--gc6d_workspace_pose_mode", default="json")
+    parser.add_argument("--gc6d_graspness_mode", choices=("scene", "instance"), default="scene")
     args, other = parser.parse_known_args()
     sys.argv = [sys.argv[0], *other]
     if not args.gc6d_root:
@@ -114,7 +115,7 @@ class GraspNetGNTransGC6DMixedTrainer(pair.GNTransMixedTrainer):
             # GC6D virtual depth is already fused; GraspNet TSDF option
             # must not be blindly forwarded to a different data layout.
             use_fuse_depth=False,
-            graspness_mode=cfgs.graspness_mode,
+            graspness_mode=GC6D_FLAGS.gc6d_graspness_mode,
             extend_angle=True,
             economic_label_root=str(root / label_folder),
             scene_name_format="plain6",
@@ -170,6 +171,8 @@ class GraspNetGNTransGC6DMixedTrainer(pair.GNTransMixedTrainer):
         # Full per-domain seen/similar/novel AP is handled by the eval launcher.
 
         self.mix_protocol.update({
+            "grasp_design": self.unwrap_model().grasp_design,
+            "gc6d_graspness_mode": GC6D_FLAGS.gc6d_graspness_mode,
             "contract_version": TRIPLE_MIX_CONTRACT_VERSION,
             "sources": ["graspnet", "gntrans", "graspclutter6d_filtered"],
             "gc6d_root": str(root),
@@ -193,7 +196,7 @@ class GraspNetGNTransGC6DMixedTrainer(pair.GNTransMixedTrainer):
             "training_input": "RGB only; other modalities supervision only",
             "in_training_validation": "original+gntrans test_seen subsets",
             "filter_provenance": "audited scene-ID file; raw-file and canonical-ID SHA256 recorded",
-            "model_intervention": "none; dataset expansion only",
+            "model_intervention": self.unwrap_model().grasp_design,
         })
         if self.main:
             self.log_string("[GNTRANS-GC6D-MIX] " + json.dumps(self.mix_protocol, sort_keys=True))

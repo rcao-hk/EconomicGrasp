@@ -85,6 +85,12 @@ parser.add_argument("--use_obs_depth", action='store_true')
 parser.add_argument("--use_depth_comp", action='store_true')
 parser.add_argument("--graspness_mode", type=str,)
 parser.add_argument("--kview_mode", type=str, default='A1')
+parser.add_argument("--enable_point_rayrope", action="store_true",
+                    help="Enable Point RayRoPE grouping with image-FPS centers; default off.")
+parser.add_argument("--enable_gvar", action="store_true",
+                    help="Enable volume_rel GVAR readout; independent of Point RayRoPE, default off.")
+parser.add_argument("--rayrope_group_chunk", type=int, default=32)
+parser.add_argument("--gvar_action_chunk", type=int, default=256)
 # parser.add_argument(
 #     "--use_pose_loss_mask",
 #     action="store_true",

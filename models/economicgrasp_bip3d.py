@@ -6396,8 +6396,16 @@ class economicgrasp_dpt(nn.Module):
         debug_print_every: int = 50,
         seed_selection_mode: str = "point_fps",
         geometry_depth_source: str = "pred",
+        enable_point_rayrope: bool = False,
+        enable_gvar: bool = False,
+        rayrope_group_chunk: int = 32,
+        gvar_action_chunk: int = 256,
     ):
         super().__init__()
+        self.enable_point_rayrope = bool(enable_point_rayrope)
+        self.enable_gvar = bool(enable_gvar)
+        if self.enable_point_rayrope or self.enable_gvar:
+            seed_selection_mode = "image_fps"
         self.is_training = bool(is_training)
         self.use_gt_xyz_for_train = bool(use_gt_xyz_for_train)
         self.seed_feature_dim = int(tok_feat_dim)
@@ -6767,6 +6775,13 @@ class economicgrasp_dpt(nn.Module):
                 **common_kview_kwargs,
                 use_cdf=self.use_cdf,
             )
+        )
+
+        from models.grasp_designs import install_grasp_designs
+        install_grasp_designs(
+            self, enable_point_rayrope=self.enable_point_rayrope,
+            enable_gvar=self.enable_gvar, rayrope_group_chunk=rayrope_group_chunk,
+            gvar_action_chunk=gvar_action_chunk,
         )
 
         # Geometry diagnostics are independent of the prediction-head choice
@@ -8325,12 +8340,14 @@ class economicgrasp_dpt(nn.Module):
             float(force_label_processing)
         ).reshape(())
 
+        if self.enable_gvar:
+            end_points["_gvar_pregeom"] = proposal_path1
         end_points = self.kview_grasp_module(
             seed_features=seed_features_graspable,
             seed_xyz=seed_xyz_graspable,
             token_sel_idx=token_sel_idx,
             feat_map=feat_grid,
-            depth_map=depth_448,
+            depth_map=(depth_448.detach() if (self.enable_point_rayrope or self.enable_gvar) else depth_448),
             camera_K=K,
             end_points=end_points,
             is_training=self.is_training,

@@ -756,7 +756,8 @@ def write_csv(path: Path, rows: Sequence[Dict[str, object]]) -> None:
     if not rows:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    keys = list(rows[0].keys())
+    # Resumed scenes contain only scene_id; fresh scenes include full stats.
+    keys = list(dict.fromkeys(key for row in rows for key in row))
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=keys)
         writer.writeheader()

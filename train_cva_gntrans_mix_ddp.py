@@ -297,6 +297,7 @@ class GNTransMixedTrainer(base.Trainer):
         if not self.main:
             return
         save_dict = {
+            "grasp_design": self.unwrap_model().grasp_design,
             "epoch": epoch + 1,
             "optimizer_state_dict": self.optimizer.state_dict(),
             "model_state_dict": self.unwrap_model().state_dict(),

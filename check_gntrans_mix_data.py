@@ -55,10 +55,10 @@ def assert_pairs(a, b, ia, ib):
             raise RuntimeError(f"paired sample mismatch: {pa} != {pb}")
 
 
-def selected_paths(original, trans, indices):
+def selected_paths(original, trans, indices, require_labels=True):
     for i in indices:
         scene = str(original.scenename[i])
-        yield {
+        paths = {
             "original_rgb": original.colorpath[i],
             "original_sensor_depth": original.depthpath[i],
             "original_gt_depth": original.gtdepthpath[i],
@@ -73,6 +73,12 @@ def selected_paths(original, trans, indices):
                 f"{scene}_labels.npz",
             ),
         }
+        if not require_labels:
+            # Similar/novel inference has load_label=False. Do not require
+            # training-only virtual graspness/CDF assets for held-out frames.
+            paths.pop("virtual_graspness")
+            paths.pop("cdf_cache")
+        yield paths
 
 
 def check_paths(paths, all_selected: bool):
@@ -135,7 +141,7 @@ def main():
         ti = scene_stride_indices(trans, ARGS.fraction)
         assert_pairs(original, trans, oi, ti)
         checked = check_paths(
-            selected_paths(original, trans, oi),
+            selected_paths(original, trans, oi, require_labels=split in ("train", "test_seen")),
             all_selected=bool(ARGS.check_all_selected),
         )
         row = {

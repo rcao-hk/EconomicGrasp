@@ -47,6 +47,13 @@ if [[ "${ENABLE_INFERENCE}" == "1" ]]; then
 fi
 
 TOP4_VIEW_ARGS=()
+for flag in ENABLE_POINT_RAYROPE ENABLE_GVAR; do
+  value="${!flag:-0}"
+  [[ "$value" =~ ^[01]$ ]] || { echo "Invalid $flag=$value" >&2; exit 2; }
+done
+[[ "${ENABLE_POINT_RAYROPE:-0}" == 0 ]] || TOP4_VIEW_ARGS+=(--enable_point_rayrope)
+[[ "${ENABLE_GVAR:-0}" == 0 ]] || TOP4_VIEW_ARGS+=(--enable_gvar)
+TOP4_VIEW_ARGS+=(--rayrope_group_chunk "${RAYROPE_GROUP_CHUNK:-32}" --gvar_action_chunk "${GVAR_ACTION_CHUNK:-256}")
 if [[ "${USE_TOP4_VIEW_INFER}" == "1" ]]; then
   TOP4_VIEW_ARGS+=(--use_top4_view_infer)
 fi
@@ -150,14 +157,16 @@ print(1 if x >= 1 else max(1, round(1.0/x)))
 PY
 )
 
-# CPU evaluator pools are intentionally serialized to avoid memory contention.
-for domain in "${DOMAIN_ARRAY[@]}"; do
-  for split in "${SPLIT_ARRAY[@]}"; do
+# One split per GPU, with a separate worker pool for each split.
+run_eval() {
+    local idx="$1" gpu="$2"
+    local domain="${JOB_DOMAIN[$idx]}" split="${JOB_SPLIT[$idx]}"
+    local out
     out="${OUTPUT_ROOT}/${domain}/${split}"
     echo "[MIX-EVAL] official evaluator ${domain}/${split}, stride=${STRIDE}"
-    extra=()
+    local extra=()
     if [[ "${REMOVE_DUMP}" == "1" ]]; then extra+=(--remove_dump); fi
-    python eval.py \
+    CUDA_VISIBLE_DEVICES="${gpu}" python eval.py \
       --dataset_root "${DATASET_ROOT}" \
       --dump_dir "${out}" \
       --camera realsense \
@@ -166,7 +175,20 @@ for domain in "${DOMAIN_ARRAY[@]}"; do
       --sample_interval "${STRIDE}" \
       "${extra[@]}" \
       > "${out}/evaluation.log" 2>&1
+}
+start=0
+while [[ ${start} -lt ${njobs} ]]; do
+  pids=()
+  for ((j=0; j<ngpu && start+j<njobs; j++)); do
+    run_eval "$((start+j))" "${GPU_ARRAY[$j]}" &
+    pids+=("$!")
   done
+  status=0
+  for pid in "${pids[@]}"; do
+    if ! wait "${pid}"; then status=1; fi
+  done
+  [[ ${status} -eq 0 ]] || { echo 'Official evaluation failed; inspect evaluation.log' >&2; exit 1; }
+  start=$((start+ngpu))
 done
 else
   echo "[MIX-EVAL] evaluation disabled"

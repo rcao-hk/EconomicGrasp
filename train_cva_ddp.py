@@ -20,6 +20,7 @@ from utils.arguments import cfgs
 
 # Local libraries.
 from models.economicgrasp_bip3d import economicgrasp_dpt
+from models.grasp_designs import design_options, validate_checkpoint_design
 from models.loss_economicgrasp_depth_kview_transformer import (
     get_loss as get_loss_economicgrasp,
 )
@@ -623,6 +624,7 @@ class Trainer:
         )
 
         self.net = economicgrasp_dpt(
+            **design_options(cfgs),
             min_depth=cfgs.min_depth,
             max_depth=cfgs.max_depth,
             bin_num=cfgs.bin_num,
@@ -670,6 +672,7 @@ class Trainer:
         self.start_epoch = 0
         if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
             checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu')
+            validate_checkpoint_design(self.unwrap_model(), checkpoint)
             state_dict = (
                 checkpoint['model_state_dict']
                 if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint
@@ -1061,6 +1064,7 @@ class Trainer:
         if not self.main:
             return
         save_dict = {
+            'grasp_design': self.unwrap_model().grasp_design,
             'epoch': epoch + 1,
             'optimizer_state_dict': self.optimizer.state_dict(),
             'model_state_dict': self.unwrap_model().state_dict(),

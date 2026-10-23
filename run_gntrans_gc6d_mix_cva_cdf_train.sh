@@ -15,6 +15,7 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/data2/robotarm/result/grasp/rgbgrasp/log/cva_cdf_gn
 TRAIN_FRACTION="${TRAIN_FRACTION:-0.1}"
 EVAL_FRACTION="${EVAL_FRACTION:-0.1}"
 GC6D_CAMERA="${GC6D_CAMERA:-realsense-d435}"
+GC6D_GRASPNESS_MODE="${GC6D_GRASPNESS_MODE:-scene}"
 GC6D_MAX_ANN="${GC6D_MAX_ANN:-13}"
 GC6D_SCENE_IDS_FILE="${GC6D_SCENE_IDS_FILE:-${GC6D_ROOT}/split_info/no_gn_test_overlap/grasp_train_scene_ids_no_graspnet_test_overlap.json}"
 GC6D_LABEL_FOLDER="${GC6D_LABEL_FOLDER:-economic_grasp_label_300views_extend_angle_cdf_depth}"
@@ -52,6 +53,7 @@ if [[ "${CHECK_DATA}" == "1" ]]; then
     --gc6d_root "${GC6D_ROOT}" \
     --gc6d_scene_ids_file "${GC6D_SCENE_IDS_FILE}" \
     --gc6d_camera "${GC6D_CAMERA}" \
+    --graspness_mode "${GC6D_GRASPNESS_MODE}" \
     --gc6d_label_folder "${GC6D_LABEL_FOLDER}" \
     --max_ann "${GC6D_MAX_ANN}" \
     --expected_scenes "${GC6D_EXPECTED_SCENES}" \
@@ -76,11 +78,18 @@ if [[ "${DRY_RUN}" == "1" ]]; then
 fi
 
 EXTRA=()
+for flag in ENABLE_POINT_RAYROPE ENABLE_GVAR; do
+  value="${!flag:-0}"
+  [[ "$value" =~ ^[01]$ ]] || { echo "Invalid $flag=$value" >&2; exit 2; }
+done
+[[ "${ENABLE_POINT_RAYROPE:-0}" == 0 ]] || EXTRA+=(--enable_point_rayrope)
+[[ "${ENABLE_GVAR:-0}" == 0 ]] || EXTRA+=(--enable_gvar)
+EXTRA+=(--rayrope_group_chunk "${RAYROPE_GROUP_CHUNK:-32}" --gvar_action_chunk "${GVAR_ACTION_CHUNK:-256}")
 if [[ "${USE_FUSE_DEPTH}" == "1" ]]; then
   EXTRA+=(--use_fuse_depth --mix_use_fused_background)
 fi
 if [[ "${TRAIN_VALIDATE}" == "1" ]]; then
-  EXTRA+=(--enable_eval --eval_start_epoch 0)
+  EXTRA+=(--enable_eval --eval_start_epoch "${EVAL_START_EPOCH:-10}")
 fi
 
 export CUDA_VISIBLE_DEVICES="${GPUS}"
@@ -90,6 +99,7 @@ torchrun --standalone --nproc_per_node="${NPROC}" train_cva_gntrans_gc6d_mix_ddp
   --gc6d_root "${GC6D_ROOT}" \
   --gc6d_scene_ids_file "${GC6D_SCENE_IDS_FILE}" \
   --gc6d_camera "${GC6D_CAMERA}" \
+  --gc6d_graspness_mode "${GC6D_GRASPNESS_MODE}" \
   --gc6d_max_ann "${GC6D_MAX_ANN}" \
   --gc6d_cdf_label_folder "${GC6D_LABEL_FOLDER}" \
   --gc6d_expected_scenes "${GC6D_EXPECTED_SCENES}" \

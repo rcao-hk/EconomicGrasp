@@ -42,6 +42,7 @@ def _parse_gntrans_flags():
 
 G = _parse_gntrans_flags()
 from utils.arguments import cfgs
+from models.grasp_designs import design_options, validate_checkpoint_design
 from utils.collision_detector import ModelFreeCollisionDetectorTorch
 from dataset.graspnet_dataset import (
     GraspNetMultiDataset,
@@ -175,6 +176,7 @@ def inference() -> None:
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = economicgrasp_dpt(
+        **design_options(cfgs),
         min_depth=cfgs.min_depth,
         max_depth=cfgs.max_depth,
         bin_num=cfgs.bin_num,
@@ -185,6 +187,7 @@ def inference() -> None:
         vis_dir=getattr(cfgs, "vis_dir", None),
         vis_every=int(getattr(cfgs, "vis_every", 1000)),
     ).to(device)
+    validate_checkpoint_design(model, ck)
     result = model.load_state_dict(state, strict=True)
     if result.missing_keys or result.unexpected_keys:
         raise RuntimeError(

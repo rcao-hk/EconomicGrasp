@@ -61,10 +61,10 @@ def check_cache(path: Path, full: bool = False):
         if t.shape != (6,) or not np.allclose(t, np.arange(0.2, 1.21, 0.2), atol=1e-5):
             raise ValueError(f"Unexpected CDF friction thresholds: {path}: {t}")
         ids = labels["obj_ids"]
-        if ids.ndim != 1 or len(ids) == 0 or len(set(ids.tolist())) != len(ids):
+        if ids.ndim != 1 or len(ids) == 0 or np.any(ids <= 0):
             raise ValueError(f"Invalid obj_ids cache mapping: {path}")
         pointid = labels["pointid"]
-        if pointid.ndim != 1 or pointid.size == 0 or pointid.max() >= len(ids):
+        if pointid.ndim != 1 or pointid.size == 0 or pointid.min() < 0 or pointid.max() >= len(ids):
             raise ValueError(f"Invalid local pointid: {path}")
         if full:
             points = labels["points"]
@@ -134,7 +134,7 @@ def main():
         path = root / a.gc6d_label_folder / f"{scene}_labels.npz"
         per_scene[scene] = check_cache(path, full=a.check_all_caches)
         with np.load(path, allow_pickle=False) as cache:
-            cache_ids = {int(x) for x in cache["obj_ids"].tolist()}
+            cache_ids = [int(x) for x in cache["obj_ids"].tolist()]
         pose_file = root / "scenes" / f"{scene_id:06d}" / "scene_gt.json"
         with pose_file.open("r", encoding="utf-8") as fin:
             scene_gt = json.load(fin)
@@ -142,12 +142,11 @@ def main():
             frame = str(image_id)
             if frame not in scene_gt:
                 raise KeyError(f"GC6D scene {scene} missing scene_gt frame {frame}")
-            frame_ids = {int(obj["obj_id"]) for obj in scene_gt[frame]}
-            missing = sorted(cache_ids - frame_ids)
-            if missing:
+            frame_ids = [int(obj["obj_id"]) for obj in scene_gt[frame]]
+            if cache_ids != frame_ids:
                 raise ValueError(
                     f"GC6D cache obj_ids absent from scene_gt: scene={scene} "
-                    f"ann={anno_id} img={image_id} missing={missing}"
+                    f"ann={anno_id} img={image_id} instance order differs"
                 )
     if len(seen) != a.expected_scenes:
         raise ValueError(f"Scene count mismatch: indexed {len(seen)} vs {a.expected_scenes}")

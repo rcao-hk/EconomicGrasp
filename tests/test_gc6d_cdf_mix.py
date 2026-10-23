@@ -16,12 +16,43 @@ from dataset.generate_economic_gc6d import (
     _build_cdf_depth_labels,
     _parse_cdf_thresholds,
     _gather_top_views_4d,
+    write_csv,
 )
 from dataset.gc6d_dataset import GraspClutter6DMultiDataset
 from dataset.cdf_label_adapter import CVAExtendedLabelAdapter
 
 
 class TestGC6DCDFEncoding(unittest.TestCase):
+    def test_resumed_scene_stats_include_fresh_columns(self):
+        import csv
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'stats.csv'
+            write_csv(path, [dict(scene_id=5), dict(scene_id=7, points=12)])
+            with path.open() as reader:
+                rows = list(csv.DictReader(reader))
+            self.assertEqual(rows[0]['points'], '')
+            self.assertEqual(rows[1]['points'], '12')
+
+    def test_repeated_object_instances_keep_distinct_poses(self):
+        dataset = GraspClutter6DMultiDataset.__new__(GraspClutter6DMultiDataset)
+        frame = [dict(obj_id=69, cam_R_m2c=np.eye(3).flatten().tolist(),
+                      cam_t_m2c=[x, 0, 500]) for x in (0, 100)]
+        dataset._load_scene_gt = lambda scene: {'2': frame}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'cache.npz'
+            np.savez(path, obj_ids=np.array([69, 69]))
+            with np.load(path) as cache:
+                ids, poses = dataset._build_current_object_meta(5, 2, cache)
+        self.assertEqual(ids.tolist(), [69, 69])
+        np.testing.assert_allclose(poses[0, 3, :], [0., .1])
+
+    def test_camera_json_is_camera_to_world(self):
+        R = np.array([[0., 0., 1.], [1., 0., 0.], [0., 1., 0.]], np.float32)
+        pose, up, _ = GraspClutter6DMultiDataset.build_camera_orientation_metadata(
+            {'cam_R_w2c': R.flatten().tolist()})
+        np.testing.assert_allclose(pose, -R[:, 2])
+        np.testing.assert_allclose(up, R.T @ [0., 0., 1.])
+
     def test_binning_boundary_invalid_collision_and_width(self):
         thresholds = _parse_cdf_thresholds("0.2,0.4,0.6,0.8,1.0,1.2")
         raw = torch.tensor(

@@ -726,18 +726,18 @@ class GraspClutter6DMultiDataset(Dataset):
 
     @staticmethod
     def build_camera_orientation_metadata(cam_info: dict):
-        """Return GraspNet-compatible view/up orientation (GC6D world +Z up).
+        """GC6D release stores camera-to-world despite its BOP-style key name.
 
-        BOP cam_R_w2c maps world directions to the camera frame. Audit the
-        GC6D world-up convention before interpreting pose-aware results.
+        Verified from multi-view instance poses: R_json @ t_m2c + t_json
+        stays fixed across views; the inverse interpretation does not.
         """
         if "cam_R_w2c" not in cam_info:
             raise KeyError("GC6D scene_camera lacks cam_R_w2c for pose-depth FiLM.")
-        R_w2c = np.asarray(cam_info["cam_R_w2c"], dtype=np.float32).reshape(3, 3)
-        if not np.isfinite(R_w2c).all():
+        R_c2w = np.asarray(cam_info["cam_R_w2c"], dtype=np.float32).reshape(3, 3)
+        if not np.isfinite(R_c2w).all():
             raise ValueError("Non-finite GC6D cam_R_w2c.")
-        pose_vec = -(R_w2c.T[:, 2])
-        gravity_vec = R_w2c @ np.array([0., 0., 1.], dtype=np.float32)
+        pose_vec = -R_c2w[:, 2]
+        gravity_vec = R_c2w.T @ np.array([0., 0., 1.], dtype=np.float32)
         for name, vec in (("pose", pose_vec), ("gravity", gravity_vec)):
             n = float(np.linalg.norm(vec))
             if not np.isfinite(n) or n < 1e-8:
@@ -749,7 +749,7 @@ class GraspClutter6DMultiDataset(Dataset):
     def _build_current_object_meta(self, scene_id: int, img_id: int, grasp_labels_npz=None):
         """Build cls_indexes and poses in the same order as economic label pointid."""
         scene_gt = self._load_scene_gt(scene_id)
-        pose_map = scene_gt_pose_map(scene_gt, img_id)
+        frame_objects = scene_gt[str(int(img_id))]
 
         if grasp_labels_npz is not None and "obj_ids" in grasp_labels_npz.files:
             obj_ids = grasp_labels_npz["obj_ids"].astype(np.int32).tolist()
@@ -757,17 +757,12 @@ class GraspClutter6DMultiDataset(Dataset):
             # Fallback: current frame order. Safe only if economic labels used the same order.
             obj_ids = [int(o["obj_id"]) for o in scene_gt[str(int(img_id))]]
 
-        poses = []
-        missing = []
-        for obj_id in obj_ids:
-            if int(obj_id) not in pose_map:
-                missing.append(int(obj_id))
-                poses.append(np.zeros((3, 4), dtype=np.float32))
-            else:
-                poses.append(pose_map[int(obj_id)])
-
-        if missing and self.strict_label_check:
-            raise KeyError(f"Missing poses for obj_ids={missing} in scene={scene_id:06d}, img={img_id:06d}")
+        # pointid indexes physical instances, not object categories. A dict
+        # keyed by obj_id silently overwrites repeated objects in clutter.
+        frame_ids = [int(o["obj_id"]) for o in frame_objects]
+        if obj_ids != frame_ids:
+            raise ValueError(f"Cache/frame instance order mismatch in scene={scene_id:06d}, img={img_id:06d}")
+        poses = [pose_from_gc6d_obj(obj)[:3, :4] for obj in frame_objects]
 
         poses_arr = np.stack(poses, axis=2).astype(np.float32) if poses else np.zeros((3, 4, 0), dtype=np.float32)
         obj_idxs = np.asarray(obj_ids, dtype=np.int32)
