@@ -106,6 +106,7 @@ def make_gc6d_dataset(a):
     return GraspClutter6DMultiDataset(
         root=a.gc6d_root,camera=a.camera,split="test",
         num_points=a.num_point,load_label=False,augment=False,
+        load_gt_supervision=False,
         use_gt_depth=False,use_fuse_depth=False,depth_strides=1,
         min_depth=a.min_depth,max_depth=a.max_depth,bin_num=a.bin_num,
         mask_mode=a.mask_mode,remove_outlier=None,
@@ -274,6 +275,7 @@ def main():
         checkpoint_sha256=file_hash(a.checkpoint) if a.checkpoint else None,
         input_modality="RGB+known K/pose for neural network, predicted metric geometry",
         preprocessing_privilege="sensor depth and segmentation used by existing GC6D workspace/crop loader",
+        gt_virtual_depth_loaded=False,
         model_free_collision_filter="off" if a.collision_thresh==0 else "sensor_depth_on",
         pose_frame_interpretation="same legacy GC6D training loader global_film; verify using P0-C",
         split="test")
