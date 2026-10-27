@@ -182,20 +182,30 @@ def main():
                                  precision_at_k_b_percent=float(100 * precision_at_k(b, k).mean())))
 
     rng = np.random.default_rng(args.seed)
-    draws = defaultdict(list)
-    # Paired resampling: one scene index vector for each split; share it
-    # across original/GNTrans and both models to preserve the paired geometry.
-    for _ in range(args.bootstrap):
-        index = {split: rng.integers(0, 30, 30) for split in SPLITS}
-        for domain in (*DOMAINS, "macro"):
-            for k in ranks:
-                differences = []
-                for split in SPLITS:
-                    for d in (DOMAINS if domain == "macro" else (domain,)):
-                        a = arr[(names[0], d, split)][index[split]]
-                        b = arr[(names[1], d, split)][index[split]]
-                        differences.append(mean_metric(b, k) - mean_metric(a, k))
-                draws[(domain, k)].append(float(np.mean(differences)))
+    # Precompute per-scene AP@k once; bootstrapping the full
+    # [30,26,50,6] arrays thousands of times would be prohibitively slow.
+    scene_delta = {
+        (domain, split, k): (
+            ap_at_k(arr[(names[1], domain, split)], k).mean(axis=1)
+            - ap_at_k(arr[(names[0], domain, split)], k).mean(axis=1)
+        ) * 100.0
+        for domain in DOMAINS for split in SPLITS for k in ranks
+    }
+    # Paired/stratified: identical sampled scene IDs for GN/GNTrans and both
+    # models within a split; splits are independently resampled.
+    index = {
+        split: rng.integers(0, 30, size=(args.bootstrap, 30))
+        for split in SPLITS
+    }
+    draws = {}
+    for domain in (*DOMAINS, "macro"):
+        for k in ranks:
+            components = [
+                scene_delta[(d, split, k)][index[split]].mean(axis=1)
+                for split in SPLITS
+                for d in (DOMAINS if domain == "macro" else (domain,))
+            ]
+            draws[(domain, k)] = np.mean(np.stack(components, axis=0), axis=0)
 
     bootstrap = []
     for domain in (*DOMAINS, "macro"):
