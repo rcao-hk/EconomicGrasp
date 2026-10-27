@@ -381,6 +381,7 @@ class GraspClutter6DMultiDataset(Dataset):
         strict_label_check: bool = True,
         fallback_to_depth_mask_on_empty: bool = False,
         load_grasp_payload: bool = True,
+        load_gt_supervision: bool = True,
     ):
         self.root = Path(root)
         self.camera = canonical_camera(camera)
@@ -395,6 +396,9 @@ class GraspClutter6DMultiDataset(Dataset):
         self.graspness_mode = str(graspness_mode)
         self.extend_angle = bool(extend_angle)
         self.load_grasp_payload = bool(load_grasp_payload)
+        self.load_gt_supervision = bool(load_gt_supervision)
+        if self.use_gt_depth and not self.load_gt_supervision:
+            raise ValueError('use_gt_depth requires load_gt_supervision=True')
 
         # If remove_outlier is explicitly passed, map it to mask_mode for
         # backward compatibility. Otherwise trust mask_mode.
@@ -787,7 +791,7 @@ class GraspClutter6DMultiDataset(Dataset):
         sensor_depth = _read_depth_png(self.depthpath[index])
         depth = sensor_depth.copy()
         seg = load_label(self.labelpath[index])
-        gt_depth = _read_depth_png(self.gtdepthpath[index])
+        gt_depth = _read_depth_png(self.gtdepthpath[index]) if self.load_gt_supervision else None
 
         scene_id, img_id, ann_id, scene_gt, cam_info, intrinsic, factor_depth = self._get_sample_meta(index)
 
@@ -837,8 +841,11 @@ class GraspClutter6DMultiDataset(Dataset):
             sensor_depth, factor_depth, crop_box, out_hw=self.resize_shape
         )
 
-        gt_depth_m = self.build_fused_gt_depth_m(gt_depth, seg, index, factor_depth)
         K_resized = self.resize_intrinsics_with_crop(intrinsic, crop_box, out_hw=self.resize_shape)
+        if self.load_gt_supervision:
+            gt_depth_m = self.build_fused_gt_depth_m(gt_depth, seg, index, factor_depth)
+        else:
+            gt_depth_m = None
         # Match the SAME camera-orientation convention as get_data_label()
         # used during training. P0-C separately audits this convention.
         camera_pose_vec, camera_gravity_vec, camera_tilt_deg = (
@@ -846,10 +853,10 @@ class GraspClutter6DMultiDataset(Dataset):
         )
 
         Hr, Wr = self.resize_shape
-        gt_depth_crop = gt_depth_m[y0:y1, x0:x1]
-        gt_depth_m_resized = cv2.resize(gt_depth_crop, (Wr, Hr), interpolation=cv2.INTER_NEAREST).astype(np.float32)
-
-        depth_prob_gt, depth_prob_w = self.build_depth_prob_gt(gt_depth_m_resized)
+        if self.load_gt_supervision:
+            gt_depth_crop = gt_depth_m[y0:y1, x0:x1]
+            gt_depth_m_resized = cv2.resize(gt_depth_crop, (Wr, Hr), interpolation=cv2.INTER_NEAREST).astype(np.float32)
+            depth_prob_gt, depth_prob_w = self.build_depth_prob_gt(gt_depth_m_resized)
 
         ret_dict = {
             "point_clouds": cloud_sampled.astype(np.float32),
@@ -859,9 +866,6 @@ class GraspClutter6DMultiDataset(Dataset):
             "img": img,
             "img_idxs": resized_idxs.astype(np.int64),
             "K": K_resized.astype(np.float32),
-            "gt_depth_m": gt_depth_m_resized.astype(np.float32),
-            "depth_prob_gt": depth_prob_gt.astype(np.float32),
-            "depth_prob_weight": depth_prob_w.astype(np.float32),
             "sensor_depth_m": sensor_depth_m_resized.astype(np.float32),
             "camera_pose_vec": camera_pose_vec,
             "camera_gravity_vec": camera_gravity_vec,
@@ -871,6 +875,12 @@ class GraspClutter6DMultiDataset(Dataset):
             "img_id": np.int64(img_id),
             "dataset_idx": np.int64(index),
         }
+        if self.load_gt_supervision:
+            ret_dict.update({
+                "gt_depth_m": gt_depth_m_resized.astype(np.float32),
+                "depth_prob_gt": depth_prob_gt.astype(np.float32),
+                "depth_prob_weight": depth_prob_w.astype(np.float32),
+            })
         return ret_dict
 
     def get_data_label(self, index):
