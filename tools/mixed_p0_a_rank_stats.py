@@ -34,6 +34,10 @@ def parse_args():
     p.add_argument("--bootstrap", type=int, default=5000)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--ranks", default="1,5,10,50")
+    p.add_argument("--verify-dump-identities", action="store_true",
+                   help="Assert all 780 scene/frame predictions per split under each run/domain.")
+    p.add_argument("--dump-root-template", default="{run}/{domain}/test_collision_off",
+                   help="Directory to scan when --verify-dump-identities is enabled.")
     p.add_argument("--candidate-csv", default=None,
                    help="Optional physical friction CSV from mixed_p0_a_candidate_eval.py. "
                         "Required columns run,domain,split,scene,frame,rank,friction.")
@@ -81,6 +85,35 @@ def percentile_summary(draws, obs):
                 bootstrap_prob_positive=float(np.mean(draws > 0)),
                 bootstrap_prob_negative=float(np.mean(draws < 0)),
                 bootstrap_replicates=int(len(draws)))
+
+
+def verify_dump_identifiers(run, domain, split, template):
+    """Check full [30 scenes × 26 stride-10 frames] identity and uniqueness."""
+    root=Path(template.format(run=run,domain=domain,split=split))
+    if not root.is_dir():
+        raise FileNotFoundError(f"Missing dump root: {root}")
+    keys=[]
+    for path in root.rglob("scene_*/realsense/*.npy"):
+        scene=int(path.parent.parent.name.split("_")[-1])
+        frame=int(path.stem)
+        if START_SCENE[split]<=scene<START_SCENE[split]+30:
+            keys.append((scene,frame))
+    expected={(scene,frame)
+              for scene in range(START_SCENE[split],START_SCENE[split]+30)
+              for frame in range(0,256,10)}
+    if len(keys)!=len(set(keys)):
+        raise ValueError(f"Duplicate prediction dump identifiers in {root}/{split}")
+    missing=sorted(expected-set(keys))
+    extra=sorted(set(keys)-expected)
+    if missing or extra or len(keys)!=780:
+        raise ValueError(
+            f"{run}/{domain}/{split}: expected 780 exactly; have {len(keys)}, "
+            f"missing={missing[:10]}, extraneous={extra[:10]}"
+        )
+    fingerprint=hashlib.sha256(
+        "".join(f"{sid:04d}_{fid:04d}\n" for sid,fid in sorted(keys)).encode()
+    ).hexdigest()
+    return dict(count=len(keys),identities_sha256=fingerprint,root=str(root))
 
 
 def load_candidate_oracle(path, run_names, ranks):
@@ -162,6 +195,21 @@ def main():
                 arr[(name, domain, split)] = load_official(file)
                 sources[f"{name}/{domain}/{split}"] = dict(path=str(file), sha256=file_hash(file))
 
+    dump_manifest={}
+    if args.verify_dump_identities:
+        for name,root in runs.items():
+            for domain in DOMAINS:
+                for split in SPLITS:
+                    dump_manifest[f"{name}/{domain}/{split}"]=verify_dump_identifiers(
+                        root,domain,split,args.dump_root_template
+                    )
+        # Same domain/split has identical scene+frame identities for Point/GVAR.
+        for domain in DOMAINS:
+            for split in SPLITS:
+                if dump_manifest[f"{names[0]}/{domain}/{split}"]["identities_sha256"] != (
+                    dump_manifest[f"{names[1]}/{domain}/{split}"]["identities_sha256"]
+                ):
+                    raise ValueError(f"Paired dump identity mismatch in {domain}/{split}")
     outdir = Path(args.output_dir)
     outdir.mkdir(parents=True, exist_ok=True)
     rows, scene_rows = [], []
@@ -221,7 +269,8 @@ def main():
     if args.candidate_csv:
         oracle_rows = load_candidate_oracle(args.candidate_csv, set(runs), ranks)
         write_csv(outdir / "candidate_oracle_diagnostic.csv", oracle_rows)
-    summary = dict(source_sha256=sources, runs=runs, ranks=ranks, bootstrap_seed=args.seed,
+    summary = dict(source_sha256=sources, verified_dump_identities=dump_manifest,
+        runs=runs, ranks=ranks, bootstrap_seed=args.seed,
         bootstrap_replicates=args.bootstrap, unit="percentage points",
         official_metric="mean prefix precision ranks 1..K across all six mu",
         scene_resampling="stratified per split; paired across runs and RGB domains",
