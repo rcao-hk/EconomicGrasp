@@ -48,7 +48,7 @@ def write_csv(path, rows):
     if not rows:
         return
     with Path(path).open("w", newline="", encoding="utf-8") as fd:
-        writer = csv.DictWriter(fd, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(fd, fieldnames=list(dict.fromkeys(k for r in rows for k in r)))
         writer.writeheader()
         writer.writerows(rows)
 
@@ -208,7 +208,7 @@ def make_datasets(gcroot, ids):
 def forward(root, ids, outdir):
     import torch
     from models.economicgrasp_bip3d import economicgrasp_dpt
-    from models.grasp_designs import design_options, validate_checkpoint_design
+    from tools.mixed_p0_model_checkpoint import read_checkpoint, design_init_options, load_strict_model
     from models.loss_economicgrasp_depth_kview_transformer import get_loss
     from train_cva_ddp import validate_batch_label_contract,move_batch_to_device
     from dataset.graspnet_dataset import collate_fn
@@ -216,13 +216,11 @@ def forward(root, ids, outdir):
         raise ValueError("--checkpoint_path required for forward diagnostics")
     if not torch.cuda.is_available():
         raise RuntimeError("P0-B forward mode expects one CUDA GPU. Use offline on CPU.")
-    ck = torch.load(cfgs.checkpoint_path,map_location="cpu",weights_only=False)
-    model=economicgrasp_dpt(**design_options(cfgs),min_depth=cfgs.min_depth,
+    ck,state=read_checkpoint(cfgs.checkpoint_path)
+    model=economicgrasp_dpt(**design_init_options(ck),min_depth=cfgs.min_depth,
         max_depth=cfgs.max_depth,bin_num=cfgs.bin_num,is_training=True,
         use_obs_depth=False,pose_depth_mode=cfgs.pose_depth_mode,use_cdf=True)
-    validate_checkpoint_design(model,ck)
-    state = ck.get("model_state_dict",ck.get("state_dict",ck)) if isinstance(ck,dict) else ck
-    model.load_state_dict(state,strict=True)
+    load_strict_model(model,ck,state)
     model.cuda().eval()
     from torch.utils.data import DataLoader, Subset
     datasets=make_datasets(root,ids)
