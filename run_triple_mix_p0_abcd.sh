@@ -18,6 +18,7 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-${MIX_ROOT}/p0_abcd_20261027}"
 STAGES="${STAGES:-A,B,C}"
 GPU="${GPU:-0}"
 P0_A_BOOTSTRAP="${P0_A_BOOTSTRAP:-5000}"
+VERIFY_DUMP_IDENTITIES="${VERIFY_DUMP_IDENTITIES:-1}"
 P0_C_FRAME_STRIDE="${P0_C_FRAME_STRIDE:-20}"
 P0_B_MAX_FORWARD_FRAMES="${P0_B_MAX_FORWARD_FRAMES:-24}"
 ENABLE_CANDIDATE_EVAL="${ENABLE_CANDIDATE_EVAL:-0}"
@@ -44,11 +45,13 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 if want A; then
+  A_DUMP_VERIFY=()
+  if [[ "$VERIFY_DUMP_IDENTITIES" == "1" ]]; then A_DUMP_VERIFY+=(--verify-dump-identities); fi
   python tools/mixed_p0_a_rank_stats.py \
     --run "point=$POINT_RUN" --run "gvar=$GVAR_RUN" \
     --output-dir "$OUTPUT_ROOT/p0_a_official_ap" \
     --bootstrap "$P0_A_BOOTSTRAP" --seed 0 \
-    --ranks 1,5,10,50
+    --ranks 1,5,10,50 "${A_DUMP_VERIFY[@]}"
   if [[ "$ENABLE_CANDIDATE_EVAL" == "1" ]]; then
     python tools/mixed_p0_a_candidate_eval.py \
       --graspnet-root "$GRASPNET_ROOT" \
