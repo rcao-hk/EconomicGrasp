@@ -38,6 +38,8 @@ def parse_p0():
     p.add_argument("--p0_gc6d_cdf_folder",
                    default="economic_grasp_label_300views_extend_angle_cdf_depth")
     p.add_argument("--p0_forward_num_workers", type=int, default=0)
+    p.add_argument("--p0_graspness_frames_per_scene", type=int, default=2,
+                   help="Stratified frame samples/scene for offline graspness distribution.")
     args, rest = p.parse_known_args()
     sys.argv = [sys.argv[0], *rest]
     return args
@@ -116,6 +118,64 @@ def summarize_numeric(rows, keys):
     return out
 
 
+def scan_graspness_file(path, source, scene, frame):
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing {source} graspness supervision: {path}")
+    g = np.asarray(np.load(path, allow_pickle=False), dtype=np.float32).reshape(-1)
+    if g.size == 0 or not np.isfinite(g).all():
+        raise ValueError(f"Empty/nonfinite graspness: {path}")
+    return dict(source=source,scene=scene,frame=int(frame),path=str(path),
+        total_points=int(g.size),positive_points=int(np.count_nonzero(g>0)),
+        sum_graspness=float(g.astype(np.float64).sum()),
+        mean_graspness=float(g.mean()),positive_ratio=float(np.mean(g>0)),
+        p90_graspness=float(np.percentile(g,90)),max_graspness=float(np.max(g)))
+
+
+def offline_graspness(gnroot, gcroot, gn_scenes, gc_scenes, outdir):
+    """One/two spaced samples per scene; GN and GNTrans have distinct targets."""
+    from dataset.gc6d_dataset import get_camera_img_ids, load_json
+    n = P0.p0_graspness_frames_per_scene
+    if not 1 <= n <= 13:
+        raise ValueError("--p0_graspness_frames_per_scene must lie in [1,13]")
+    rows=[]
+    for scene_id in gn_scenes:
+        scene=f"scene_{scene_id:04d}"
+        # Keep only the 10%-selected GraspNet frames for consistency.
+        selected=list(range(0,256,10))
+        indices=np.linspace(0,len(selected)-1,n,dtype=int)
+        for at in indices:
+            frame=selected[int(at)]
+            stem=f"{frame:04d}.npy"
+            for source,folder in (("graspnet","graspness"),("gntrans","virtual_graspness")):
+                rows.append(scan_graspness_file(
+                    gnroot/folder/scene/"realsense"/stem,source,scene,frame))
+    for scene_id in gc_scenes:
+        scene=f"{scene_id:06d}"
+        meta=load_json(gcroot/"scenes"/scene/"scene_camera.json")
+        frames=get_camera_img_ids(meta,"realsense-d435",13)
+        if len(frames)!=13:
+            raise ValueError(f"Expected 13 D435 GC6D frames in {scene}; got {len(frames)}")
+        indices=np.linspace(0,12,n,dtype=int)
+        folder="graspness_instance" if P0.p0_gc6d_graspness_mode=="instance" else "graspness"
+        for at in indices:
+            frame=int(frames[int(at)])
+            rows.append(scan_graspness_file(
+                gcroot/folder/scene/"realsense-d435"/f"{frame:06d}.npy",
+                "gc6d",scene,frame))
+    write_csv(outdir/"graspness_frames.csv",rows)
+    result={}
+    for source in ("graspnet","gntrans","gc6d"):
+        chosen=[r for r in rows if r["source"]==source]
+        total=sum(r["total_points"] for r in chosen)
+        result[source]=dict(sampled_frames=len(chosen),sampled_masked_points=total,
+            micro_graspness_mean=sum(r["sum_graspness"] for r in chosen)/max(total,1),
+            micro_positive_ratio=sum(r["positive_points"] for r in chosen)/max(total,1),
+            scene_frame_stats=summarize_numeric(
+                chosen,["mean_graspness","positive_ratio","p90_graspness"]))
+    return result
+
+
 def offline(root, ids, outdir):
     rows = []
     gnroot = Path(cfgs.dataset_root)
@@ -146,6 +206,9 @@ def offline(root, ids, outdir):
             cdf_micro_positive_ratio=s/max(total,1),
             width_micro_valid_ratio=sum(x["width_valid_candidates"] for x in items)/max(total,1),
             scene_stats=summarize_numeric(items,["cdf_positive_ratio","width_valid_ratio","num_points","active_objects"]))
+    result["graspness"] = offline_graspness(
+        gnroot,Path(root),gn_scenes,ids,outdir
+    )
     # Do not equate 'cache positives' with actual matched Q×A×D labels.
     return rows,result
 
@@ -245,6 +308,10 @@ def forward(root, ids, outdir):
             valid=ep["batch_grasp_cdf_valid_mask"].bool()
             bins=ep["batch_grasp_cdf_bins_angle_depth"]
             qvalid=valid.any(dim=(-1,-2))
+            objectness=batch["objectness_label_tok"]
+            graspness=batch["graspness_label_tok"]
+            valid_fg=(objectness==1)
+            grasp_gt=graspness[valid_fg].detach().float()
             stats=dict(source=source, dataset_index=indices[i],
                 scene=str(ds.scenename[indices[i]]),frame=int(ds.frameid[indices[i]]),
                 num_queries=int(valid.shape[1]),
@@ -252,7 +319,10 @@ def forward(root, ids, outdir):
                 matched_query_ratio=float(qvalid.float().mean().item()),
                 matched_action_ratio=float(valid.float().mean().item()),
                 cdf_positive_valid_ratio=float(((bins>0)&valid).sum().item()/max(valid.sum().item(),1)),
-                valid_action_count=int(valid.sum().item()))
+                valid_action_count=int(valid.sum().item()),
+                foreground_token_count=int(valid_fg.sum().item()),
+                foreground_graspness_mean=float(grasp_gt.mean().item()) if grasp_gt.numel() else None,
+                foreground_graspness_positive_ratio=float((grasp_gt>0).float().mean().item()) if grasp_gt.numel() else None)
             for key in ("B: Objectness Loss","B: Graspness Loss","B: View Loss",
                         "B: CDF Loss","B: Width Depth Loss","B: DepthReg Loss",
                         "A: Overall Loss","D: Depth MAE"):
