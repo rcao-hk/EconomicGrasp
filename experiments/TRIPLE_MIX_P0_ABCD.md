@@ -58,12 +58,12 @@ Outputs: p0_a_official_ap/official_ap_at_k.csv, scene_pair_deltas.csv, scene_pai
 
 ## P0-B: source supervision consistency and real match rate
 
-- tools/mixed_p0_b_source_supervision.py offline: for all GN and filtered GC6D training scene caches, collect retained points, active object count, GC6D missing objects, CDF positive bins and width-valid ratios. GNTrans shares the **same GraspNet CDF geometry**, so do not count its scene geometry as independent.
+- tools/mixed_p0_b_source_supervision.py offline: for all GN and filtered GC6D training scene caches, collect retained points, active object count, GC6D missing objects, CDF positive bins and width-valid ratios. In addition, sample two evenly spaced training frames per scene for **source-specific graspness arrays**: GN from graspness/, GNTrans from virtual_graspness/, GC6D from graspness_instance/ (configurable). GNTrans shares the **same GraspNet CDF geometry**, but its appearance-side/virtual graspness target may differ; do not count scene geometry as independent.
 - forward: instantiate production dataset and CDF adapter per source, restore the checkpoint strictly, evaluate a small scene-diverse sample on a single GPU without optimizer updates. Record batch_grasp_cdf_valid_mask matched actions, matched query fraction, bins>0 among valid actions, and B: CDF/Width/Graspness/DepthReg Loss.
 - A source accounting for 36.7% of frames may contribute a very different fraction of valid matched queries. Offline positives and checkpoint-dependent valid-matching rates are *different estimands* and remain separate reports.
 - GraspNet uses scene graspness with foreground-rendered+fused-background supervision, GNTrans uses rendered depth with paired geometry, and GC6D historical protocol uses instance graspness and project-generated virtual depth.
 
-Outputs: p0_b_cache/cache_scene_coverage.csv + summary.json; optional p0_b_forward_point/forward_matched_frames.csv, p0_b_forward_gvar/forward_matched_frames.csv.
+Outputs: p0_b_cache/cache_scene_coverage.csv, graspness_frames.csv and summary.json; optional p0_b_forward_point/forward_matched_frames.csv, p0_b_forward_gvar/forward_matched_frames.csv.
 
 ## P0-C: depth-target alignment and camera pose semantics
 
