@@ -278,10 +278,23 @@ def main():
         pose_frame_interpretation="same legacy GC6D training loader global_film; verify using P0-C",
         split="test")
     manifest_file=output/"gc6d_p0_d_manifest.json"
-    if a.skip_existing and manifest_file.is_file():
-        previous=json.loads(manifest_file.read_text())
-        if previous.get("checkpoint_sha256")!=manifest["checkpoint_sha256"]:
-            raise ValueError("Cannot mix checkpoint dumps in existing P0-D output directory.")
+    if manifest_file.is_file():
+        previous=json.loads(manifest_file.read_text(encoding="utf-8"))
+        if a.do_infer:
+            # Never overwrite dumps from another checkpoint, even when
+            # --skip-existing is false: move to a new output directory.
+            if previous.get("checkpoint_sha256")!=manifest["checkpoint_sha256"]:
+                raise ValueError("Output directory contains a different checkpoint manifest.")
+        elif a.do_eval:
+            if not previous.get("checkpoint_sha256"):
+                raise ValueError("Evaluation-only requires prior inference manifest with checkpoint hash.")
+            manifest=previous
+            manifest["do_eval_only"]=True
+    elif a.do_eval and not a.do_infer:
+        raise FileNotFoundError("Evaluation-only requires existing gc6d_p0_d_manifest.json")
+    # Persist the manifest before long inference, so interrupted runs can be
+    # resumed with --skip-existing without changing checkpoint identity.
+    manifest_file.write_text(json.dumps(manifest,indent=2)+"\n",encoding="utf-8")
     t=time.time()
     if a.do_infer:
         run_inference(a,dataset,selected,output,manifest)
