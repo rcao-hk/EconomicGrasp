@@ -839,6 +839,11 @@ class GraspClutter6DMultiDataset(Dataset):
 
         gt_depth_m = self.build_fused_gt_depth_m(gt_depth, seg, index, factor_depth)
         K_resized = self.resize_intrinsics_with_crop(intrinsic, crop_box, out_hw=self.resize_shape)
+        # Match the SAME camera-orientation convention as get_data_label()
+        # used during training. P0-C separately audits this convention.
+        camera_pose_vec, camera_gravity_vec, camera_tilt_deg = (
+            self.build_camera_orientation_metadata(cam_info)
+        )
 
         Hr, Wr = self.resize_shape
         gt_depth_crop = gt_depth_m[y0:y1, x0:x1]
@@ -858,6 +863,9 @@ class GraspClutter6DMultiDataset(Dataset):
             "depth_prob_gt": depth_prob_gt.astype(np.float32),
             "depth_prob_weight": depth_prob_w.astype(np.float32),
             "sensor_depth_m": sensor_depth_m_resized.astype(np.float32),
+            "camera_pose_vec": camera_pose_vec,
+            "camera_gravity_vec": camera_gravity_vec,
+            "camera_tilt_deg": camera_tilt_deg,
             "scene_idx": np.int64(scene_id),
             "anno_idx": np.int64(ann_id),
             "img_id": np.int64(img_id),
