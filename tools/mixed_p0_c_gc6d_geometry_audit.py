@@ -178,11 +178,13 @@ def build_depth_frame(dataset, i, a):
             result[f"{label}_mae_mm"]=float(error.mean())
             result[f"{label}_p95_mm"]=float(np.percentile(error,95))
             result[f"{label}_gt50mm_ratio"]=float(np.mean(error>a.outlier_threshold_mm))
+            result[f"{label}_gt50mm_count"]=int(np.count_nonzero(error>a.outlier_threshold_mm))
             result[f"{label}_total_abs_error_mm"]=float(error.sum())
         else:
             result[f"{label}_mae_mm"]=None
             result[f"{label}_p95_mm"]=None
             result[f"{label}_gt50mm_ratio"]=None
+            result[f"{label}_gt50mm_count"]=0
             result[f"{label}_total_abs_error_mm"]=0.0
     return result
 
@@ -236,7 +238,9 @@ def main():
     for region in ("foreground","background","all"):
         n=sum(r[f"{region}_joint_valid_pixels"] for r in depth_rows)
         total=sum(r[f"{region}_total_abs_error_mm"] for r in depth_rows)
+        outlier_pixels=sum(r[f"{region}_gt50mm_count"] for r in depth_rows)
         weighted[region]=dict(common_pixels=n,weighted_mae_mm=float(total/n) if n else None,
+            pooled_gt50mm_ratio=float(outlier_pixels/n) if n else None,
             frame_mean_error_stats=summary([r[f"{region}_mae_mm"] for r in depth_rows if r[f"{region}_mae_mm"] is not None]))
     result=dict(status="complete",selected_frames=len(depth_rows),camera_vectors=len(vectors),
         scene_count=len(ids),training_crop="workspace_depth then foreground bounding box resized nearest to 448x448",
