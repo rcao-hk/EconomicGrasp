@@ -94,14 +94,16 @@ def scan_cdf_cache(path, dataset, scene, source):
             if uniq.max() >= n_obj:
                 raise ValueError(f"GC6D local pointid mismatch in {path}")
         else:
-            n_obj = len(uniq)  # GN scene may include objects without retained grasp points.
+            # GN cache lacks the full frame-level pose count; do not confuse
+            # active objects with all objects in the scene.
+            n_obj = None
         histogram = np.bincount(bins.ravel(), minlength=7)[:7]
         all_num = int(histogram.sum())
         pos_num = int(all_num - histogram[0])
         valid_num = int(np.count_nonzero(valid))
         return dict(source=source, scene=scene, cache=str(path),
             num_points=int(len(points)), active_objects=int(len(uniq)),
-            num_objects_with_pose=int(n_obj), unmatched_objects_upper_bound=
+            num_objects_with_pose=(int(n_obj) if n_obj is not None else None), unmatched_objects_upper_bound=
             (n_obj-len(uniq)) if dataset == "gc6d" else None,
             cdf_total_candidates=all_num, cdf_positive_candidates=pos_num,
             cdf_positive_ratio=float(pos_num/max(all_num,1)),
