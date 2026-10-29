@@ -20,6 +20,7 @@ import torch
 
 from mixed_p1_historical import (
     activate_historical, load_model, make_train_sources, sample_source_indices,
+    DeterministicIndexedDataset,
 )
 
 
@@ -213,8 +214,12 @@ def main():
         items={}
         for source in SOURCES:
             idx=batch_idx[source]
-            item=datasets[source][0][idx]
-            items[source]=item
+            # Per-source stable sampling, with paired GN/GNTrans using the
+            # same 34153 + paired subset index seed, independent of loss order.
+            stable=DeterministicIndexedDataset(
+                datasets[source][0], [idx],salt=34153
+            )
+            items[source]=stable[0]
         for loss_name in names:
             grads={}
             details={}
