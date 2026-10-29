@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import time
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -259,11 +260,26 @@ def evaluate(a,dataset,output,manifest):
         dir=Path(output)/f"collision_{mode}"
         paths=expected_paths(dataset,output,mode,range(len(dataset)))
         integrity=full_identity_audit(paths,expected=3055)
-        # Refuse partial/empty files being silently converted into zero scores
-        # by the official evaluator's missing-file fallback.
-        evaluator=GraspClutter6DEval(root=str(Path(a.gc6d_root).resolve()),
-                                    camera=dataset.camera,split="test")
-        res,ap=evaluator.eval_all(str(dir),proc=a.eval_workers)
+        # Native GC6D eval_scene returns zero accuracy for an absent dump.
+        # Empty Nx17 files after filtering can fail during API NMS. Preserve
+        # every prediction file and expose only non-empty grasps via an
+        # isolated symlink view; empty predictions get official zero accuracy.
+        from contextlib import nullcontext
+        empty_paths=[p for _,_,_,p in paths if len(validate_grasps(p))==0]
+        staged=tempfile.TemporaryDirectory(prefix="gc6d_eval_empty_",dir=str(output)) if empty_paths else nullcontext(None)
+        with staged as tmp:
+            official_dump=dir
+            if tmp is not None:
+                official_dump=Path(tmp)
+                for sid,img,ann,p in paths:
+                    if len(validate_grasps(p))==0:
+                        continue
+                    link=official_dump/f"{sid:06d}"/dataset.camera/f"{img:06d}.npy"
+                    link.parent.mkdir(parents=True,exist_ok=True)
+                    link.symlink_to(p.resolve())
+            evaluator=GraspClutter6DEval(root=str(Path(a.gc6d_root).resolve()),
+                                        camera=dataset.camera,split="test")
+            res,ap=evaluator.eval_all(str(official_dump),proc=a.eval_workers)
         accuracy=np.asarray(res,np.float32)
         if accuracy.shape!=(235,13,50,6) or not np.isfinite(accuracy).all():
             raise ValueError(f"Official GC6D accuracy invalid shape/range: {accuracy.shape}")
@@ -280,6 +296,7 @@ def evaluate(a,dataset,output,manifest):
                  ap04_percent=float(100*recalculated[1]),
                  ap08_percent=float(100*recalculated[2]),
                  by_mu_percent=[float(v*100) for v in accuracy.mean(axis=(0,1,2))],
+                 official_empty_prediction_zero_fallback_frames=len(empty_paths),
                  raw_accuracy_sha256=sha256(dir/"official_accuracy.npy"),
                  **integrity)
         atomic_json(dir/"official_summary.json",row)
