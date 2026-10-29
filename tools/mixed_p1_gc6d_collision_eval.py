@@ -120,7 +120,7 @@ def full_identity_audit(paths, expected=3055):
 
 
 def make_manifest(a,model_meta,dataset):
-    modes=("on","off") if a.collision=="both" else (a.collision,)
+    modes=["on","off"] if a.collision=="both" else [a.collision]
     source=Path(a.historical_root).expanduser().resolve()
     cp=Path(a.checkpoint).expanduser().resolve()
     return dict(
@@ -140,7 +140,7 @@ def make_manifest(a,model_meta,dataset):
         collision_params=dict(threshold=a.collision_thresh,
             voxel_size_m=a.collision_voxel_size,approach_dist_m=a.collision_approach_dist),
         inference_args=dict(batch_size=a.batch_size,num_workers=a.num_workers,seed=a.seed),
-        official_eval_mu=MU,
+        official_eval_mu=list(MU),
         dataset_loader_sha256=sha256(Path(__file__).resolve().parents[1]/"dataset"/"gc6d_dataset.py"),
     )
 
@@ -304,6 +304,8 @@ def main(argv=None):
     if model_meta["variant"] not in ("rayrope_point","rayrope_point_gvar"):
         raise ValueError("Only historical Point/GVAR checkpoints are supported")
     ds=gc6d_test_dataset(a.gc6d_root,camera=a.camera)
+    if a.max_frames>len(ds):
+        raise ValueError(f"--max-frames={a.max_frames} exceeds GC6D test size={len(ds)}")
     selected=list(range(len(ds))) if not a.max_frames else list(range(a.max_frames))
     output=Path(a.output_root).expanduser().resolve()
     output.mkdir(parents=True,exist_ok=True)
