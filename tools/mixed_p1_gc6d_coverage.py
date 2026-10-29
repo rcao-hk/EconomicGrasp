@@ -61,8 +61,8 @@ def raw_object_stats(fric,width,collision,point_filter_mu,max_width):
         raise ValueError("Object arrays need identical [P,V,A,D] shapes")
     if not fric.shape[0]:
         raise ValueError("No object grasp points")
-    finite=np.isfinite(fric)&np.isfinite(width)
-    physical_fric=finite&(fric>0)&(fric<=1.2)
+    finite_fric=np.isfinite(fric)
+    physical_fric=finite_fric&(fric>0)&(fric<=1.2)
     width_ok=(width>=0)&(width<=max_width)&np.isfinite(width)
     col=np.asarray(collision,bool)
     success=physical_fric&width_ok&~col
@@ -75,7 +75,9 @@ def raw_object_stats(fric,width,collision,point_filter_mu,max_width):
     if sum(parts)!=fric.size:
         raise AssertionError("Failure partition does not cover all candidate labels")
     P=fric.shape[0]
-    keep=np.any(((fric>0)&(fric<=point_filter_mu)&finite&~col).reshape(P,-1),axis=1)
+    # Exact GC6D cache-generation point filter: width is deliberately NOT
+    # part of this stage, whereas CDF success requires a valid width.
+    keep=np.any(((fric>0)&(fric<=point_filter_mu)&finite_fric&~col).reshape(P,-1),axis=1)
     valid_obj=np.any(success.reshape(P,-1),axis=1)
     return dict(
         raw_points=int(P),raw_candidates=int(fric.size),
