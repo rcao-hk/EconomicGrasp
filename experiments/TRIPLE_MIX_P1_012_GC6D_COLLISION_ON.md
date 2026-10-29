@@ -98,6 +98,14 @@ GC6D_ROOT, GRASPNET_ROOT, GNTRANS_ROOT, FILTERED_SCENES, P0_RESULTS,
 GPU, BATCH_SIZE, P11_RAW_MAX_SCENES, P11_FORWARD_FRAMES, P12_TRIPLETS,
 P12_MODELS, RESUME and DRY_RUN.
 
+## Suggested explicit environment for smoke / manual calls
+
+    export THREE_HIST_ROOT=/data/robotarm/EconomicGrasp-triple-historical-20261027
+    export MIX_ROOT=/data/robotarm/result/grasp/rgbgrasp/triple_historical_20261027
+    export POINT_CKPT="$MIX_ROOT/rayrope_point/train/checkpoint_latest.pt"
+    export GVAR_CKPT="$MIX_ROOT/rayrope_point_gvar/train/checkpoint_latest.pt"
+    export GC6D_ROOT=/data/robotarm/dataset/GraspClutter6D
+
 ## Step 1: two-frame collision-on smoke
 
     CUDA_VISIBLE_DEVICES=0 $PYTHON_BIN tools/mixed_p1_gc6d_collision_eval.py \
@@ -137,6 +145,13 @@ New files:
 The per-model inference_protocol.json includes checkpoint SHA, source SHA,
 dataset path, score/geometry protocol and collision parameters. An existing
 directory can be resumed with RESUME=1 only when its manifest is identical.
+If the model-free filter removes every candidate from a frame, the saved
+Nx17 empty dump remains intact for audit; an isolated temporary symlink
+view intentionally omits that frame so the **native GC6D evaluator's
+documented missing-file branch returns zero AP**, without inventing a
+dummy grasp. The official_summary records how many frames used this
+explicit empty-prediction fallback. No ordinary missing predictions are
+accepted; 3,055 original dumps are checked before native evaluation.
 
 **Modality boundary:** neural geometry is RGB-predicted, but workspace/crop
 uses sensor depth and segmentation; collision-on additionally uses a
