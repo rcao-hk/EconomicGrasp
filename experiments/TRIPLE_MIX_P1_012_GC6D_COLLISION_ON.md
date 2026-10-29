@@ -74,8 +74,8 @@ checkout from this branch (e.g. a worktree):
 
     cd /home/robotarm/EconomicGrasp
     git fetch origin
-    git worktree add /data/robotarm/EconomicGrasp-p1-012 \
-      codex/triple-mix-p1-012-gc6d-collision-on-20261029
+    git worktree add --detach /data/robotarm/EconomicGrasp-p1-012 \
+      origin/codex/triple-mix-p1-012-gc6d-collision-on-20261029
     cd /data/robotarm/EconomicGrasp-p1-012
 
 Select an idle, permitted GPU after checking activity. Do not stop existing
