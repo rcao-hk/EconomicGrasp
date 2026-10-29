@@ -139,7 +139,8 @@ def make_train_sources(gnroot, gntransroot, gcroot, filtered_json, config,
 
     GN/Trans are *paired* stride10. GC6D is all 13 D435 frames of 232 scenes.
     """
-    activate_historical(LOADED_HISTORICAL_ROOT)  # caller must select model root
+    if LOADED_HISTORICAL_ROOT is None:
+        raise RuntimeError("Call activate_historical/load_model before source dataset construction.")
     from moge_rayrope.mixed import build_bases, paired_frame_indices
     from dataset.cdf_label_adapter import CVAExtendedLabelAdapter
     gc6d = import_gc6d_dataset()
@@ -213,8 +214,13 @@ def sample_source_indices(wrapped, max_frames, seed=0):
     if max_frames < 1:
         raise ValueError("max_frames must be positive")
     group = {}
+    # Source datasets are Subset(CVAAdapter) for paired GN/GNTrans and
+    # direct CVAAdapter for GC6D. Index through Subset before scene lookup.
     for i in range(len(wrapped)):
-        scene = str(wrapped.scenename[i])
+        if isinstance(wrapped, Subset):
+            scene = str(wrapped.dataset.scenename[wrapped.indices[i]])
+        else:
+            scene = str(wrapped.scenename[i])
         group.setdefault(scene, []).append(i)
     rng = np.random.default_rng(seed)
     scenes = sorted(group)
