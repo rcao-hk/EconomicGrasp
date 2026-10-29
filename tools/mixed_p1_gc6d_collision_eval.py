@@ -21,6 +21,9 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+# Legacy graspnetAPI/graspclutter6dAPI releases may still reference np.float.
+if not hasattr(np, "float"):
+    np.float = np.float64  # type: ignore[attr-defined]
 import torch
 from torch.utils.data import DataLoader
 
