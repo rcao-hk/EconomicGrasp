@@ -8,6 +8,7 @@ from models.modules_economicgrasp import GraspableNet, ViewNet, Cylinder_Groupin
 from utils.label_generation import (process_grasp_labels, process_grasp_labels_cdf_width,
                                     batch_viewpoint_params_to_matrix)
 from models.point_grasp_cdf_head import PointGraspCDFHead
+from models.point_dino_rgb_fusion import ResidualPointRGBFusion
 from libs.pointnet2.pointnet2_utils import furthest_point_sample, gather_operation
 from utils.arguments import cfgs
 import os
@@ -16,7 +17,7 @@ import json
 
 class economicgrasp(nn.Module):
     def __init__(self, cylinder_radius=0.05, seed_feat_dim=512, is_training=True,
-                 voxel_size=0.005, use_cdf=False):
+                 voxel_size=0.005, use_cdf=False, use_point_rgb=False):
         super().__init__()
         self.is_training = is_training
         self.seed_feature_dim = seed_feat_dim
@@ -26,6 +27,9 @@ class economicgrasp(nn.Module):
         self.num_view = cfgs.num_view
         self.voxel_size = voxel_size
         self.use_cdf = bool(use_cdf)
+        self.use_point_rgb = bool(use_point_rgb)
+        if self.use_point_rgb and not self.use_cdf:
+            raise ValueError("A2 RGB fusion is defined for Point-CDF only")
 
         # Backbone
         self.backbone = TDUnet(in_channels=3, out_channels=self.seed_feature_dim, D=3)
@@ -50,6 +54,11 @@ class economicgrasp(nn.Module):
             self.grasp_head = Grasp_Head_Local_Interaction(
                 num_angle=self.num_angle, num_depth=self.num_depth,
             )
+        # Initialize shared A1 modules before A2 adapter: matching trunk weights.
+        if self.use_point_rgb:
+            self.point_rgb_fuser = ResidualPointRGBFusion(
+                point_dim=self.seed_feature_dim, rgb_dim=128, hidden_dim=256,
+            )
 
     def forward(self, end_points):
         seed_xyz = end_points['point_clouds']  # use all sampled point cloud, [B, point_num (15000)， 3]
@@ -72,6 +81,16 @@ class economicgrasp(nn.Module):
         # Minkowski Backbone
         seed_features = self.backbone(mink_input).F
         seed_features = seed_features[end_points['quantize2original']].view(B, point_num, -1).transpose(1, 2)
+        if self.use_point_rgb:
+            if "point_rgb_features" not in end_points:
+                raise KeyError("A2 requires point_rgb_features sampled from frozen DINO")
+            rgb = end_points["point_rgb_features"]
+            if rgb.shape != (B, 128, point_num):
+                raise ValueError(
+                    f"A2 point RGB must be [B,128,{point_num}], got {tuple(rgb.shape)}"
+                )
+            seed_features = self.point_rgb_fuser(seed_features, rgb)
+            end_points["D: Point RGB feature abs mean"] = rgb.detach().abs().mean()
         # [B (batch size), 512 (feature dim), 20000 (points in a scene)]
 
         # Generate the masks of the objectness and the graspness
