@@ -22,6 +22,7 @@ import sys
 _p=argparse.ArgumentParser(add_help=False)
 _p.add_argument("--point_head",choices=("legacy","cdf"),required=True)
 _p.add_argument("--expected_train_domain",choices=("auto","original","mixed"),default="auto")
+_p.add_argument("--point_rgb_fusion",choices=("none","dino_multiscale"),default="none")
 HEAD_ARGS,_remaining=_p.parse_known_args()
 sys.argv=[sys.argv[0],*_remaining]
 
@@ -75,6 +76,14 @@ def _load_checkpoint_strict(model, path):
             f"Expected training domain {HEAD_ARGS.expected_train_domain}, "
             f"but checkpoint declares {domain}"
         )
+    saved_rgb=ckpt.get("point_rgb_fusion",protocol.get("point_rgb_fusion","none"))
+    if saved_rgb!=HEAD_ARGS.point_rgb_fusion or protocol.get("point_rgb_fusion","none")!=saved_rgb:
+        raise ValueError(
+            f"Point RGB fusion checkpoint/manifest/config mismatch: "
+            f"checkpoint={saved_rgb!r}, request={HEAD_ARGS.point_rgb_fusion!r}"
+        )
+    if saved_rgb!="none" and not protocol.get("shared_depth_checkpoint_sha256"):
+        raise ValueError("A2 must come from a verified shared-frozen depth checkpoint")
     model.load_state_dict(ckpt["model_state_dict"],strict=True)
     return domain,protocol,manifest_key
 
@@ -136,6 +145,7 @@ def inference():
         use_obs_depth=False,
         pose_depth_mode="global_film",
         point_use_cdf=HEAD_ARGS.point_head=="cdf",
+        point_rgb_fusion=HEAD_ARGS.point_rgb_fusion,
         vis_dir=None,
     ).cuda()
     train_domain,contract,manifest_key=_load_checkpoint_strict(model,cfgs.checkpoint_path)
@@ -150,6 +160,8 @@ def inference():
         "checkpoint_manifest_key":manifest_key,
         "checkpoint_training_protocol":contract,
         "point_head":HEAD_ARGS.point_head,
+        "point_rgb_fusion":HEAD_ARGS.point_rgb_fusion,
+        "shared_depth_checkpoint_sha256":contract.get("shared_depth_checkpoint_sha256"),
         "train_domain":train_domain,
         "train_fraction":(
             contract.get("mix_train_fraction",contract.get("train_fraction",1.0))
