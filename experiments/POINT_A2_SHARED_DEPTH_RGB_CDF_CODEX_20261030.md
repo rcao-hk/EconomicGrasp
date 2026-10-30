@@ -40,6 +40,8 @@
 - `scripts/run_point_depth_pose_graspnet100_eval.sh`：`POINT_RGB_FUSION`，检查输出 manifest。
 - `tools/verify_point_a2_shared_geometry.py`：A1/A2模型冻结DPT权重逐key一致性及同一训练合同；可选比对来源checkpoint与A3。
 - `tests/test_point_a2_dino_rgb_fusion.py`：特征布局、像素到patch bilinear采样、梯度隔离、A1初始化一致性等。
+- `tests/test_point_a2_shared_geometry.py`：仅比较depth state的同一性，避免把grasp head权重差异误作几何差异。
+- `scripts/run_point_a2_shared_depth_pair.sh`：强制两组共享 `SHARED_DEPTH_CKPT`、GPU/批大小/epoch/seed，顺序启动 A1、A2 独立 CDF 训练且拒绝覆盖结果。
 
 **特别注意**：如果A3采用的并非global_film的DPT架构、其深度权重也没冻结，则不能把当前 global_film A2 当成和A3严格匹配；先统一几何合同。训练方法不存在“只用名称宣称相同模型权重”的替代手段。
 
@@ -65,7 +67,7 @@ python -m py_compile models/point_dino_rgb_fusion.py models/economicgrasp_depth.
   inference_point_depth_pose_graspnet100.py tools/verify_point_a2_shared_geometry.py
 bash -n scripts/run_point_depth_pose_graspnet100_train.sh scripts/run_point_depth_pose_graspnet100_eval.sh
 python -m pytest -q tests/test_point_a2_dino_rgb_fusion.py tests/test_point_depth_cdf.py \
-  tests/test_point_depth_training_protocol.py
+  tests/test_point_depth_training_protocol.py tests/test_point_a2_shared_geometry.py
 ~~~
 
 除代码单测外，确认source checkpoint确实存在、具备 global_film 和 `depth_net.*`，且训练选中场景/标签不缺失。禁止静默换成另一深度来源。
@@ -91,6 +93,17 @@ BATCH_SIZE=3 SEED=0 MAX_TRAIN_BATCHES=0 MAX_VAL_BATCHES=0 \
 OUTPUT_ROOT=/data/robotarm/result/grasp/rgbgrasp/log/point_a2_shareddepth_dinofusion_cdf_UNIQUE \
 bash scripts/run_point_depth_pose_graspnet100_train.sh
 ~~~
+
+也可以用**单一配对启动器**避免分别输入两套命令导致source或训练合同不一致：
+
+~~~bash
+TRAIN_DOMAIN=mixed MIX_TRAIN_FRACTION=0.5 GNTRANS_FUSED_BACKGROUND=0 \
+GPUS=0,1,2 BATCH_SIZE=3 MAX_EPOCH=21 SEED=0 \
+OUTPUT_ROOT=/data/robotarm/result/grasp/rgbgrasp/log/point_a1_a2_pair_UNIQUE \
+bash scripts/run_point_a2_shared_depth_pair.sh
+~~~
+
+它会使用同一个 SHARED_DEPTH_CKPT，写入 OUTPUT_ROOT/a1/cdf 和 OUTPUT_ROOT/a2/cdf。**这是上面两条单独训练命令的替代方式，不要同时重复执行。**
 
 两个run要有独立结果目录，默认串行执行即可。每个run的主checkpoint：`<OUTPUT_ROOT>/cdf/checkpoint_epoch_019.tar`；e20仅存档。必须保证A2训练时 frozen depth_net 不更新，point RGB projection 和 fusion的训练梯度非零（zero-initialized final conv导致第一个step上游RGB projection梯度为零是预期；到后续优化步需要出现非零梯度）。如GPU资源不足必须把两个模型统一回退卡数/批大小，披露global batch变化；不要单方面换协议。
 
