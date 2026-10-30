@@ -12,6 +12,7 @@ from utils.arguments import cfgs
 # (keep your existing file/class; here we just import it)
 from utils.label_generation import process_grasp_labels, batch_viewpoint_params_to_matrix
 from models.economicgrasp import economicgrasp as EconomicGrasp3D
+from models.point_dino_rgb_fusion import MultiLevelDinoPointSampler
 from models.pose_aware_depth import (
     PoseAwareDPTFiLM,
     RayGravityDenseDPTFiLM,
@@ -839,7 +840,8 @@ class economicgrasp_depth_baseline(nn.Module):
                  vis_dir=None,
                  vis_every=100,
                  pose_depth_mode="none",
-                 point_use_cdf=False):
+                 point_use_cdf=False,
+                 point_rgb_fusion="none"):
         super().__init__()
         self.is_training = is_training
         self.voxel_size = float(voxel_size)
@@ -847,6 +849,11 @@ class economicgrasp_depth_baseline(nn.Module):
         self.use_obs_depth = bool(use_obs_depth)
         self.pose_depth_mode = str(pose_depth_mode)
         self.point_use_cdf = bool(point_use_cdf)
+        self.point_rgb_fusion = str(point_rgb_fusion)
+        if self.point_rgb_fusion not in ("none", "dino_multiscale"):
+            raise ValueError(f"Unknown point_rgb_fusion={self.point_rgb_fusion}")
+        if self.point_rgb_fusion != "none" and not self.point_use_cdf:
+            raise ValueError("A2 point RGB fusion is restricted to the CDF head")
         if self.pose_depth_mode not in ("none", "global_film", "ray_gravity_film"):
             raise ValueError(f"Unsupported pose_depth_mode: {self.pose_depth_mode}")
         if self.use_obs_depth and self.pose_depth_mode != "none":
@@ -903,6 +910,13 @@ class economicgrasp_depth_baseline(nn.Module):
             is_training=is_training,
             voxel_size=voxel_size,
             use_cdf=self.point_use_cdf,
+            use_point_rgb=self.point_rgb_fusion == "dino_multiscale",
+        )
+        # Construct adapter *after* A1 grasp modules so A1 and A2 may share
+        # identical seeded initializations of the common point backbone/head.
+        self.point_rgb_sampler = (
+            MultiLevelDinoPointSampler(feature_dim=768, levels=4, per_level_dim=32)
+            if self.point_rgb_fusion == "dino_multiscale" else None
         )
 
         self.vis_dir = vis_dir
@@ -1302,14 +1316,25 @@ class economicgrasp_depth_baseline(nn.Module):
             raise KeyError("global_film baseline requires camera_pose_vec")
         if self.pose_depth_mode == "ray_gravity_film" and "camera_gravity_vec" not in end_points:
             raise KeyError("ray_gravity_film baseline requires camera_gravity_vec")
-        depth_net_pred, depth_tok, img_feat, depth_net_raw, pose_aux = self.depth_net(
+        # A2 retrieves the exact upstream *raw four-level* DINO features that
+        # the image-centric proposal also consumes. No extra DINO forward pass.
+        is_a2 = self.point_rgb_fusion == "dino_multiscale"
+        depth_output = self.depth_net(
             img,
             camera_pose_vec=end_points.get("camera_pose_vec"),
             camera_gravity_vec=end_points.get("camera_gravity_vec"),
             camera_K=K,
             return_raw=True,
+            return_feats=is_a2,
             return_pose_aux=True,
         )
+        if is_a2:
+            depth_net_pred, depth_tok, img_feat, depth_net_raw, dino_feats, pose_aux = depth_output
+            end_points["point_rgb_features"] = self.point_rgb_sampler(
+                dino_feats, img_idxs, image_hw=img.shape[-2:],
+            )
+        else:
+            depth_net_pred, depth_tok, img_feat, depth_net_raw, pose_aux = depth_output
         # Preserve the same DPT FiLM diagnostics as the image-centric branch.
         end_points.update(pose_aux)
 
