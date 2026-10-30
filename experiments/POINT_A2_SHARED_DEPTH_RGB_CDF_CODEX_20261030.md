@@ -150,7 +150,9 @@ python tools/summarize_point_depth_pose_ap.py \
  --output /path/to/NEW_a2_minus_a1_summary.json
 ~~~
 
-**相同算法不保证完全相同的候选集合**：A2的RGB融合可能改变 graspness、point FPS和view selection，结果是系统级表征对照而非固定同一候选的纯score消融。\n\n同一RGB/K/pose、同一 RealSense 测试split/frame sampling与 per-frame seed，collision source/threshold、evaluator Top50、三split [30,26,50,6]，官方AP以及µ0.4/µ0.8、prefix@1/5/10/20/50和场景聚类CI。仅报告实际结果，不能杜撰AP。
+**相同算法不保证完全相同的候选集合**：A2的RGB融合可能改变 graspness、point FPS和view selection，结果是系统级表征对照而非固定同一候选的纯score消融。
+
+同一RGB/K/pose、同一 RealSense 测试split/frame sampling与 per-frame seed，collision source/threshold、evaluator Top50、三split [30,26,50,6]，官方AP以及µ0.4/µ0.8、prefix@1/5/10/20/50和场景聚类CI。仅报告实际结果，不能杜撰AP。
 
 ## 7. 成果与结论规则
 
