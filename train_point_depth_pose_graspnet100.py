@@ -450,6 +450,25 @@ class Trainer:
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.net.parameters(),1.0)
+                if FULL.point_rgb_fusion=="dino_multiscale" and self.main and (
+                    step < 3 or step % 100 == 0
+                ):
+                    # Operational check only: residual zero-init yields zero
+                    # sampler gradient in step0, which should wake later.
+                    def _grad_abs(module):
+                        grads=[
+                            p.grad.detach().abs().sum() for p in module.parameters()
+                            if p.grad is not None
+                        ]
+                        return float(torch.stack(grads).sum().item()) if grads else 0.0
+                    print("[A2-RGB-GRAD] "+json.dumps({
+                        "epoch":epoch,"step":step,
+                        "point_rgb_sampler_grad_abs":_grad_abs(self.module.point_rgb_sampler),
+                        "point_rgb_fuser_grad_abs":_grad_abs(self.module.grasp_net.point_rgb_fuser),
+                        "frozen_depth_trainable_params":sum(
+                            int(p.requires_grad) for p in self.module.depth_net.parameters()
+                        ),
+                    },sort_keys=True),flush=True)
                 self.optimizer.step()
             else:
                 with torch.no_grad():
