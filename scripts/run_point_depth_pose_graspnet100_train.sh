@@ -18,6 +18,7 @@ SEED="${SEED:-0}"
 MAX_TRAIN_BATCHES="${MAX_TRAIN_BATCHES:-0}"
 MAX_VAL_BATCHES="${MAX_VAL_BATCHES:-0}"
 SHARED_DEPTH_CKPT="${SHARED_DEPTH_CKPT:-}"
+POINT_RGB_FUSION="${POINT_RGB_FUSION:-none}"
 IFS=',' read -r -a GPU_ARRAY <<< "$GPUS"
 IFS=',' read -r -a HEAD_ARRAY <<< "$HEADS"
 if ((${#GPU_ARRAY[@]}<1)); then echo "No GPUs given" >&2; exit 2; fi
@@ -36,7 +37,15 @@ if [[ "$GNTRANS_FUSED_BACKGROUND" != 0 && "$GNTRANS_FUSED_BACKGROUND" != 1 ]]; t
   echo "GNTRANS_FUSED_BACKGROUND must be 0 or 1" >&2; exit 2
 fi
 export CUDA_VISIBLE_DEVICES="$GPUS"
-extra=(--train_domain "$TRAIN_DOMAIN")
+case "$POINT_RGB_FUSION" in
+  none|dino_multiscale) ;;
+  *) echo "POINT_RGB_FUSION must be none or dino_multiscale" >&2; exit 2 ;;
+esac
+if [[ "$POINT_RGB_FUSION" != none ]]; then
+  [[ -n "$SHARED_DEPTH_CKPT" ]] || { echo "A2 requires SHARED_DEPTH_CKPT (same as A1)" >&2; exit 2; }
+  [[ "$HEADS" == cdf ]] || { echo "A2 must run HEADS=cdf only" >&2; exit 2; }
+fi
+extra=(--train_domain "$TRAIN_DOMAIN" --point_rgb_fusion "$POINT_RGB_FUSION")
 if [[ "$TRAIN_DOMAIN" == mixed ]]; then
   extra+=(--gntrans_rgb_root "$GNTRANS_RGB_ROOT"
           --mix_train_fraction "$MIX_TRAIN_FRACTION")
@@ -58,7 +67,7 @@ done
 for head in "${HEAD_ARRAY[@]}"; do
   run="$OUTPUT_ROOT/$head"
   mkdir -p "$run"
-  echo "[POINT-DEPTH] domain=$TRAIN_DOMAIN head=$head GPUS=$GPUS batch_per_gpu=$BATCH_SIZE epochs=$MAX_EPOCH fraction=$MIX_TRAIN_FRACTION"
+  echo "[POINT-DEPTH] domain=$TRAIN_DOMAIN head=$head rgb_fusion=$POINT_RGB_FUSION GPUS=$GPUS batch_per_gpu=$BATCH_SIZE epochs=$MAX_EPOCH fraction=$MIX_TRAIN_FRACTION"
   (set -o pipefail; torchrun --standalone --nproc_per_node="${#GPU_ARRAY[@]}" \
     train_point_depth_pose_graspnet100.py \
     --point_head "$head" \
