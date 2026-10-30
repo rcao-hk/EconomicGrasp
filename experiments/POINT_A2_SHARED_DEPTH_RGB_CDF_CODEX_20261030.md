@@ -105,7 +105,7 @@ bash scripts/run_point_a2_shared_depth_pair.sh
 
 它会使用同一个 SHARED_DEPTH_CKPT，写入 OUTPUT_ROOT/a1/cdf 和 OUTPUT_ROOT/a2/cdf。**这是上面两条单独训练命令的替代方式，不要同时重复执行。**
 
-两个run要有独立结果目录，默认串行执行即可。每个run的主checkpoint：`<OUTPUT_ROOT>/cdf/checkpoint_epoch_019.tar`；e20仅存档。必须保证A2训练时 frozen depth_net 不更新，point RGB projection 和 fusion的训练梯度非零（zero-initialized final conv导致第一个step上游RGB projection梯度为零是预期；到后续优化步需要出现非零梯度）。如GPU资源不足必须把两个模型统一回退卡数/批大小，披露global batch变化；不要单方面换协议。
+两个run要有独立结果目录，默认串行执行即可。A2 训练脚本会按稀疏间隔输出 `A2-RGB-GRAD`（point RGB sampler/fuser gradient absolute sum、冻结DPT可训练参数数）；zero-init使第一个step的sampler梯度为零是预期，但后续应激活，否则须视为A2未充分利用RGB、不能直接解释负结果。每个run的主checkpoint：`<OUTPUT_ROOT>/cdf/checkpoint_epoch_019.tar`；e20仅存档。必须保证A2训练时 frozen depth_net 不更新，point RGB projection 和 fusion的训练梯度非零（zero-initialized final conv导致第一个step上游RGB projection梯度为零是预期；到后续优化步需要出现非零梯度）。如GPU资源不足必须把两个模型统一回退卡数/批大小，披露global batch变化；不要单方面换协议。
 
 ## 5. 共同几何严格审计（不重复P0/P1）
 
@@ -150,7 +150,7 @@ python tools/summarize_point_depth_pose_ap.py \
  --output /path/to/NEW_a2_minus_a1_summary.json
 ~~~
 
-同一RGB/K/pose、同一 RealSense 测试split/frame sampling与 per-frame seed，collision source/threshold、evaluator Top50、三split [30,26,50,6]，官方AP以及µ0.4/µ0.8、prefix@1/5/10/20/50和场景聚类CI。仅报告实际结果，不能杜撰AP。
+**相同算法不保证完全相同的候选集合**：A2的RGB融合可能改变 graspness、point FPS和view selection，结果是系统级表征对照而非固定同一候选的纯score消融。\n\n同一RGB/K/pose、同一 RealSense 测试split/frame sampling与 per-frame seed，collision source/threshold、evaluator Top50、三split [30,26,50,6]，官方AP以及µ0.4/µ0.8、prefix@1/5/10/20/50和场景聚类CI。仅报告实际结果，不能杜撰AP。
 
 ## 7. 成果与结论规则
 
