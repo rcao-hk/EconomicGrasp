@@ -9,6 +9,7 @@ HEADS="${HEADS:-legacy,cdf}"
 SPLITS="${SPLITS:-test_seen,test_similar,test_novel}"
 TEST_FRACTION="${TEST_FRACTION:-0.1}"
 EXPECTED_TRAIN_DOMAIN="${EXPECTED_TRAIN_DOMAIN:-auto}"
+POINT_RGB_FUSION="${POINT_RGB_FUSION:-none}"
 BATCH_SIZE="${BATCH_SIZE:-3}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 EVAL_NUM_WORKERS="${EVAL_NUM_WORKERS:-16}"
@@ -26,6 +27,13 @@ elif [[ "$TEST_FRACTION" == 1.0 ]]; then
   EVAL_STRIDE=1
 else
   echo "TEST_FRACTION must be 0.1 or 1.0 to use official matching evaluation slices" >&2; exit 2
+fi
+case "$POINT_RGB_FUSION" in
+  none|dino_multiscale) ;;
+  *) echo "POINT_RGB_FUSION must be none or dino_multiscale" >&2; exit 2 ;;
+esac
+if [[ "$POINT_RGB_FUSION" != none && "$HEADS" != cdf ]]; then
+  echo "A2 evaluation must use HEADS=cdf" >&2; exit 2
 fi
 case "$EXPECTED_TRAIN_DOMAIN" in
   auto|original|mixed) ;;
@@ -65,7 +73,7 @@ run_one () {
   echo "[POINT100] inference head=$head split=$split gpu=$gpu fraction=$TEST_FRACTION"
   (set -C; CUDA_VISIBLE_DEVICES="$gpu" MAX_BATCHES="$MAX_BATCHES" \
     python inference_point_depth_pose_graspnet100.py \
-    --point_head "$head" --expected_train_domain "$EXPECTED_TRAIN_DOMAIN" \
+    --point_head "$head" --expected_train_domain "$EXPECTED_TRAIN_DOMAIN" --point_rgb_fusion "$POINT_RGB_FUSION" \
     --checkpoint_path "$TRAIN_ROOT/$head/checkpoint_epoch_019.tar" \
     --dataset_root "$DATASET_ROOT" --camera realsense \
     --test_mode "$split" --save_dir "$dst" \
@@ -100,10 +108,10 @@ if [[ "$EVAL" == 1 ]]; then
       if [[ -e "$dst/evaluation.log" || -e "$dst/ap_${split}_realsense.npy" ]]; then
         echo "Existing official evaluation evidence; refuse overwrite: $dst" >&2; exit 1
       fi
-      python - "$dst" "$split" "$head" "$EXPECTED" "$EXPECTED_TRAIN_DOMAIN" <<'PY'
+      python - "$dst" "$split" "$head" "$EXPECTED" "$EXPECTED_TRAIN_DOMAIN" "$POINT_RGB_FUSION" <<'PY'
 import json,sys
 from pathlib import Path
-p=Path(sys.argv[1]); split=sys.argv[2]; head=sys.argv[3]; expected=int(sys.argv[4]); expected_domain=sys.argv[5]
+p=Path(sys.argv[1]); split=sys.argv[2]; head=sys.argv[3]; expected=int(sys.argv[4]); expected_domain=sys.argv[5]; expected_fusion=sys.argv[6]
 summary=json.loads((p/"inference_summary.json").read_text())
 protocol=json.loads((p/"inference_protocol.json").read_text())
 frames=list(p.glob("scene_*/realsense/*.npy"))
@@ -115,6 +123,8 @@ if protocol["train_domain"] not in ("original","mixed"):
     raise SystemExit("Missing validated training domain")
 if expected_domain!="auto" and protocol["train_domain"]!=expected_domain:
     raise SystemExit(f"Wrong training domain for official evaluator: expected {expected_domain}")
+if protocol.get("point_rgb_fusion","none")!=expected_fusion:
+    raise SystemExit(f"Wrong point RGB fusion in inference protocol: expected {expected_fusion}")
 PY
       echo "[POINT100] serial official AP head=$head split=$split stride=$EVAL_STRIDE"
       (set -C; python eval.py \
