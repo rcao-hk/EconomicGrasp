@@ -32,6 +32,7 @@ def _extra_options():
     p.add_argument("--max_train_batches", type=int, default=0)
     p.add_argument("--max_val_batches", type=int, default=0)
     p.add_argument("--shared_depth_checkpoint", default="")
+    p.add_argument("--point_rgb_fusion",choices=("none","dino_multiscale"),default="none")
     x,rest=p.parse_known_args()
     sys.argv=[sys.argv[0],*rest]
     if not (0.0<x.val_fraction<=1.0):
@@ -44,6 +45,10 @@ def _extra_options():
         raise ValueError("--gntrans_rgb_root required for mixed training")
     if x.train_domain=="original" and x.gntrans_fused_background:
         raise ValueError("--gntrans_fused_background requires mixed training")
+    if x.point_rgb_fusion!="none" and x.point_head!="cdf":
+        raise ValueError("A2 requires --point_head cdf")
+    if x.point_rgb_fusion!="none" and not x.shared_depth_checkpoint:
+        raise ValueError("A2 requires --shared_depth_checkpoint: same frozen DPT as A1/A3")
     return x
 
 
@@ -263,6 +268,13 @@ class Trainer:
             "training_scene_frame_sha256":train_sig,
             "validation_scene_frame_sha256":scene_frame_signature(seen,val_idx),
             "head":FULL.point_head,
+            "point_rgb_fusion":FULL.point_rgb_fusion,
+            "point_rgb_source":(
+                "same_four_raw_frozen_DINOv2_ViTB_intermediate_layers_as_A3_proposal"
+                if FULL.point_rgb_fusion!="none" else "no_point_rgb"
+            ),
+            "point_rgb_sampling":"448crop_pixel_indices_to_32patch_grid_bilinear" if FULL.point_rgb_fusion!="none" else None,
+            "point_rgb_fusion_location":"after_geometry_TDUnet_before_graspable_and_FPS" if FULL.point_rgb_fusion!="none" else None,
             "point_backbone":"original EconomicGrasp3D Minkowski TDUnet; original point/view/cylinder grouping",
             "pose_depth_mode":"global_film",
             "rgb_encoder":"frozen DepthAnythingV2 ViT-B",
@@ -337,6 +349,7 @@ class Trainer:
             is_training=True,use_obs_depth=False,
             pose_depth_mode="global_film",
             point_use_cdf=FULL.point_head=="cdf",
+            point_rgb_fusion=FULL.point_rgb_fusion,
             vis_dir=None,
         ).to(self.device)
 
@@ -379,7 +392,7 @@ class Trainer:
             ck=torch.load(cfgs.checkpoint_path,map_location="cpu",weights_only=False)
             prior=ck.get("full100_protocol",{})
             for key in (
-                "head","training_scene_frame_sha256","validation_scene_frame_sha256",
+                "head","point_rgb_fusion","training_scene_frame_sha256","validation_scene_frame_sha256",
                 "shared_depth_checkpoint_sha256","train_domain","mix_train_fraction",
                 "original_train_scene_frame_sha256","gntrans_train_scene_frame_sha256",
                 "gntrans_fused_background","gntrans_rgb_root","gntrans_depth_target",
@@ -393,7 +406,10 @@ class Trainer:
                     "gntrans_train_scene_frame_sha256","gntrans_fused_background",
                 ):
                     continue  # pre-mixed full100 manifest compatibility
-                default="original" if key=="train_domain" else None
+                default=(
+                    "original" if key=="train_domain"
+                    else "none" if key=="point_rgb_fusion" else None
+                )
                 if prior.get(key,default)!=self.protocol.get(key):
                     raise RuntimeError(f"Resume mismatch in {key}")
             model.load_state_dict(ck["model_state_dict"],strict=True)
@@ -485,6 +501,7 @@ class Trainer:
             "architecture":"economicgrasp_depth_baseline",
             "point_head":FULL.point_head,
             "point_use_cdf":FULL.point_head=="cdf",
+            "point_rgb_fusion":FULL.point_rgb_fusion,
             "pose_depth_mode":"global_film",
             "model_state_dict":self.module.state_dict(),
             "optimizer_state_dict":self.optimizer.state_dict(),
