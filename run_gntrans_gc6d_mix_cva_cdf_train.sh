@@ -85,6 +85,7 @@ done
 [[ "${ENABLE_POINT_RAYROPE:-0}" == 0 ]] || EXTRA+=(--enable_point_rayrope)
 [[ "${ENABLE_GVAR:-0}" == 0 ]] || EXTRA+=(--enable_gvar)
 EXTRA+=(--rayrope_group_chunk "${RAYROPE_GROUP_CHUNK:-32}" --gvar_action_chunk "${GVAR_ACTION_CHUNK:-256}")
+EXTRA+=(--rayrope_checkpoint_chunks "${RAYROPE_CHECKPOINT_CHUNKS:-1}" --gvar_activation_checkpoint "${GVAR_ACTIVATION_CHECKPOINT:-1}")
 if [[ "${USE_FUSE_DEPTH}" == "1" ]]; then
   EXTRA+=(--use_fuse_depth --mix_use_fused_background)
 fi

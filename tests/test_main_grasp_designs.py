@@ -1,6 +1,9 @@
 """Small real attention/decoder tests; no dataset or pretrained model required."""
 import unittest
 import sys
+import ast
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
@@ -39,6 +42,24 @@ def fixture():
 
 
 class MainGraspDesignTests(unittest.TestCase):
+    def test_best_checkpoint_can_be_loaded_by_enabled_inference(self):
+        # Exercise the real trainer save method without importing dataset/CUDA dependencies.
+        tree = ast.parse((Path(__file__).resolve().parents[1] / 'train_cva_ddp.py').read_text())
+        method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                      and n.name == 'save_best_state_dict')
+        import os
+        for enabled in (False, True):
+            model = fixture()
+            install_grasp_designs(model, enable_point_rayrope=enabled, enable_gvar=enabled)
+            with tempfile.TemporaryDirectory() as directory:
+                scope = dict(torch=torch, os=os, cfgs=SimpleNamespace(log_dir=directory))
+                exec(compile(ast.Module(body=[method], type_ignores=[]), '<trainer-save>', 'exec'), scope)
+                trainer = SimpleNamespace(main=True, unwrap_model=lambda: model)
+                scope['save_best_state_dict'](trainer, 9, 2., 1.)
+                ckpt = torch.load(next(Path(directory).glob('*.tar')), weights_only=True)
+                validate_checkpoint_design(model, ckpt)
+                model.load_state_dict(ckpt['model_state_dict'] if enabled else ckpt, strict=True)
+
     def test_disabled_preserves_modules_rng_and_checkpoint(self):
         model = fixture()
         modules = dict(model.named_modules())
@@ -96,6 +117,19 @@ class MainGraspDesignTests(unittest.TestCase):
             setattr(model, field, value)
             with self.assertRaises(ValueError):
                 install_grasp_designs(model, enable_point_rayrope=True)
+
+    def test_checkpoint_runtime_flags_preserve_default_and_validate_override(self):
+        default = fixture()
+        install_grasp_designs(default, enable_point_rayrope=True, enable_gvar=True)
+        changed = fixture()
+        install_grasp_designs(changed, enable_point_rayrope=True, enable_gvar=True,
+                              rayrope_checkpoint_chunks=False, gvar_activation_checkpoint=False)
+        self.assertTrue(default.grasp_design['rayrope']['checkpoint_chunks'])
+        self.assertTrue(default.grasp_design['gvar']['activation_checkpoint'])
+        self.assertFalse(changed.kview_grasp_module.group.cfg.checkpoint_chunks)
+        self.assertFalse(changed.kview_grasp_module.decoder.reader.cfg.activation_checkpoint)
+        with self.assertRaises(ValueError):
+            validate_checkpoint_design(changed, {'grasp_design': default.grasp_design})
 
 
 if __name__ == '__main__':

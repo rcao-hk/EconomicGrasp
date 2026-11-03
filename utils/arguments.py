@@ -91,6 +91,8 @@ parser.add_argument("--enable_gvar", action="store_true",
                     help="Enable volume_rel GVAR readout; independent of Point RayRoPE, default off.")
 parser.add_argument("--rayrope_group_chunk", type=int, default=32)
 parser.add_argument("--gvar_action_chunk", type=int, default=256)
+parser.add_argument("--rayrope_checkpoint_chunks", type=int, choices=(0, 1), default=1)
+parser.add_argument("--gvar_activation_checkpoint", type=int, choices=(0, 1), default=1)
 # parser.add_argument(
 #     "--use_pose_loss_mask",
 #     action="store_true",

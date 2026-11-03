@@ -1058,7 +1058,12 @@ class Trainer:
         if not self.main:
             return
         ckpt_name = f'epoch_{epoch}_train_{train_loss}_val_{eval_loss}'
-        torch.save(self.unwrap_model().state_dict(), os.path.join(cfgs.log_dir, ckpt_name + '.tar'))
+        model = self.unwrap_model()
+        state = model.state_dict()
+        if model.grasp_design['enable_point_rayrope'] or model.grasp_design['enable_gvar']:
+            state = {'model_state_dict': state, 'grasp_design': model.grasp_design,
+                     'epoch': epoch + 1, 'validation_loss': eval_loss}
+        torch.save(state, os.path.join(cfgs.log_dir, ckpt_name + '.tar'))
 
     def save_checkpoint(self, epoch, save_interval=False):
         if not self.main:

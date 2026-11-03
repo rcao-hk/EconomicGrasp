@@ -14,6 +14,8 @@ def design_options(args):
         enable_gvar=bool(getattr(args, "enable_gvar", False)),
         rayrope_group_chunk=int(getattr(args, "rayrope_group_chunk", 32)),
         gvar_action_chunk=int(getattr(args, "gvar_action_chunk", 256)),
+        rayrope_checkpoint_chunks=bool(getattr(args, "rayrope_checkpoint_chunks", True)),
+        gvar_activation_checkpoint=bool(getattr(args, "gvar_activation_checkpoint", True)),
     )
 
 
@@ -34,7 +36,8 @@ def supply_gvar_context(module, args, kwargs):
 
 
 def install_grasp_designs(model, *, enable_point_rayrope=False, enable_gvar=False,
-                          rayrope_group_chunk=32, gvar_action_chunk=256):
+                          rayrope_group_chunk=32, gvar_action_chunk=256,
+                          rayrope_checkpoint_chunks=True, gvar_activation_checkpoint=True):
     """No module construction/RNG consumption when both designs are disabled."""
     model.grasp_design = dict(enable_point_rayrope=bool(enable_point_rayrope),
                              enable_gvar=bool(enable_gvar))
@@ -59,7 +62,8 @@ def install_grasp_designs(model, *, enable_point_rayrope=False, enable_gvar=Fals
                     self.geometry_context = None
 
         cfg = ModelConfig(use_rayrope=True, ray_encoding="point",
-                          group_chunk=rayrope_group_chunk)
+                          group_chunk=rayrope_group_chunk,
+                          checkpoint_chunks=rayrope_checkpoint_chunks)
         group_module.group = PointGrouping(cfg, model.seed_feature_dim,
                                           group_module.decoder.input_proj.in_channels)
         model.grasp_design["rayrope"] = asdict(cfg)
@@ -67,7 +71,7 @@ def install_grasp_designs(model, *, enable_point_rayrope=False, enable_gvar=Fals
         from rayrope_gvar.reader import GVARConfig
         from rayrope_gvar.decoder import GripperVolumeCDFDecoder
         cfg = GVARConfig(variant="volume_rel", action_chunk=gvar_action_chunk,
-                         activation_checkpoint=True)
+                         activation_checkpoint=gvar_activation_checkpoint)
         group_module.decoder = GripperVolumeCDFDecoder(
             group_module.decoder, model.seed_feature_dim, cfg)
         group_module.group.register_forward_pre_hook(supply_gvar_context, with_kwargs=True)

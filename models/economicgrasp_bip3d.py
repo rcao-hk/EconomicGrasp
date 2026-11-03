@@ -6400,6 +6400,8 @@ class economicgrasp_dpt(nn.Module):
         enable_gvar: bool = False,
         rayrope_group_chunk: int = 32,
         gvar_action_chunk: int = 256,
+        rayrope_checkpoint_chunks: bool = True,
+        gvar_activation_checkpoint: bool = True,
     ):
         super().__init__()
         self.enable_point_rayrope = bool(enable_point_rayrope)
@@ -6782,6 +6784,8 @@ class economicgrasp_dpt(nn.Module):
             self, enable_point_rayrope=self.enable_point_rayrope,
             enable_gvar=self.enable_gvar, rayrope_group_chunk=rayrope_group_chunk,
             gvar_action_chunk=gvar_action_chunk,
+            rayrope_checkpoint_chunks=rayrope_checkpoint_chunks,
+            gvar_activation_checkpoint=gvar_activation_checkpoint,
         )
 
         # Geometry diagnostics are independent of the prediction-head choice

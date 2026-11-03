@@ -30,6 +30,14 @@ export CUDA_VISIBLE_DEVICES="${GPUS}"
 mkdir -p "${OUTPUT_ROOT}"
 
 extra=()
+for flag in ENABLE_POINT_RAYROPE ENABLE_GVAR; do
+  value="${!flag:-0}"
+  [[ "$value" =~ ^[01]$ ]] || { echo "Invalid $flag=$value" >&2; exit 2; }
+done
+[[ "${ENABLE_POINT_RAYROPE:-0}" == 0 ]] || extra+=(--enable_point_rayrope)
+[[ "${ENABLE_GVAR:-0}" == 0 ]] || extra+=(--enable_gvar)
+extra+=(--rayrope_group_chunk "${RAYROPE_GROUP_CHUNK:-32}" --gvar_action_chunk "${GVAR_ACTION_CHUNK:-256}")
+extra+=(--rayrope_checkpoint_chunks "${RAYROPE_CHECKPOINT_CHUNKS:-1}" --gvar_activation_checkpoint "${GVAR_ACTIVATION_CHECKPOINT:-1}")
 if [[ "${USE_FUSE_DEPTH}" == "1" ]]; then
   extra+=(--use_fuse_depth --mix_use_fused_background)
 elif [[ "${USE_FUSE_DEPTH}" != "0" ]]; then
@@ -59,7 +67,7 @@ torchrun --standalone --nproc_per_node="${NPROC}" train_cva_gntrans_mix_ddp.py \
   --use_cdf \
   --extend_angle \
   --enable_eval \
-  --eval_start_epoch 0 \
+  --eval_start_epoch "${EVAL_START_EPOCH:-0}" \
   --graspness_mode scene \
   --kview_mode A1 \
   --pose_depth_mode "${POSE_DEPTH_MODE}" \
