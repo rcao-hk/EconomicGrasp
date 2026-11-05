@@ -22,7 +22,10 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 import numpy as np
 
-from analyze_rayrope_candidates import load_candidates, rank_corr
+try:
+    from .analyze_rayrope_candidates import load_candidates, rank_corr
+except ImportError:  # direct execution: python diagnostics/analyze_rayrope_depth_error.py
+    from analyze_rayrope_candidates import load_candidates, rank_corr
 
 
 def load_array(path: str, key: str = "") -> np.ndarray:
