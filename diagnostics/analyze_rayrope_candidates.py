@@ -25,9 +25,9 @@ import numpy as np
 
 MUS = (0.2, 0.4, 0.6, 0.8, 1.0, 1.2)
 ALIASES = {
-    "sample": ("sample_id", "frame_id", "sample", "frame_key", "image_id", "sample_key"),
+    "sample": ("sample_id", "sample", "frame_key", "image_key", "sample_key"),
     "scene": ("scene_id", "scene", "scene_idx", "scene_index", "sceneid"),
-    "anno": ("anno_id", "annotation_id", "frame_idx", "image_idx", "frame_index"),
+    "anno": ("anno_id", "annotation_id", "frame_id", "frame_idx", "image_id", "image_idx", "frame_index"),
     "split": ("split", "object_split", "test_split", "eval_split"),
     "candidate": ("candidate_id", "action_id", "grasp_id", "candidate_idx", "action_idx", "id"),
     "parent": ("parent_id", "parent_candidate_id", "base_action_id", "geometry_id", "action_family_id", "source_candidate_id"),
