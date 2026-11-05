@@ -93,7 +93,13 @@ If the server CSV uses nonstandard names, provide a JSON map. Example:
   "width": "executed_width_m",
   "friction": "dexnet_friction_score",
   "collision_or_empty": "collision_or_empty",
-  "empty": "empty_grasp"
+  "empty": "empty_grasp",
+  "mu_0.2": "fc_success_02",
+  "mu_0.4": "fc_success_04",
+  "mu_0.6": "fc_success_06",
+  "mu_0.8": "fc_success_08",
+  "mu_1.0": "fc_success_10",
+  "mu_1.2": "fc_success_12"
 }
 ```
 
