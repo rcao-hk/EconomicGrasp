@@ -1,7 +1,7 @@
 # RayRoPE P1/P2 diagnostics
 
-Branch: \`exp/rayrope-p1-p2-diagnostics\`  
-Base: \`main@7a956d37aaa427a32e598f21fdc6b910ed3c2704\`
+Branch: `exp/rayrope-p1-p2-diagnostics`  
+Base: `main@7a956d37aaa427a32e598f21fdc6b910ed3c2704`
 
 ## Scope and status
 
@@ -11,14 +11,14 @@ Implemented scripts:
 
 | File | Purpose |
 |---|---|
-| \`diagnostics/analyze_rayrope_candidates.py\` | Failure attribution, six official friction thresholds, ranking/regret, width-conditioned quality, matched width sweeps, paired interventions, scene-clustered bootstrap |
-| \`diagnostics/analyze_rayrope_depth_error.py\` | Registered predicted-vs-GT depth error and its association with native vs reader-perturbed candidate selection |
-| \`diagnostics/sample_rayrope_candidates_uniform.py\` | Deterministic score-independent sampling from a verified complete pre-score-filter candidate pool |
-| \`diagnostics/rayrope_p1_p2.py\` | Earlier generic candidate-table metrics and metric-depth intervention primitives |
-| \`tests/test_rayrope_candidate_analysis.py\` | Tests for failure classes, six-mu labels, width families, depth metrics, paired effects, and uniform sampling |
-| \`tests/test_rayrope_p1_p2.py\` | Tests for the earlier generic diagnostic primitives |
+| `diagnostics/analyze_rayrope_candidates.py` | Failure attribution, six official friction thresholds, ranking/regret, width-conditioned quality, matched width sweeps, paired interventions, scene-clustered bootstrap |
+| `diagnostics/analyze_rayrope_depth_error.py` | Registered predicted-vs-GT depth error and its association with native vs reader-perturbed candidate selection |
+| `diagnostics/sample_rayrope_candidates_uniform.py` | Deterministic score-independent sampling from a verified complete pre-score-filter candidate pool |
+| `diagnostics/rayrope_p1_p2.py` | Earlier generic candidate-table metrics and metric-depth intervention primitives |
+| `tests/test_rayrope_candidate_analysis.py` | Tests for failure classes, six-mu labels, width families, depth metrics, paired effects, and uniform sampling |
+| `tests/test_rayrope_p1_p2.py` | Tests for the earlier generic diagnostic primitives |
 
-The uploaded 2026-11-06 result report describes 18 frames / 9 scenes and 64 score-stratified candidates per frame. Its actual \`candidates.csv\`, depth arrays, and manifest were not included in the repository commit. The scripts therefore accept those server-side files as inputs; **no new analysis result is claimed until the commands below are run on the server**.
+The uploaded 2026-11-06 result report describes 18 frames / 9 scenes and 64 score-stratified candidates per frame. Its actual `candidates.csv`, depth arrays, and manifest were not included in the repository commit. The scripts therefore accept those server-side files as inputs; **no new analysis result is claimed until the commands below are run on the server**.
 
 ## 1. Candidate CSV analysis
 
@@ -26,7 +26,7 @@ The uploaded 2026-11-06 result report describes 18 frames / 9 scenes and 64 scor
 
 Run:
 
-\`\`\`bash
+```bash
 python diagnostics/analyze_rayrope_candidates.py \\
   --input_csv "$RUN_ROOT/results/candidates.csv" \\
   --output_json "$RUN_ROOT/analysis/candidate_diagnostics.json" \\
@@ -37,14 +37,14 @@ python diagnostics/analyze_rayrope_candidates.py \\
   --insertion_bins 0,0.01,0.02,0.03,0.04,0.05,inf \\
   --bootstrap_samples 5000 \\
   --seed 20261106
-\`\`\`
+```
 
 The analyzer produces:
 
 - Mutually exclusive candidate failure classes: empty grasp, collision, force-closure failure, success, unknown.
 - Failure attribution for all candidates, the per-frame high-score subset, and each frame's Top-1 candidate.
-- Official friction-threshold decomposition at \`mu = 0.2, 0.4, 0.6, 0.8, 1.0, 1.2\`: all-candidate success, Top-1 success, Top-5 success, and high-score failure.
-- Per-frame score/quality Spearman and Kendall-\`tau-b\`, Top-1/Top-5 quality, candidate-set oracle quality, Top-1 regret, and high-score failure rate.
+- Official friction-threshold decomposition at `mu = 0.2, 0.4, 0.6, 0.8, 1.0, 1.2`: all-candidate success, Top-1 success, Top-5 success, and high-score failure.
+- Per-frame score/quality Spearman and Kendall-`tau-b`, Top-1/Top-5 quality, candidate-set oracle quality, Top-1 regret, and high-score failure rate.
 - Split-level and overall summaries with **scene-clustered bootstrap** intervals. Frames/candidates are not treated as independent scenes.
 - Width bins and insertion-depth bins in metres, width-mode summaries when a width-mode column exists, and matched width-sweep regret when the same physical action family is evaluated at multiple widths.
 - Paired intervention score change, rank stability, Top-1 changes, and Top-1 quality changes for candidate IDs shared with the reference condition.
@@ -53,15 +53,15 @@ The analyzer produces:
 
 If all six success-bit columns are detected, quality is their arithmetic mean:
 
-\`\`\`text
+```text
 quality = (success_mu_0.2 + ... + success_mu_1.2) / 6
-\`\`\`
+```
 
 If the six bits are absent but the exact evaluator's friction score is present, the script follows the GraspNet convention:
 
-\`\`\`text
+```text
 success(mu) = friction_score > 0 and friction_score <= mu
-\`\`\`
+```
 
 A scalar quality field is only a fallback and cannot support six-threshold decomposition by itself. The script does not treat AP as per-candidate quality.
 
@@ -83,7 +83,7 @@ The parser auto-detects common aliases for sample/frame, scene, split, candidate
 
 If the server CSV uses nonstandard names, provide a JSON map. Example:
 
-\`\`\`json
+```json
 {
   "sample": "frame_key",
   "scene": "scene",
@@ -95,9 +95,9 @@ If the server CSV uses nonstandard names, provide a JSON map. Example:
   "collision_or_empty": "collision_or_empty",
   "empty": "empty_grasp"
 }
-\`\`\`
+```
 
-Then pass \`--columns_json /path/to/column_map.json\`. The six success-bit headers are detected independently by their threshold token and success/pass/force-closure marker. The output JSON records the detected schema so header interpretation is auditable.
+Then pass `--columns_json /path/to/column_map.json`. The six success-bit headers are detected independently by their threshold token and success/pass/force-closure marker. The output JSON records the detected schema so header interpretation is auditable.
 
 ### 1.5 Insertion-depth-conditioned analysis
 
@@ -107,16 +107,16 @@ The same candidate analyzer also bins the exact insertion-depth field using `--i
 
 The depth files mentioned in the result report are not, by themselves, ground truth. Create a manifest with registered predicted and GT depth maps:
 
-\`\`\`csv
+```csv
 sample_id,pred_path,gt_path,mask_path,pred_key,gt_key,mask_key
 scene0100_frame0000,/path/pred.npy,/path/gt.npy,,,, 
-\`\`\`
+```
 
-Only \`sample_id,pred_path,gt_path\` are required. Optional NPZ keys and a validity mask may be supplied. Both depth arrays must be same-resolution, same-camera-Z metric maps in the declared unit.
+Only `sample_id,pred_path,gt_path` are required. Optional NPZ keys and a validity mask may be supplied. Both depth arrays must be same-resolution, same-camera-Z metric maps in the declared unit.
 
 Run:
 
-\`\`\`bash
+```bash
 python diagnostics/analyze_rayrope_depth_error.py \\
   --depth_manifest_csv "$RUN_ROOT/depth_manifest.csv" \\
   --candidate_csv "$RUN_ROOT/results/candidates.csv" \\
@@ -125,9 +125,9 @@ python diagnostics/analyze_rayrope_depth_error.py \\
   --native_condition native \\
   --perturbed_condition reader_plus10mm \\
   --local_radius_px 5
-\`\`\`
+```
 
-The script reports signed depth bias, MAE, RMSE, P95 absolute error, valid coverage, optional local error around candidate pixel \`u,v\`, and frame-level correlations between actual depth error and +10 mm changes in score/Top-1 selection/quality.
+The script reports signed depth bias, MAE, RMSE, P95 absolute error, valid coverage, optional local error around candidate pixel `u,v`, and frame-level correlations between actual depth error and +10 mm changes in score/Top-1 selection/quality.
 
 This is an **association analysis**, not proof that +10 mm compensates the model's depth error. If GT maps are unavailable or not registered, do not run this analysis; a SHA256 list is insufficient.
 
@@ -137,20 +137,20 @@ The current 64 candidates per frame were sampled by score range. Their quality d
 
 To obtain an independent candidate sample, first export the **complete candidate pool before score-based filtering/truncation**, then run:
 
-\`\`\`bash
+```bash
 python diagnostics/sample_rayrope_candidates_uniform.py \\
   --input_csv "$RUN_ROOT/results/full_candidate_pool.csv" \\
   --output_csv "$RUN_ROOT/analysis/candidates_uniform64.csv" \\
   --n_per_sample 64 \\
   --seed 20261106 \\
   --input_is_full_pool
-\`\`\`
+```
 
 The required acknowledgement flag is deliberate. Do not pass the existing 64-row score-stratified table as a full pool. A manifest records the input SHA256, seed, pool size, and selected count per frame.
 
 ## 4. Interventions and what can be concluded
 
-The candidate analyzer accepts arbitrary condition names and pairs rows only when the same \`sample_id\` and physical \`candidate_id\` occur in both conditions.
+The candidate analyzer accepts arbitrary condition names and pairs rows only when the same `sample_id` and physical `candidate_id` occur in both conditions.
 
 | Intervention | Analysis treatment |
 |---|---|
@@ -159,14 +159,14 @@ The candidate analyzer accepts arbitrary condition names and pairs rows only whe
 | Coordinates-only / mask-only | Can be analyzed once model-side exports for these conditions exist; they are not generated by the current offline scripts |
 | Full-system depth perturbation | Per-condition ranking/quality summary; candidate sets may differ, so do not claim paired fixed-candidate effects without shared physical action IDs |
 
-**Important remaining model-side work:** P1.1 coordinates-only vs mask-only requires an inference-only hook in \`moge_rayrope/attention.py\` that independently selects perturbed RoPE coordinates and perturbed in-front validity. The offline scripts do not create those counterfactual predictions. Likewise, full-system depth perturbation requires changing predicted depth before proposal/seed selection, not just inside the reader.
+**Important remaining model-side work:** P1.1 coordinates-only vs mask-only requires an inference-only hook in `moge_rayrope/attention.py` that independently selects perturbed RoPE coordinates and perturbed in-front validity. The offline scripts do not create those counterfactual predictions. Likewise, full-system depth perturbation requires changing predicted depth before proposal/seed selection, not just inside the reader.
 
 ## 5. Tests
 
-\`\`\`bash
+```bash
 python -m unittest tests.test_rayrope_p1_p2 -v
 python -m unittest tests.test_rayrope_candidate_analysis -v
-\`\`\`
+```
 
 These are CPU-side synthetic tests. They do not replace a server run against the actual candidate CSV, depth manifest, GraspNet CAD models, or Dex-Net evaluator.
 
