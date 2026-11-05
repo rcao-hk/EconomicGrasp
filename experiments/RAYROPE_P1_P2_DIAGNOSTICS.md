@@ -27,15 +27,15 @@ The uploaded 2026-11-06 result report describes 18 frames / 9 scenes and 64 scor
 Run:
 
 ```bash
-python diagnostics/analyze_rayrope_candidates.py \\
-  --input_csv "$RUN_ROOT/results/candidates.csv" \\
-  --output_json "$RUN_ROOT/analysis/candidate_diagnostics.json" \\
-  --output_md "$RUN_ROOT/analysis/candidate_diagnostics.md" \\
-  --sampling_protocol score_stratified \\
-  --high_score_quantile 0.95 \\
-  --width_unit auto \\
-  --insertion_bins 0,0.01,0.02,0.03,0.04,0.05,inf \\
-  --bootstrap_samples 5000 \\
+python diagnostics/analyze_rayrope_candidates.py \
+  --input_csv "$RUN_ROOT/results/candidates.csv" \
+  --output_json "$RUN_ROOT/analysis/candidate_diagnostics.json" \
+  --output_md "$RUN_ROOT/analysis/candidate_diagnostics.md" \
+  --sampling_protocol score_stratified \
+  --high_score_quantile 0.95 \
+  --width_unit auto \
+  --insertion_bins 0,0.01,0.02,0.03,0.04,0.05,inf \
+  --bootstrap_samples 5000 \
   --seed 20261106
 ```
 
@@ -117,13 +117,13 @@ Only `sample_id,pred_path,gt_path` are required. Optional NPZ keys and a validit
 Run:
 
 ```bash
-python diagnostics/analyze_rayrope_depth_error.py \\
-  --depth_manifest_csv "$RUN_ROOT/depth_manifest.csv" \\
-  --candidate_csv "$RUN_ROOT/results/candidates.csv" \\
-  --output_json "$RUN_ROOT/analysis/depth_error_reader_plus10.json" \\
-  --depth_unit m \\
-  --native_condition native \\
-  --perturbed_condition reader_plus10mm \\
+python diagnostics/analyze_rayrope_depth_error.py \
+  --depth_manifest_csv "$RUN_ROOT/depth_manifest.csv" \
+  --candidate_csv "$RUN_ROOT/results/candidates.csv" \
+  --output_json "$RUN_ROOT/analysis/depth_error_reader_plus10.json" \
+  --depth_unit m \
+  --native_condition native \
+  --perturbed_condition reader_plus10mm \
   --local_radius_px 5
 ```
 
@@ -138,11 +138,11 @@ The current 64 candidates per frame were sampled by score range. Their quality d
 To obtain an independent candidate sample, first export the **complete candidate pool before score-based filtering/truncation**, then run:
 
 ```bash
-python diagnostics/sample_rayrope_candidates_uniform.py \\
-  --input_csv "$RUN_ROOT/results/full_candidate_pool.csv" \\
-  --output_csv "$RUN_ROOT/analysis/candidates_uniform64.csv" \\
-  --n_per_sample 64 \\
-  --seed 20261106 \\
+python diagnostics/sample_rayrope_candidates_uniform.py \
+  --input_csv "$RUN_ROOT/results/full_candidate_pool.csv" \
+  --output_csv "$RUN_ROOT/analysis/candidates_uniform64.csv" \
+  --n_per_sample 64 \
+  --seed 20261106 \
   --input_is_full_pool
 ```
 
