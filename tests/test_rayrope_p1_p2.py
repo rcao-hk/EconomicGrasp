@@ -14,8 +14,8 @@ class RayRoPEP1P2Tests(unittest.TestCase):
     def test_depth_interventions_preserve_invalid_pixels(self):
         depth = np.asarray([[0.0, 0.5], [np.nan, 1.0]], dtype=np.float32)
         shifted = depth_bias(depth, 0.01)
-        self.assertEqual(float(shifted[0, 1]), 0.51)
-        self.assertEqual(float(shifted[1, 1]), 1.01)
+        self.assertAlmostEqual(float(shifted[0, 1]), 0.51, places=6)
+        self.assertAlmostEqual(float(shifted[1, 1]), 1.01, places=6)
         self.assertEqual(float(shifted[0, 0]), 0.0)
         self.assertTrue(np.isnan(shifted[1, 0]))
 
