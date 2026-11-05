@@ -87,9 +87,17 @@ def resolve_columns(fields: Sequence[str], overrides: Mapping[str, str]) -> Dict
         out[key] = next((by_norm[norm(a)] for a in aliases if norm(a) in by_norm), None)
     return out
 
-def discover_mu_columns(fields: Sequence[str]) -> Dict[float, Optional[str]]:
+def discover_mu_columns(fields: Sequence[str], overrides: Optional[Mapping[str, str]] = None) -> Dict[float, Optional[str]]:
     result: Dict[float, Optional[str]] = {}
+    overrides = overrides or {}
     for mu in MUS:
+        override_keys = (f"mu_{mu:.1f}", f"success_mu_{mu:.1f}", f"mu_{mu:.1f}_success")
+        requested = next((overrides[k] for k in override_keys if k in overrides), None)
+        if requested:
+            if requested not in fields:
+                raise ValueError(f"Friction column override for mu={mu:.1f} points to missing column {requested!r}. Available: {list(fields)}")
+            result[mu] = requested
+            continue
         token = f"{int(round(mu * 10)):02d}"
         matches = []
         for field in fields:
@@ -177,7 +185,7 @@ def load_candidates(path: str, columns_json: Optional[str], width_unit: str):
         raise ValueError(f"Candidate CSV is empty: {path}")
     overrides = json.loads(Path(columns_json).read_text(encoding="utf-8")) if columns_json else {}
     cols = resolve_columns(fields, overrides)
-    mu_cols = discover_mu_columns(fields)
+    mu_cols = discover_mu_columns(fields, overrides)
     if cols["score"] is None:
         raise ValueError(f"Cannot find score column. Available headers: {fields}")
     if cols["sample"] is None and (cols["scene"] is None or cols["anno"] is None):
