@@ -431,6 +431,36 @@ def width_bins(rows: Sequence[Mapping[str, Any]], edges: Sequence[float], condit
         result["bins"].append(entry)
     return result
 
+def insertion_depth_bins(rows: Sequence[Mapping[str, Any]], edges: Sequence[float], condition: str) -> Dict[str, Any]:
+    selected = [x for x in rows if x["condition"] == condition and math.isfinite(x["insertion"])]
+    result = {"condition": condition, "edges_m": list(edges), "bins": []}
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        items = [x for x in selected if lo <= x["insertion"] < hi]
+        if not items:
+            result["bins"].append({"range_m": [lo, hi], "n": 0})
+            continue
+        by_sample: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
+        for x in items:
+            by_sample[x["sample"]].append(x)
+        result["bins"].append({
+            "range_m": [lo, hi], "n": len(items),
+            "num_scenes": len({x["scene"] for x in items if x["scene"] is not None}),
+            "mean_insertion_depth_m": mean_or_none([x["insertion"] for x in items]),
+            "mean_score": mean_or_none([x["score"] for x in items]),
+            "mean_quality": mean_or_none([x["quality"] for x in items]),
+            "any_mu_success_rate": mean_or_none([float(x["quality"] > 0) for x in items if math.isfinite(x["quality"])]),
+            "top1_within_bin_quality": mean_or_none([
+                sorted(v, key=lambda x: (-x["score"], x["candidate"]))[0]["quality"]
+                for v in by_sample.values()
+            ]),
+            "friction_threshold_success_rate": {
+                f"mu_{mu:.1f}": mean_or_none([float(x["mu_flags"][mu]) for x in items if x["mu_flags"][mu] is not None])
+                for mu in MUS
+            },
+        })
+    return result
+
+
 def _geometry_family(row: Mapping[str, Any]) -> Optional[Tuple[Any, ...]]:
     if row["parent"]:
         return (row["sample"], "parent", row["parent"])
@@ -613,6 +643,7 @@ def main() -> None:
     p.add_argument("--reference_condition", default="native")
     p.add_argument("--high_score_quantile", type=float, default=0.95)
     p.add_argument("--width_bins", default="0,0.02,0.04,0.06,0.08,0.10,inf")
+    p.add_argument("--insertion_bins", default="0,0.01,0.02,0.03,0.04,0.05,inf")
     p.add_argument("--bootstrap_samples", type=int, default=5000)
     p.add_argument("--seed", type=int, default=20261106)
     p.add_argument("--sampling_protocol", choices=("score_stratified", "uniform", "full_pool", "unknown"),
@@ -654,8 +685,11 @@ def main() -> None:
         chosen = next(iter(conditions))
         ref_rows = [x for x in rows if x["condition"] == chosen]
     edges = parse_edges(args.width_bins)
-    width_result = width_bins(rows, edges, args.reference_condition if any(x["condition"] == args.reference_condition for x in rows) else (conditions[0] if conditions else "native"))
-    width_sweep = matched_width_sweeps(rows, args.reference_condition if any(x["condition"] == args.reference_condition for x in rows) else (conditions[0] if conditions else "native"))
+    insertion_edges = parse_edges(args.insertion_bins)
+    analysis_condition = args.reference_condition if any(x["condition"] == args.reference_condition for x in rows) else (conditions[0] if conditions else "native")
+    width_result = width_bins(rows, edges, analysis_condition)
+    insertion_result = insertion_depth_bins(rows, insertion_edges, analysis_condition)
+    width_sweep = matched_width_sweeps(rows, analysis_condition)
     width_modes = width_mode_summary(ref_rows)
     sample_count = len({x["sample"] for x in rows})
     scene_count = len({x["scene"] for x in rows if x["scene"] is not None})
@@ -682,6 +716,8 @@ def main() -> None:
         "failure_breakdown_by_split": fail_by_split,
         "width_bins": width_result["bins"],
         "width_bins_metadata": {"condition": width_result["condition"], "edges_m": edges},
+        "insertion_depth_bins": insertion_result["bins"],
+        "insertion_depth_bins_metadata": {"condition": insertion_result["condition"], "edges_m": insertion_edges},
         "matched_width_sweep": width_sweep,
         "width_mode_summary": width_modes,
         "paired_interventions_vs_reference": paired_interventions(rows, args.reference_condition),
