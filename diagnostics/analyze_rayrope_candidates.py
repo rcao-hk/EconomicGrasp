@@ -38,14 +38,14 @@ ALIASES = {
     "collision_or_empty": ("collision_or_empty", "collision_empty", "invalid_collision", "collision_flag", "collision"),
     "pure_collision": ("pure_collision", "collision_only", "is_collision"),
     "empty": ("empty", "empty_grasp", "is_empty", "empty_flag", "no_contact"),
-    "width": ("width_m", "width", "predicted_width", "grasp_width", "width_pred", "executed_width"),
+    "width": ("width_m", "grasp_width_m", "width_meters", "width", "predicted_width", "pred_width", "grasp_width", "width_pred", "width_pred_m", "executed_width"),
     "width_mode": ("width_mode", "width_source", "width_type", "is_predicted_width", "width_is_predicted"),
     "center_x": ("center_x", "x", "tx", "translation_x", "grasp_x"),
     "center_y": ("center_y", "y", "ty", "translation_y", "grasp_y"),
     "center_z": ("center_z", "z", "tz", "translation_z", "grasp_z"),
     "u": ("center_u", "u", "pixel_u", "image_u", "center_px_x"),
     "v": ("center_v", "v", "pixel_v", "image_v", "center_px_y"),
-    "insertion": ("insertion_depth_m", "insertion_depth", "depth_m", "grasp_depth", "depth"),
+    "insertion": ("insertion_depth_m", "insertion_m", "insertion_depth", "depth_m", "grasp_depth", "depth"),
 }
 
 def norm(s: str) -> str:
