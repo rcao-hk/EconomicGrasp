@@ -34,6 +34,7 @@ python diagnostics/analyze_rayrope_candidates.py \\
   --sampling_protocol score_stratified \\
   --high_score_quantile 0.95 \\
   --width_unit auto \\
+  --insertion_bins 0,0.01,0.02,0.03,0.04,0.05,inf \\
   --bootstrap_samples 5000 \\
   --seed 20261106
 \`\`\`
@@ -45,7 +46,7 @@ The analyzer produces:
 - Official friction-threshold decomposition at \`mu = 0.2, 0.4, 0.6, 0.8, 1.0, 1.2\`: all-candidate success, Top-1 success, Top-5 success, and high-score failure.
 - Per-frame score/quality Spearman and Kendall-\`tau-b\`, Top-1/Top-5 quality, candidate-set oracle quality, Top-1 regret, and high-score failure rate.
 - Split-level and overall summaries with **scene-clustered bootstrap** intervals. Frames/candidates are not treated as independent scenes.
-- Width bins in metres, width-mode summaries when a width-mode column exists, and matched width-sweep regret when the same physical action family is evaluated at multiple widths.
+- Width bins and insertion-depth bins in metres, width-mode summaries when a width-mode column exists, and matched width-sweep regret when the same physical action family is evaluated at multiple widths.
 - Paired intervention score change, rank stability, Top-1 changes, and Top-1 quality changes for candidate IDs shared with the reference condition.
 
 ### 1.2 Quality and failure conventions
@@ -97,6 +98,10 @@ If the server CSV uses nonstandard names, provide a JSON map. Example:
 \`\`\`
 
 Then pass \`--columns_json /path/to/column_map.json\`. The six success-bit headers are detected independently by their threshold token and success/pass/force-closure marker. The output JSON records the detected schema so header interpretation is auditable.
+
+### 1.5 Insertion-depth-conditioned analysis
+
+The same candidate analyzer also bins the exact insertion-depth field using `--insertion_bins` (default 0, 10, 20, 30, 40, 50 mm and above). These are observational bins, not a controlled insertion-depth sweep. A causal sweep requires the same center, rotation, width, RGB frame, and exact-action evaluator protocol while varying insertion depth.
 
 ## 2. Depth-error association with reader +10 mm
 
