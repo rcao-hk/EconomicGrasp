@@ -160,7 +160,7 @@ def failure_class(collision_or_empty: Optional[bool], pure_collision: Optional[b
     if collision_or_empty is True:
         return "collision"
     known_flags = [v for v in flags.values() if v is not None]
-    if known_flags and not any(known_flags):
+    if len(known_flags) == len(MUS) and not any(known_flags):
         return "force_closure_failure"
     if math.isfinite(quality) and quality <= 0.0:
         return "force_closure_failure"
