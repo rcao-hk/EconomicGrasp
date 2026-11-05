@@ -96,7 +96,7 @@ def discover_mu_columns(fields: Sequence[str]) -> Dict[float, Optional[str]]:
             n = norm(field)
             if n in ("mu", "muthreshold", "friction", "frictionscore"):
                 continue
-            has_mu_token = token in n
+            has_mu_token = n.endswith(token) or re.search(rf"(?:mu|success|pass|fc|forceclosure).*{token}(?:success|pass|flag)?$", n) is not None
             has_success_marker = any(k in n for k in ("success", "pass", "closure", "forceclosure", "fc"))
             if has_mu_token and has_success_marker:
                 matches.append(field)
@@ -208,7 +208,7 @@ def load_candidates(path: str, columns_json: Optional[str], width_unit: str):
         friction = parse_float(raw.get(cols["friction"])) if cols["friction"] else float("nan")
         flags = _mu_flags(raw, mu_cols, friction)
         known = [v for v in flags.values() if v is not None]
-        quality = float(np.mean(known)) if known else (
+        quality = float(np.mean(known)) if len(known) == len(MUS) else (
             parse_float(raw.get(cols["quality"])) if cols["quality"] else float("nan")
         )
         # A scalar quality field is a fallback only. If the six official
@@ -239,6 +239,14 @@ def load_candidates(path: str, columns_json: Optional[str], width_unit: str):
             "v": parse_float(raw.get(cols["v"])) if cols["v"] else float("nan"),
         }
         rows.append(row)
+    # A candidate ID must be unique within a physical frame and intervention;
+    # otherwise paired score/rank comparisons would silently overwrite rows.
+    seen_ids = set()
+    for row in rows:
+        key = (row["sample"], row["condition"], row["candidate"])
+        if key in seen_ids:
+            raise ValueError(f"Duplicate candidate_id {row['candidate']!r} in sample={row['sample']!r}, condition={row['condition']!r}")
+        seen_ids.add(key)
     detected_mu = {str(mu): col for mu, col in mu_cols.items() if col}
     return rows, {"columns": cols, "mu_columns": detected_mu, "width_unit_input": width_unit,
                   "width_unit_resolved": resolved_unit, "headers": fields}
