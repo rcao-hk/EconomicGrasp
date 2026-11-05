@@ -122,6 +122,32 @@ class RayRoPECandidateAnalysisTests(unittest.TestCase):
                             "pred_path": str(root / "pred.npy"),
                             "gt_path": str(root / "gt.npy")})
             self.assertTrue(manifest.is_file())
+            candidate_csv = root / "candidates.csv"
+            with candidate_csv.open("w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=["sample_id", "candidate_id", "intervention", "score", "quality"])
+                w.writeheader()
+                w.writerows([
+                    {"sample_id": "scene0100_frame0000", "candidate_id": "a", "intervention": "native", "score": 0.9, "quality": 1.0},
+                    {"sample_id": "scene0100_frame0000", "candidate_id": "b", "intervention": "native", "score": 0.5, "quality": 0.0},
+                    {"sample_id": "scene0100_frame0000", "candidate_id": "a", "intervention": "reader_plus10mm", "score": 0.7, "quality": 1.0},
+                    {"sample_id": "scene0100_frame0000", "candidate_id": "b", "intervention": "reader_plus10mm", "score": 0.8, "quality": 0.0},
+                ])
+            output = root / "depth_error.json"
+            cmd = [
+                sys.executable, "diagnostics/analyze_rayrope_depth_error.py",
+                "--depth_manifest_csv", str(manifest),
+                "--candidate_csv", str(candidate_csv),
+                "--output_json", str(output),
+                "--depth_unit", "m",
+                "--native_condition", "native",
+                "--perturbed_condition", "reader_plus10mm",
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+            report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(report["num_depth_frames"], 1)
+            self.assertEqual(report["num_paired_candidate_frames"], 1)
+            self.assertAlmostEqual(report["per_sample"]["scene0100_frame0000"]["median_signed_error_m"], 0.01, places=6)
 
     def test_uniform_sampler_requires_full_pool_acknowledgement(self):
         with tempfile.TemporaryDirectory() as td:
