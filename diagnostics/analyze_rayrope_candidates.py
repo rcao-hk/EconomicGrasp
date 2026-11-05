@@ -135,14 +135,18 @@ def infer_split(raw: Any, scene: Optional[int]) -> str:
 def _mu_flags(raw: Mapping[str, Any], mu_cols: Mapping[float, Optional[str]],
               friction: float) -> Dict[float, Optional[bool]]:
     flags: Dict[float, Optional[bool]] = {}
+    all_explicit = all(mu_cols.get(mu) for mu in MUS)
     for mu in MUS:
         col = mu_cols.get(mu)
-        if col:
+        if all_explicit and col:
             flags[mu] = parse_bool(raw.get(col))
         elif math.isfinite(friction):
-            # GraspNet official AP convention: a positive predicted friction
-            # score is successful at evaluator mu when score <= mu.
+            # Avoid mixing a partial exported bitset with derived bits. If the
+            # six-bit package is incomplete, derive the complete official
+            # threshold vector from the evaluator's scalar friction score.
             flags[mu] = bool(friction > 0.0 and friction <= mu + 1e-8)
+        elif col:
+            flags[mu] = parse_bool(raw.get(col))
         else:
             flags[mu] = None
     return flags
