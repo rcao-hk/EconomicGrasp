@@ -14,6 +14,7 @@ from diagnostics.analyze_rayrope_candidates import (
     width_bins,
     matched_width_sweeps,
     candidate_failure_breakdown,
+    summarize_samples,
 )
 from diagnostics.analyze_rayrope_depth_error import depth_metrics, paired_candidate_effect
 from diagnostics.sample_rayrope_candidates_uniform import main as sampler_main
@@ -77,6 +78,10 @@ class RayRoPECandidateAnalysisTests(unittest.TestCase):
                 grouped.setdefault(x["sample"], []).append(x)
             m = sample_metrics(next(iter(grouped.values())), 0.95)
             self.assertGreaterEqual(m["top1_quality"], 0.0)
+            sample_summaries = [sample_metrics(v, 0.95) for v in grouped.values()]
+            summary = summarize_samples(sample_summaries, n_boot=200, seed=7)
+            self.assertEqual(summary["num_scenes"], 2)
+            self.assertIsNotNone(summary["top1_quality_scene_bootstrap"]["ci95"])
             self.assertEqual(m["mu_0.2"]["all_candidate_success_rate"], 1.0 / 3.0)
             bins = width_bins(parsed, [0.0, 0.05, 0.07, float("inf")], "native")
             self.assertEqual(sum(x["n"] for x in bins["bins"]), len(native))
