@@ -84,6 +84,8 @@ class RayRoPECandidateAnalysisTests(unittest.TestCase):
             self.assertEqual(sweep["num_matched_width_families"], 3)
             failure = candidate_failure_breakdown(native, 0.95)
             self.assertEqual(failure["all_candidates"]["n"], len(native))
+            self.assertEqual(failure["high_score_candidates"]["n"], 3)
+            self.assertEqual(failure["high_score_candidates"]["collision"]["count"], 3)
 
     def test_depth_metrics_and_paired_effect(self):
         pred = np.asarray([[0.50, 0.51], [0.49, 0.52]])
