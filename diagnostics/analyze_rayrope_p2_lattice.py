@@ -113,6 +113,32 @@ def bootstrap_scene_delta(frame_rows, left, right, metric, *, n_boot=5000, seed=
     }
 
 
+def bootstrap_scene_mean(frame_rows, metric, *, n_boot=5000, seed=20261106):
+    clusters = defaultdict(list)
+    for row in frame_rows:
+        scene = row.get("scene")
+        value = row.get(metric)
+        if scene is None or value is None or not math.isfinite(float(value)):
+            continue
+        clusters[(row["split"], scene)].append(float(value))
+    if not clusters:
+        return {"scenes": 0, "mean": None, "ci95": None}
+    by_split = defaultdict(list)
+    for (split, _), vals in clusters.items():
+        by_split[split].append(float(np.mean(vals)))
+    estimate = float(np.mean([np.mean(x) for x in by_split.values()]))
+    rng = np.random.default_rng(seed)
+    draws = []
+    for _ in range(n_boot):
+        draws.append(float(np.mean([
+            np.mean(rng.choice(vals, len(vals), replace=True))
+            for vals in by_split.values()
+        ])))
+    return {"scenes": len(clusters), "mean": estimate,
+            "ci95": list(map(float, np.quantile(draws, [.025, .975]))) if draws else None,
+            "bootstrap_unit": "scene_cluster_stratified_by_split"}
+
+
 def query_winner_pairs(rows):
     by = defaultdict(lambda: defaultdict(list))
     for x in rows:
@@ -261,7 +287,10 @@ def main():
 
     overall = defaultdict(dict)
     conditions = sorted({x["condition"] for x in frame})
-    keys = ["top1_mean_quality", "top5_mean_quality", "top1_regret", "spearman", "top5_collision_rate", "top5_empty_rate", "top5_force_closure_fail_rate"]
+    keys = ["top1_regret", "spearman"] + [
+        f"top{k}_{name}" for k in (1,2,3,5,10,20)
+        for name in ("mean_quality","success_rate","collision_rate","empty_rate","force_closure_fail_rate")
+    ]
     for name in conditions:
         subset = [x for x in frame if x["condition"] == name]
         overall[name] = {
@@ -286,6 +315,8 @@ def main():
             "pairs": len(paired),
             "mean_winner_quality_gain": mean([x["quality_delta_winner_minus_nonwinner"] for x in paired]),
             "nonwinner_better_fraction": mean([float(x["nonwinner_outperforms_winner"]) for x in paired]),
+            "quality_gain_scene_bootstrap": bootstrap_scene_mean(pair_frames, "mean_winner_minus_nonwinner_quality", n_boot=args.n_boot, seed=args.seed),
+            "nonwinner_better_fraction_scene_bootstrap": bootstrap_scene_mean(pair_frames, "nonwinner_better_fraction", n_boot=args.n_boot, seed=args.seed),
             "per_frame": pair_frames,
             "per_query": paired,
         },
