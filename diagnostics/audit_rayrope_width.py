@@ -15,8 +15,12 @@ from pathlib import Path
 
 import numpy as np
 
-from diagnostics.analyze_rayrope_candidates import load_candidates
-from diagnostics.rayrope_action_lattice import count_width_status
+try:
+    from .analyze_rayrope_candidates import load_candidates
+    from .rayrope_action_lattice import count_width_status
+except ImportError:  # direct script invocation
+    from analyze_rayrope_candidates import load_candidates
+    from rayrope_action_lattice import count_width_status
 
 
 def audit_widths(rows, *, cap_m=0.1, tol_m=1e-6, condition=None):
