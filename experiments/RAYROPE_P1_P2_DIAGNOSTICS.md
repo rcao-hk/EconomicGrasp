@@ -239,6 +239,10 @@ This uses an *inference-only*, non-persistent switch in
 
 Use a checkpoint **compatible with main's strict grasp_design metadata**
 (historical experimental checkpoints are not automatically interchangeable).
+The example sets `rayrope_group_chunk=2048` and disables chunk checkpointing,
+matching one historical recipe. **Read the actual checkpoint metadata first**:
+if its saved settings differ, pass those exact settings instead; changing a
+chunk size is not a checkpoint-compatible CLI override in main.
 
 ```bash
 python diagnostics/run_rayrope_p1_reader.py \
@@ -246,6 +250,7 @@ python diagnostics/run_rayrope_p1_reader.py \
   --test_mode test_seen --camera realsense \
   --multi_modal --use_cdf --enable_point_rayrope --kview_mode A1 \
   --pose_depth_mode global_film --batch_size 1 --num_workers 2 \
+  --rayrope_group_chunk 2048 --rayrope_checkpoint_chunks 0 \
   --diag_output_dir "$RUN_ROOT/p1_seen" \
   --diag_frame_manifest_csv "$RUN_ROOT/frames_seen.csv" \
   --diag_fixed_actions 64 \
@@ -311,6 +316,7 @@ python diagnostics/run_rayrope_p2_lattice.py \
   --test_mode test_seen --camera realsense \
   --multi_modal --use_cdf --enable_point_rayrope --kview_mode A1 \
   --pose_depth_mode global_film --batch_size 1 --num_workers 2 \
+  --rayrope_group_chunk 2048 --rayrope_checkpoint_chunks 0 \
   --diag_output_dir "$RUN_ROOT/p2_seen" \
   --diag_frame_manifest_csv "$RUN_ROOT/frames_seen.csv" \
   --diag_query_anchors 16 --diag_nonwinners_per_query 1 \
@@ -378,3 +384,15 @@ Use distinct output directories for Seen/Similar/Novel and store:
 analysis JSON, evaluator settings, and per-scene frame list. Do not
 silently modify the main model or reuse labels after changing a physical
 grasp.
+
+
+### Additional synthetic CPU tests
+
+```bash
+python -m unittest tests.test_rayrope_action_lattice -v
+python -m unittest tests.test_rayrope_controlled_csv -v
+```
+
+A failed smoke or parity check must be investigated before any full evaluation.
+Do not silently fall back to another checkpoint or change seed/query width to
+make the runner pass. 
