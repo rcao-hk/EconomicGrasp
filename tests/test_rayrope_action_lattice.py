@@ -18,7 +18,13 @@ from moge_rayrope.config import ModelConfig
 
 
 def identity_rotation(approach, angle):
-    return torch.eye(3, dtype=angle.dtype, device=angle.device)[None].expand(len(angle), 3, 3).clone()
+    # Deterministic valid SO(3) frame: rotate in-plane around the Z axis.
+    n=len(angle)
+    rot=torch.eye(3, dtype=angle.dtype, device=angle.device)[None].expand(n,3,3).clone()
+    c,s=torch.cos(angle),torch.sin(angle)
+    rot[:,0,0]=c;rot[:,0,1]=-s
+    rot[:,1,0]=s;rot[:,1,1]=c
+    return rot
 
 
 def fixture_lattice():
