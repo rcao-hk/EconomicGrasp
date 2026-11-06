@@ -19,7 +19,10 @@ from pathlib import Path
 
 import numpy as np
 
-from diagnostics.analyze_rayrope_candidates import load_candidates, rank_corr
+try:
+    from .analyze_rayrope_candidates import load_candidates, rank_corr
+except ImportError:  # direct script invocation
+    from analyze_rayrope_candidates import load_candidates, rank_corr
 
 MUS = (0.2, 0.4, 0.6, 0.8, 1.0, 1.2)
 
