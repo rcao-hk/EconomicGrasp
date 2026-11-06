@@ -217,8 +217,15 @@ def sweep_families(rows, condition):
             depths = [x["insertion"] for x in group]
             result["best_insertion_m"] = float(group[best]["insertion"])
             result["rank_depth_quality"] = rank_corr(depths, q)
-            result["score_selected_quality"] = float(q[np.argmax(s)])
-            result["regret_score_selected"] = float(q.max()-q[np.argmax(s)])
+            if "quality_only" in condition:
+                # Old exported CSVs lack depth-conditioned CDF scores.
+                # Never reinterpret a frozen native score as the score
+                # for a newly instantiated insertion-depth action.
+                result["score_selected_quality"] = None
+                result["regret_score_selected"] = None
+            else:
+                result["score_selected_quality"] = float(q[np.argmax(s)])
+                result["regret_score_selected"] = float(q.max()-q[np.argmax(s)])
             if condition == "insertion_sweep_fixed_width" and np.ptp([x["width_m"] for x in group]) > 1e-6:
                 raise ValueError(f"Fixed-width insertion sweep changed width: {sample}/{parent}")
         details.append(result)
@@ -270,7 +277,7 @@ def main():
     paired = query_winner_pairs(rows)
     sweeps = {
         condition: sweep_families(rows, condition)
-        for condition in ("width_sweep", "insertion_sweep_fixed_width", "insertion_sweep_predicted_width")
+        for condition in ("width_sweep", "insertion_sweep_fixed_width", "insertion_sweep_predicted_width", "insertion_sweep_quality_only")
     }
     pair_per_sample = defaultdict(list)
     for x in paired:
@@ -331,6 +338,11 @@ def main():
         "insertion_sweep_predicted_width": {
             **summarize_sweep(sweeps["insertion_sweep_predicted_width"]),
             "families": sweeps["insertion_sweep_predicted_width"],
+        },
+        "insertion_sweep_quality_only": {
+            **summarize_sweep(sweeps["insertion_sweep_quality_only"]),
+            "families": sweeps["insertion_sweep_quality_only"],
+            "warning": "Frozen native scores are NOT depth-specific. Only exact-action quality variation is meaningful here.",
         },
         "per_frame_condition": frame,
         "interpretation": [
