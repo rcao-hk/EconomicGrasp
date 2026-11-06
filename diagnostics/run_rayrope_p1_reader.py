@@ -49,7 +49,7 @@ from torch.utils.data import DataLoader, Subset
 from dataset.graspnet_dataset import GraspNetMultiDataset, collate_fn
 from diagnostics.rayrope_action_lattice import decode_cdf_lattice, physical_action_id
 from inference_cva import _load_checkpoint_strict, _move_fixed_inputs
-from models.economicgrasp_bip3d import economicgrasp_dpt, pred_decode_center_view_angle
+from models.economicgrasp_bip3d import economicgrasp_dpt
 from models.grasp_designs import design_options
 from utils.arguments import cfgs
 from utils.label_generation import batch_viewpoint_params_to_matrix
@@ -199,7 +199,6 @@ def main():
                 diagnostics=dict(reader.last_diagnostic_stats)
                 return lattice,diagnostics
             native,_=execute(None,0.0)
-            native_pred = pred_decode_center_view_angle(dict(ep) if False else ep, use_cdf=True) if False else None
             fixed = _native_score_strata(
                 native, DIAG.diag_fixed_actions, DIAG.diag_seed + scene*1009 + anno*101)
             original_actions = native.grasp[fixed]
