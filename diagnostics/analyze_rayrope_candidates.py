@@ -325,6 +325,7 @@ def sample_metrics(items: Sequence[Mapping[str, Any]], high_q: float) -> Dict[st
         "top1_failure_class": top1["failure"],
         "high_score_failure_rate": float(np.mean([x["quality"] <= 0 for x in high if math.isfinite(x["quality"])])) if any(math.isfinite(x["quality"]) for x in high) else float("nan"),
         "high_score_n": len(high),
+        "high_score_fraction_realized": float(len(high) / len(items)),
         "high_score_failure_classes": {k: sum(x["failure"] == k for x in high) for k in ("collision", "empty_grasp", "force_closure_failure", "success", "unknown")},
     }
     for mu in MUS:
@@ -368,7 +369,7 @@ def bootstrap_scene_ci(per_sample: Sequence[Mapping[str, Any]], metric: str,
 
 def summarize_samples(samples: Sequence[Mapping[str, Any]], n_boot: int, seed: int) -> Dict[str, Any]:
     scalar_metrics = ("spearman", "kendall_tau_b", "top1_quality", "top5_quality",
-                      "oracle_quality", "top1_regret", "high_score_failure_rate")
+                      "oracle_quality", "top1_regret", "high_score_failure_rate", "high_score_fraction_realized")
     out: Dict[str, Any] = {"num_frames": len(samples), "num_scenes": len({x["scene"] for x in samples if x["scene"] is not None})}
     for metric in scalar_metrics:
         vals = [x[metric] for x in samples]
