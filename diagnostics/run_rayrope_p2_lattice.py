@@ -17,6 +17,12 @@ import os
 import sys
 from pathlib import Path
 
+# This entrypoint lives below the repository root, but imports the existing
+# root-level model/inference modules without altering their default behavior.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 
 def _parse_diag_args():
     parser = argparse.ArgumentParser(add_help=False)
@@ -52,7 +58,7 @@ from diagnostics.rayrope_action_lattice import (
     select_p2_queries, count_width_status,
 )
 from inference_cva import _load_checkpoint_strict, _move_fixed_inputs
-from models.economicgrasp_bip3d import economicgrasp_dpt
+from models.economicgrasp_bip3d import economicgrasp_dpt, pred_decode_center_view_angle
 from models.grasp_designs import design_options
 from utils.arguments import cfgs
 from utils.label_generation import batch_viewpoint_params_to_matrix
@@ -199,6 +205,17 @@ def main():
                 ep, 0, batch_viewpoint_params_to_matrix,
                 max_width_m=max_width,
             )
+        # Critical parity contract: the per-query lattice winner must decode
+        # to precisely the existing production CVA-CDF prediction. All P2
+        # controlled actions are derived from this verified lattice.
+        with torch.inference_mode():
+            native = pred_decode_center_view_angle(ep, use_cdf=True)[0].detach().cpu().numpy()
+        winners = lattice.grasp[lattice.query_winner]
+        if winners.shape != native.shape:
+            raise RuntimeError(f"Native decoder parity failed: {winners.shape} != {native.shape}")
+        err = float(np.max(np.abs(winners - native)))
+        if err > 1e-5 or not np.isfinite(err):
+            raise RuntimeError(f"Native decoder parity max abs error {err:.8g} > 1e-5; check width/rotation/score contract.")
         seed = DIAG.diag_seed + scene_id * 1009 + anno_id * 101
         selected = select_p2_queries(
             lattice, num_query_anchors=DIAG.diag_query_anchors,
