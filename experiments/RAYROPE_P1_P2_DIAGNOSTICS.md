@@ -185,3 +185,196 @@ These are CPU-side synthetic tests. They do not replace a server run against the
 5. Width bins are observational. A causal width claim requires matched physical geometry and exact re-evaluation at controlled widths.
 6. Placement-only and full-system perturbations answer different questions and must not be combined.
 7. The 18-frame / 9-scene result remains a pilot. Expand scene coverage before making dataset-level claims.
+
+
+---
+
+## 7. Extended diagnostics: P0/P1/P2
+
+### P0: Width decoder audit (existing CSV, CPU)
+
+The interval `[0.10, +inf)` includes widths **equal to** the decoder clamp
+at 0.10 m. Do not interpret that bin as 255 illegal widths. This script
+reports below / within tolerance / strictly above the cap.
+
+```bash
+python diagnostics/audit_rayrope_width.py \
+  --input_csv "$RUN_ROOT/results/candidates.csv" \
+  --output_json "$RUN_ROOT/analysis/width_audit.json" \
+  --condition native \
+  --max_width_m 0.10 --tol_m 0.000001
+```
+
+Also inspect the checkpoint's actual `--grasp_max_width` runtime option, any
+raw width prediction column and the CSV's width unit. If the executed width
+really exceeds the declared cap by more than the tolerance, **stop and
+reconcile the decode contract before using width-bin statistics**.
+
+### P0: Old score-stratified64 vs uniform64 paired-scene statistics
+
+This comparison is matched **at the frame/scene level**, not at the physical
+candidate level. The two pools also differ in the underlying angle-depth
+population, so any difference is descriptive, not a pure sampler effect.
+
+```bash
+python diagnostics/compare_rayrope_candidate_pools.py \
+  --left_csv /path/to/score_stratified_candidates.csv \
+  --right_csv /path/to/uniform_lattice_candidates.csv \
+  --left_condition native --right_condition native \
+  --output_json "$RUN_ROOT/analysis/paired_pool_comparison.json" \
+  --n_boot 5000 --seed 20261106
+```
+
+For each of Top-1, Top-5, oracle, regret, Spearman, Kendall and high-score
+failure, bootstrap paired scene clusters (stratified by Seen/Similar/Novel).
+
+For 64 candidates, `ceil(64 * 0.05) = 4` means the "top 5% candidate"
+measure is operationally **Top-4/64 = 6.25%**, not literally 5%. The
+existing analyzer now records the realized fraction.
+
+### P1: Reader coordinates-only / mask-only / both dose response
+
+This uses an *inference-only*, non-persistent switch in
+`moge_rayrope/attention.py`. The default forward path is unchanged.
+
+Use a checkpoint **compatible with main's strict grasp_design metadata**
+(historical experimental checkpoints are not automatically interchangeable).
+
+```bash
+python diagnostics/run_rayrope_p1_reader.py \
+  --checkpoint_path "$CKPT" --dataset_root "$DATASET_ROOT" \
+  --test_mode test_seen --camera realsense \
+  --multi_modal --use_cdf --enable_point_rayrope --kview_mode A1 \
+  --pose_depth_mode global_film --batch_size 1 --num_workers 2 \
+  --diag_output_dir "$RUN_ROOT/p1_seen" \
+  --diag_frame_manifest_csv "$RUN_ROOT/frames_seen.csv" \
+  --diag_fixed_actions 64 \
+  --diag_biases_mm=-10,-5,0,5,10,15,20 \
+  --diag_modes coords_only,mask_only,both \
+  --diag_seed 20261106
+```
+
+Frame manifest:
+
+```csv
+scene_id,anno_id
+100,0
+101,128
+```
+
+Repeat separately for test_similar and test_novel. P1 samples the 64 native
+per-query winner actions by score strata **once** and freezes their physical
+position, angle, insertion depth, width, and evaluator labels across all
+conditions. The reader may predict a different width but **that new width is
+not executed**. Changed scores are read from the same query-angle-depth
+index, not by re-running per-query argmax.
+
+```bash
+python diagnostics/analyze_rayrope_p1_reader.py \
+  --candidate_csv "$RUN_ROOT/p1_seen/p1_fixed_actions_labeled.csv" \
+  --interventions_json "$RUN_ROOT/p1_seen/p1_interventions.json" \
+  --output_json "$RUN_ROOT/p1_seen/p1_dose_analysis.json"
+```
+
+Required mask diagnostics: `token_count`, `valid_native`,
+`valid_perturbed`, `mask_flip_count` and `queries_with_mask_flip`.
+When mask-only score changes are zero, verify that mask flips were actually
+nonzero before claiming mask insensitivity.
+
+A positive bias must be selected on validation scenes and then evaluated
+without tuning on held-out test scenes. This experiment is a
+**geometry-coordinate sensitivity test**, not an automatically calibrated
+depth-correction method.
+
+### P2: Forward full-lattice query winner vs nonwinner, width and insertion sweeps
+
+This is the preferred model-side P2 runner. It extracts the **full**
+`Q x A x D` physical action lattice from the existing CDF endpoints and
+verifies that per-query winner poses and scores match
+`pred_decode_center_view_angle` within 1e-5 before evaluation.
+
+For the same uniformly sampled query anchors:
+- `query_winner`: native model argmax angle-depth.
+- `query_nonwinner`: one random alternative from the same query (default).
+- `lattice_uniform`: score-independent actions from the entire lattice.
+- `width_sweep`: native action `(t,R,d)` fixed; executed width swept over
+  4/6/8/10 cm, with native predicted width as a reference, while the
+  existing score remains width-independent.
+- `insertion_sweep_fixed_width`: native `(t,R,w)` fixed; all insertion
+  bins evaluated with their corresponding CDF logits.
+- Optional `insertion_sweep_predicted_width` changes depth **and** width;
+  mark it as a compound intervention, not an insertion-only effect.
+
+```bash
+python diagnostics/run_rayrope_p2_lattice.py \
+  --checkpoint_path "$CKPT" --dataset_root "$DATASET_ROOT" \
+  --test_mode test_seen --camera realsense \
+  --multi_modal --use_cdf --enable_point_rayrope --kview_mode A1 \
+  --pose_depth_mode global_film --batch_size 1 --num_workers 2 \
+  --diag_output_dir "$RUN_ROOT/p2_seen" \
+  --diag_frame_manifest_csv "$RUN_ROOT/frames_seen.csv" \
+  --diag_query_anchors 16 --diag_nonwinners_per_query 1 \
+  --diag_width_grid 0.04,0.06,0.08,0.10 \
+  --diag_insertion_width fixed \
+  --diag_seed 20261106
+```
+
+```bash
+python diagnostics/analyze_rayrope_p2_lattice.py \
+  --input_csv "$RUN_ROOT/p2_seen/candidate_lattice_labeled.csv" \
+  --output_json "$RUN_ROOT/p2_seen/p2_lattice_analysis.json" \
+  --n_boot 5000 --seed 20261106
+```
+
+Report matched-query winner/nonwinner quality differences and scene-clustered
+CI, Top-1/2/3/5/10/20 quality/collision/empty/force-closure curves, and
+the within-grid oracle/regret for width/insertion. All physical variants are
+separately evaluated by `ExactGraspNetActionEvaluator`. No CAD evaluation
+labels enter model inference.
+
+### P2 alternative: exact-action sweeps from existing CSV, without checkpoint
+
+When historical `checkpoint_best.pt` cannot load into the main model, the
+old saved physical candidate rows can still support **quality sensitivity**
+experiments, provided the CSV contains camera-frame center, rotation matrix
+(`r00..r22` or a JSON `rotation_matrix`), metric width, and insertion.
+
+```bash
+python diagnostics/eval_rayrope_controlled_sweeps_from_csv.py \
+  --input_csv "$RUN_ROOT/results/candidates.csv" \
+  --dataset_root "$DATASET_ROOT" --camera realsense \
+  --native_condition native \
+  --output_csv "$RUN_ROOT/analysis/exact_sweeps_from_csv.csv" \
+  --num_anchors_per_frame 16 \
+  --width_grid 0.04,0.06,0.08,0.10 \
+  --insertion_grid 0.01,0.02,0.03,0.04 \
+  --grasp_max_width_m 0.10 --seed 20261106
+```
+
+The width sweep is a controlled physical intervention with the **same
+native model score** at every width. The CSV-only insertion sweep likewise
+preserves the original score because the per-depth CDF logits are not
+available. Its condition is explicitly named
+`insertion_sweep_quality_only`: **do not compute depth-specific model
+ranking/regret from those frozen scores**.
+
+### Test and audit
+
+```bash
+python -m unittest tests.test_rayrope_p1_p2 -v
+python -m unittest tests.test_rayrope_candidate_analysis -v
+python -m unittest tests.test_rayrope_action_lattice -v
+```
+
+CPU synthetic tests validate CDF QAD indexing, deterministic sampling,
+width clamping, fixed-parameter controls, mask/coords numerical invariants,
+and paired bootstrap semantics. Server CUDA/checkpoint/CAD integration
+must still pass a smoke test; nothing in this document claims a new model
+checkpoint, training run, real GraspNet AP, or completed 18-frame evaluation.
+
+Use distinct output directories for Seen/Similar/Novel and store:
+`checkpoint SHA256`, `lattice_manifest.json`, `p1_interventions.json`,
+`candidate_lattice_labeled.csv`, `p1_fixed_actions_labeled.csv`,
+analysis JSON, evaluator settings, and per-scene frame list. Do not
+silently modify the main model or reuse labels after changing a physical
+grasp.
