@@ -15,8 +15,13 @@ import csv
 import json
 import math
 import re
+import sys
 from collections import defaultdict
 from pathlib import Path
+
+ROOT=Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0,str(ROOT))
 
 import numpy as np
 
@@ -111,6 +116,8 @@ def make_controlled(rows, *, widths_m, depths_m, num_anchors, seed,
         chosen=_stratified_candidates(items,num_anchors,rng)
         for item in chosen:
             native=_row(item)
+            if float(native[1]) > max_width_m + 1e-6:
+                raise ValueError(f"Native grasp width {native[1]:.7f}m exceeds declared gripper limit {max_width_m}m. Audit width/config/units first.")
             parent=str(item["candidate"])
             for w in [float(native[1]), *widths_m]:
                 new=native.copy();new[1]=float(w)
