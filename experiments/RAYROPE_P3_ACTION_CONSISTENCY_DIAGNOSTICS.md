@@ -43,6 +43,8 @@ R_\text{pred}=\max_d Q(g_d^\text{pred})-Q(g_{d^*}^\text{pred}).
 - 对任何同一 depth，center、rotation、insertion、score 完全一致。
 - 因 selected 质量不变，应有 `R_pred - R_fixed = oracle_pred - oracle_fixed`（在数值容差内）。
 
+**统计解释红线：regret 降低并不表示选择策略更好。** 两种宽度协议的 selected action 本来就相同，因此 `R_pred` 降低可能仅意味着其他候选在新宽度下变差、oracle 降低。必须并列报告 selected Q、oracle Q、regret，以及相同四个 depth bins 下 CDF score vs exact quality 的 pairwise agreement（排除质量 ties，score ties 记半分）和 Spearman。
+
 ## 1. 诊断任务
 
 ### P3-A：fixed-width vs depth-predicted-width（最高优先级）
@@ -54,6 +56,7 @@ R_\text{pred}=\max_d Q(g_d^\text{pred})-Q(g_{d^*}^\text{pred}).
 在相同 (center, view, angle) 下：
 - 按 1/2/3/4cm bin 统计 score、exact quality、collision、empty、force-closure failure、六个摩擦阈值的成功率。
 - 找出 score 最高的 depth `d*`、评价质量最优的 depth `d_oracle`、以及除 `d*` 之外**分数最高**的 hard-negative depth。
+- 记录四个 depth bins 的质量可比较 pair 数、score-quality pairwise agreement、质量 ties 与同 angle Spearman；不能将四个全零质量动作算作四次正确排序。
 - 输出 score margin、hard-negative 与 selected 的质量差、被错选动作的失败类型、selected→oracle 的类别转移、按类别分配的 regret mass。
 - **不要**将不同角度的随机 nonwinner 混作同角度的 depth hard negative。
 
@@ -216,7 +219,7 @@ python diagnostics/analyze_rayrope_p3_action_consistency.py \
 
 ## 5. 决策门槛
 
-1. 若 `ΔR=R_pred−R_fixed` 的场景配对 CI 明确为负，先考虑动作宽度/评分/evaluator 的条件变量对齐。
+1. 若 `ΔR=R_pred−R_fixed` 的场景配对 CI 明确为负，先检查这是**oracle 变差**还是 depth score-quality agreement 真正提高。由于 selected action 固定，不能把 regret 缩小称为 selected grasp 性能提升；只可归因于 counterfactual 动作集合不同。
 2. 若两种宽度协议下 insertion regret 均明显为正，且错误集中于同角度 hard-negative depth，则优先用已有 GVAR 验证 insertion-conditioned evidence 的价值。
 3. 若固定0.10m 的表现与 learned width 相同，不要把 width 预测能力作为主要贡献；应分析 clamp 与物体尺度混杂。
 4. 若 Rank-2−Rank-1 CI 包含0，不能声称高分前两名错排在场景级稳定；若 CI 稳定为正，进一步研究 top-rank calibration。
