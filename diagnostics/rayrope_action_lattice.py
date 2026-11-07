@@ -219,10 +219,12 @@ def build_p2_actions(
     Insertion sweep: t,R and (by default) w held fixed, d changes and
     the existing CDF utility is read at the matching depth bin.
     With insertion_width='predicted', w also changes, so label the
-    intervention as a compound (d,w) sweep.
+    intervention as a compound (d,w) sweep. 'both' generates BOTH protocols
+    for the exact same query, angle, insertion bins and scores, permitting
+    paired analysis without a new candidate sampler.
     """
-    if insertion_width not in ("fixed", "predicted"):
-        raise ValueError("insertion_width must be 'fixed' or 'predicted'")
+    if insertion_width not in ("fixed", "predicted", "both"):
+        raise ValueError("insertion_width must be 'fixed', 'predicted', or 'both'")
     if not widths_m or any((not np.isfinite(w)) or (w <= 0) or (w > max_width_m+1e-8) for w in widths_m):
         raise ValueError("width grid must lie inside configured gripper width range")
     n = len(lattice.grasp)
@@ -262,17 +264,23 @@ def build_p2_actions(
             mode = "predicted" if abs(width - base_width) < 1e-7 else "fixed"
             push(row, "width_sweep", family, idx, width_mode=mode)
 
-        # Same grasp center/orientation and width for every insertion bin.
-        # Model CDF utility varies with d, while width is held fixed.
+        # Both width protocols use exactly the same center, angle and depth
+        # hypotheses. The CDF utility at each d is IDENTICAL across the two
+        # conditions; only executed width (and therefore exact CAD quality)
+        # is allowed to change.
         for depth_id in range(d):
             source = q * (a * d) + angle * d + depth_id
-            row = lattice.grasp[source].copy()
-            if insertion_width == "fixed":
-                row[1] = base_width
-            push(row,
-                 "insertion_sweep_fixed_width" if insertion_width == "fixed" else "insertion_sweep_predicted_width",
-                 f"q{q:04d}-a{angle:02d}-w{base_width:.6f}", source,
-                 width_mode="fixed" if insertion_width == "fixed" else "predicted")
+            for width_protocol in (("fixed", "predicted")
+                                   if insertion_width == "both"
+                                   else (insertion_width,)):
+                row = lattice.grasp[source].copy()
+                if width_protocol == "fixed":
+                    row[1] = base_width
+                push(row,
+                     "insertion_sweep_fixed_width" if width_protocol == "fixed"
+                     else "insertion_sweep_predicted_width",
+                     f"q{q:04d}-a{angle:02d}-w{base_width:.6f}", source,
+                     width_mode="fixed" if width_protocol == "fixed" else "predicted")
 
     # Within each experimental condition, one physical action has one quality.
     # Keep the first occurrence (for width sweep, the predicted-width reference).
