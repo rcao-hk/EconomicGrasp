@@ -36,7 +36,7 @@ def _parse_diag_args():
     parser.add_argument("--diag_full_lattice_per_anchor", type=int, choices=(0, 1), default=0)
     parser.add_argument("--diag_uniform_budget", type=int, default=0)
     parser.add_argument("--diag_width_grid", default="0.04,0.06,0.08,0.10")
-    parser.add_argument("--diag_insertion_width", choices=("fixed", "predicted"), default="fixed")
+    parser.add_argument("--diag_insertion_width", choices=("fixed", "predicted", "both"), default="fixed")
     parser.add_argument("--diag_seed", type=int, default=20261106)
     parser.add_argument("--diag_eval_fc_mode", choices=("official", "reuse_contacts"), default="reuse_contacts")
     parser.add_argument("--diag_verify_n", type=int, default=10)
@@ -228,6 +228,9 @@ def main():
             insertion_width=DIAG.diag_insertion_width,
             max_width_m=max_width,
         )
+        if DIAG.diag_insertion_width == "both":
+            from diagnostics.rayrope_action_lattice import validate_paired_insertion_records
+            validate_paired_insertion_records(records)
         unique_grasps = {}
         for item in records:
             unique_grasps.setdefault(item.candidate_id, item.row)
@@ -304,6 +307,7 @@ def main():
         "grasp_max_width_m": max_width,
         "width_grid_m": width_grid,
         "insertion_sweep_width": DIAG.diag_insertion_width,
+        "p3_matched_insertion_modes": DIAG.diag_insertion_width == "both",
         "query_anchors": DIAG.diag_query_anchors,
         "nonwinner_per_query": DIAG.diag_nonwinners_per_query,
         "full_lattice_per_anchor": bool(DIAG.diag_full_lattice_per_anchor),
