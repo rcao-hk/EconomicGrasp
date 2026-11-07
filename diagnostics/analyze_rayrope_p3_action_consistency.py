@@ -177,7 +177,25 @@ def _selection(family):
 
 def _family_stats(family,condition):
     depths=sorted(family)
+    if len(depths)<2:
+        raise ValueError("Insertion family must contain at least two distinct depths")
+    reference=family[depths[0]]
+    center0=np.asarray(reference["center"],dtype=float)
+    rot0=_rot(reference)
+    for depth_id in depths[1:]:
+        item=family[depth_id]
+        if (not np.allclose(np.asarray(item["center"],dtype=float),center0,atol=1e-5,rtol=0)
+            or not np.allclose(_rot(item),rot0,atol=1e-5,rtol=0)):
+            raise ValueError("Insertion sweep family changes center or rotation across depth")
+        h_ref=_number(reference["raw"].get("height_m"))
+        h_item=_number(item["raw"].get("height_m"))
+        if h_ref is not None and h_item is not None and abs(h_ref-h_item)>1e-5:
+            raise ValueError("Insertion sweep changes gripper height across depth")
     selected,oracle,hard=_selection(family)
+    winner_flags=[d for d in depths
+                  if str(family[d]["raw"].get("query_winner","")).strip().lower() in ("1","true")]
+    if winner_flags and (len(winner_flags)!=1 or winner_flags[0]!=selected):
+        raise ValueError("Full CDF score argmax inconsistent with exported native query winner")
     x,y,z=family[selected],family[oracle],family[hard]
     if any(row["condition"]!=condition for row in family.values()):
         raise RuntimeError("Mixed width protocols inside family")
