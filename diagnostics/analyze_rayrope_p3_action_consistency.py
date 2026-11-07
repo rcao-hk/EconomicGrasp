@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 from collections import Counter, defaultdict
@@ -582,11 +583,104 @@ def _clean(x):
     return x
 
 
+def _fmt(x,n=4):
+    if isinstance(x,dict) and "mean" in x:
+        x=x["mean"]
+    return "—" if x is None else f"{float(x):.{n}f}"
+
+
+def render_markdown(result):
+    """Concise Chinese report with explicit provenance and interpretation limits."""
+    out=[
+        "# RayRoPE P3：Insertion 与动作质量一致性诊断",
+        "",
+        f"输入动作记录：{result['num_rows']}；frames={result['num_frames']}；scenes={result['num_scenes']}。",
+        "Quality 为六个官方 friction thresholds 通过比例，**不是 AP**。",
+        "",
+        "## P3-A：固定原生宽度 vs 逐 depth 预测宽度",
+        "",
+    ]
+    paired=result["fixed_vs_predicted_width"]
+    if not paired["available"]:
+        out.append(f"**未完成配对 P3-A**：{paired['reason']}。只能分析 fixed-only 的既有证据。")
+    else:
+        out += [
+            f"- Matched families：{paired['families']}",
+            f"- Fixed-width mean regret：{_fmt(paired['mean_fixed_regret'])}",
+            f"- Predicted-width mean regret：{_fmt(paired['mean_predicted_regret'])}",
+            f"- Paired Δ regret (pred−fixed)：{_fmt(paired['pred_minus_fixed_regret'])}",
+            f"- Scene-bootstrap 95% CI：{paired['pred_minus_fixed_regret']['ci95']}",
+            f"- Paired Δ within-angle depth pairwise score-quality agreement：{_fmt(paired['pred_minus_fixed_depth_pairwise_accuracy'])}",
+            f"- Δ pairwise agreement 95% CI：{paired['pred_minus_fixed_depth_pairwise_accuracy']['ci95']}",
+            f"- Oracle depth changed fraction：{_fmt(paired['fraction_oracle_depth_changed'])}",
+            "",
+            "**重要：selected physical action 完全相同；Δregret 等于 Δoracle。regret 变小不等于模型选得更好。**",
+        ]
+    out += ["", "## P3-B：同角度深度候选与失败归因", ""]
+    for key,title in (("fixed","Fixed width"),("predicted","Predicted width(d)")):
+        values=(paired.get(key) if paired["available"]
+                else result.get("fixed_only_when_unpaired" if key=="fixed" else "predicted_only_when_unpaired"))
+        if not values: continue
+        out += [
+            f"### {title}",
+            f"- Mean insertion regret：{_fmt(values['regret'])}",
+            f"- Mean depth pairwise score-quality agreement：{_fmt(values['depth_pairwise_accuracy'])}",
+            f"- Families with quality-distinct depth pairs：{values['families_with_rankable_depth_pairs']}/{values['families']}",
+            f"- Hard negative better than selected：{_fmt(values['hard_negative_better_fraction'])}",
+            f"- Positive-regret families：{values['failure_attribution']['n_positive_regret']}",
+            "",
+            "| Depth bin | Mean score | Mean Q | Collision | Empty | FC fail |",
+            "|---|---:|---:|---:|---:|---:|",
+        ]
+        for depth,v in values["depth_distribution"]["by_depth"].items():
+            out.append(f"| {depth} | {_fmt(v['model_score'])} | {_fmt(v['quality'])} | "
+                       f"{v['failure_counts']['collision']} | {v['failure_counts']['empty_grasp']} | "
+                       f"{v['failure_counts']['force_closure_failure']} |")
+        out += [""]
+    out += ["## P3-C：同帧 Rank-2 − Rank-1", ""]
+    rank=result["rank1_vs_rank2"]
+    if rank["available"]:
+        out += [
+            f"- Frames：{rank['frames']}",
+            f"- Paired mean ΔQ(2−1)：{_fmt(rank['rank2_minus_rank1'])}",
+            f"- Scene-bootstrap CI：{rank['rank2_minus_rank1']['ci95']}",
+            f"- Rank2 better / Rank1 better / tie：{_fmt(rank['rank2_better_fraction'])} / "
+            f"{_fmt(rank['rank1_better_fraction'])} / {_fmt(rank['tie_fraction'])}",
+        ]
+    else:
+        out.append("原始 CSV 缺少同帧至少两个 query_winner 记录，未进行该诊断。")
+    out += ["", "## P3-D：Predicted width vs 固定宽度", ""]
+    width=result["width_predicted_vs_constants"]
+    if width["available"]:
+        out += [
+            f"- Matched families：{width['families']}",
+            f"- Predicted width regret：{_fmt(width['pred_regret'])}",
+        ]
+        for k,v in width["constant_baselines"].items():
+            out.append(f"- Width={k}m：regret={_fmt(v['regret'])}；"
+                       f"Q(pred)−Q(constant)={_fmt(v['pred_minus_constant_quality'])}；"
+                       f"paired CI={v['pred_minus_constant_quality']['ci95']}")
+    else:
+        out.append(f"未得到完整 width-sweep 配对基线：{width['reason']}")
+    out += ["", "## Seen / Similar / Novel", "",
+            "| Split | Frames | Scenes | Matched insertion families | Fixed regret | Pred regret | Δ regret | Rank2−Rank1 |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|"]
+    for split,v in result["by_split"].items():
+        out.append(f"| {split} | {v['frames']} | {v['scenes']} | {v['paired_insertion_families']} | "
+                   f"{_fmt(v['fixed_mean_regret'])} | {_fmt(v['predicted_mean_regret'])} | "
+                   f"{_fmt(v['pred_minus_fixed_regret'])} | {_fmt(v['rank2_minus_rank1'])} |")
+    out += ["", "## 解释限制", ""]
+    out.extend(f"- {note}" for note in result["limitations"])
+    out += ["", "详细 per-family、six-mu、failure transitions、split-bootstrap 记录见 JSON。", ""]
+    return "\n".join(out)
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--candidate_csv",required=True,action="append",
                    help="Repeat this flag to aggregate disjoint Seen/Similar/Novel files.")
     p.add_argument("--output_json",required=True)
+    p.add_argument("--output_md",default=None)
     p.add_argument("--n_boot",type=int,default=5000)
     p.add_argument("--seed",type=int,default=20261107)
     p.add_argument("--require_both_width_modes",action="store_true",
@@ -618,12 +712,25 @@ def main():
         if expected and observed!=expected:
             raise RuntimeError(f"Expected {expected} {name}, found {observed}")
     result["input_csv"]=args.candidate_csv
+    result["input_sha256_by_file"]={}
+    for name in args.candidate_csv:
+        h=hashlib.sha256()
+        with open(name,"rb") as source:
+            for block in iter(lambda:source.read(4*1024*1024),b""):
+                h.update(block)
+        result["input_sha256_by_file"][name]=h.hexdigest()
     result["schema_by_input"]=schemas
     dest=Path(args.output_json)
     dest.parent.mkdir(parents=True,exist_ok=True)
     tmp=dest.with_suffix(dest.suffix+".tmp")
     tmp.write_text(json.dumps(_clean(result),ensure_ascii=False,indent=2,allow_nan=False),encoding="utf-8")
     tmp.replace(dest)
+    if args.output_md:
+        md=Path(args.output_md)
+        md.parent.mkdir(parents=True,exist_ok=True)
+        draft=md.with_suffix(md.suffix+".tmp")
+        draft.write_text(render_markdown(result),encoding="utf-8")
+        draft.replace(md)
     paired=result["fixed_vs_predicted_width"]
     print(json.dumps({
         "output":str(dest),
