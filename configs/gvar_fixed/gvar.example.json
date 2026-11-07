@@ -1,0 +1,6 @@
+{
+  "checkpoint": "/ABSOLUTE/PATH/TO/main_compatible_point_gvar_checkpoint.tar",
+  "expected_sha256": "REPLACE_WITH_ACTUAL_SHA256",
+  "factory": "diagnostics.gvar_fixed.runtime:build_main_runtime",
+  "model_args": ["--multi_modal", "--use_cdf", "--enable_point_rayrope", "--enable_gvar", "--kview_mode", "A1", "--pose_depth_mode", "global_film", "--grasp_max_width", "0.1", "--rayrope_group_chunk", "2048", "--rayrope_checkpoint_chunks", "0", "--gvar_action_chunk", "2048", "--gvar_activation_checkpoint", "0"]
+}
