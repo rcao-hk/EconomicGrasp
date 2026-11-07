@@ -29,6 +29,8 @@ PREDICTED: g_d = (center, rotation, insertion_d, depth_bin_predicted_width_d)
 
 二者共享完全相同的四个 depth bins、CDF score、query、angle、RGB、预测深度、checkpoint、evaluator。只有非 selected depth 的物理宽度允许不同。
 
+**特别注意：** CDF score 和 `w_pred(d)` 只是同一 depth bin 的两个输出；现有 Point RayRoPE score head **并未以最终执行宽度为显式输入**。因此本轮是 score/decoded-width protocol 的一致性诊断，不能仅凭它宣称实现了 width-conditioned scoring。
+
 定义：
 \[
 R_\text{fixed}=\max_d Q(g_d^\text{fixed})-Q(g_{d^*}^\text{fixed}),\qquad
