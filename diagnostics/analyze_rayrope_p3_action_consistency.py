@@ -20,9 +20,9 @@ from pathlib import Path
 import numpy as np
 
 try:
-    from .analyze_rayrope_candidates import load_candidates
+    from .analyze_rayrope_candidates import load_candidates, rank_corr
 except ImportError:
-    from analyze_rayrope_candidates import load_candidates
+    from analyze_rayrope_candidates import load_candidates, rank_corr
 
 MUS=(0.2,0.4,0.6,0.8,1.0,1.2)
 FIXED="insertion_sweep_fixed_width"
@@ -175,6 +175,39 @@ def _selection(family):
     return chosen,oracle,hard
 
 
+def _depth_pairwise_agreement(family,tol=1e-8):
+    """Within-angle score/quality ordering over distinct-quality depth pairs.
+
+    Quality ties are excluded. A score tie receives half credit; we report
+    coverage so all-zero families never count as correct rankings.
+    """
+    ids=sorted(family)
+    concordant=0;discordant=0;score_tied=0;quality_distinct=0
+    for i,da in enumerate(ids):
+        for db in ids[i+1:]:
+            qa,qb=family[da]["quality"],family[db]["quality"]
+            ds=family[da]["score"]-family[db]["score"]
+            dq=qa-qb
+            if abs(dq)<=tol:
+                continue
+            quality_distinct+=1
+            if abs(ds)<=tol:
+                score_tied+=1
+            elif ds*dq>0:
+                concordant+=1
+            else:
+                discordant+=1
+    accuracy=((concordant+.5*score_tied)/quality_distinct
+              if quality_distinct else None)
+    return {
+        "comparable_pairs":quality_distinct,
+        "concordant_pairs":concordant,
+        "discordant_pairs":discordant,
+        "score_tied_pairs":score_tied,
+        "pairwise_accuracy":accuracy,
+    }
+
+
 def _family_stats(family,condition):
     depths=sorted(family)
     if len(depths)<2:
@@ -197,6 +230,9 @@ def _family_stats(family,condition):
     if winner_flags and (len(winner_flags)!=1 or winner_flags[0]!=selected):
         raise ValueError("Full CDF score argmax inconsistent with exported native query winner")
     x,y,z=family[selected],family[oracle],family[hard]
+    agreement=_depth_pairwise_agreement(family)
+    spearman=rank_corr([family[d]["score"] for d in depths],
+                       [family[d]["quality"] for d in depths])
     if any(row["condition"]!=condition for row in family.values()):
         raise RuntimeError("Mixed width protocols inside family")
     return {
@@ -218,6 +254,10 @@ def _family_stats(family,condition):
         "oracle_width_m":y["width_m"],
         "quality_varies":float(max(row["quality"] for row in family.values())-
                                min(row["quality"] for row in family.values())>1e-8),
+        "depth_score_quality_spearman":spearman,
+        "depth_pairwise_accuracy":agreement["pairwise_accuracy"],
+        "depth_comparable_pairs":agreement["comparable_pairs"],
+        "depth_discordant_pairs":agreement["discordant_pairs"],
     }
 
 
@@ -305,6 +345,12 @@ def _width_protocol_compare(rows,n_boot,seed,strict=True):
             "selected_quality_fixed":af["selected_quality"],
             "selected_quality_predicted":bp["selected_quality"],
             "oracle_depth_changed":float(af["oracle_depth_id"]!=bp["oracle_depth_id"]),
+            "depth_pairwise_accuracy_fixed":af["depth_pairwise_accuracy"],
+            "depth_pairwise_accuracy_predicted":bp["depth_pairwise_accuracy"],
+            "depth_pairwise_accuracy_diff_pred_minus_fixed":(
+                bp["depth_pairwise_accuracy"]-af["depth_pairwise_accuracy"]
+                if af["depth_pairwise_accuracy"] is not None and bp["depth_pairwise_accuracy"] is not None else None
+            ),
             "num_depths_with_width_change":int(sum(abs(a[d]["width_m"]-b[d]["width_m"])>1e-5 for d in a)),
             "max_abs_width_change_m":float(max(abs(a[d]["width_m"]-b[d]["width_m"]) for d in a)),
         }
@@ -318,6 +364,7 @@ def _width_protocol_compare(rows,n_boot,seed,strict=True):
         "mean_predicted_regret":mean([r["regret_predicted"] for r in per_family]),
         "pred_minus_fixed_regret":scene_cluster_bootstrap(per_family,"regret_diff_pred_minus_fixed",n_boot,seed),
         "pred_minus_fixed_oracle":scene_cluster_bootstrap(per_family,"oracle_quality_diff_pred_minus_fixed",n_boot,seed),
+        "pred_minus_fixed_depth_pairwise_accuracy":scene_cluster_bootstrap(per_family,"depth_pairwise_accuracy_diff_pred_minus_fixed",n_boot,seed),
         "fraction_oracle_depth_changed":mean([r["oracle_depth_changed"] for r in per_family]),
         "fraction_width_diff_at_any_depth":mean([float(r["num_depths_with_width_change"]>0) for r in per_family]),
         "per_family":per_family,
@@ -334,6 +381,10 @@ def _variant_summary(stats,groups,n_boot,seed):
         "regret":scene_cluster_bootstrap(stats,"regret",n_boot,seed),
         "quality_varies_fraction":mean([x["quality_varies"] for x in stats]),
         "hard_negative_better_fraction":mean([x["hard_negative_better"] for x in stats]),
+        "depth_pairwise_accuracy":scene_cluster_bootstrap(stats,"depth_pairwise_accuracy",n_boot,seed),
+        "depth_score_quality_spearman":scene_cluster_bootstrap(stats,"depth_score_quality_spearman",n_boot,seed),
+        "mean_depth_comparable_pairs":mean([x["depth_comparable_pairs"] for x in stats]),
+        "families_with_rankable_depth_pairs":sum(x["depth_comparable_pairs"]>0 for x in stats),
         "hard_negative_quality_minus_selected":scene_cluster_bootstrap(stats,"hard_negative_quality_minus_selected",n_boot,seed),
         "mean_selected_score_margin":mean([x["score_margin_to_hard"] for x in stats]),
         "failure_attribution":_failure_attribution(stats),
