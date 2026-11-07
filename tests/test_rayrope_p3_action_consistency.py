@@ -9,7 +9,7 @@ import numpy as np
 
 from diagnostics.analyze_rayrope_p3_action_consistency import (
     FIXED, PRED, WIDTH, NATIVE, analyze, _width_protocol_compare,
-    scene_cluster_bootstrap,
+    scene_cluster_bootstrap, _depth_pairwise_agreement,
 )
 from diagnostics.replay_rayrope_p3_predicted_width import construct_replay
 from diagnostics.rayrope_action_lattice import physical_action_id
@@ -91,9 +91,22 @@ class P3DiagnosticsTests(unittest.TestCase):
         self.assertAlmostEqual(mode["mean_predicted_regret"],5/6-2/6)
         self.assertAlmostEqual(mode["pred_minus_fixed_regret"]["mean"],-1/6)
         self.assertAlmostEqual(mode["pred_minus_fixed_oracle"]["mean"],-1/6)
+        self.assertAlmostEqual(mode["fixed"]["depth_pairwise_accuracy"]["mean"],5/6)
+        self.assertAlmostEqual(mode["predicted"]["depth_pairwise_accuracy"]["mean"],4/6)
+        self.assertAlmostEqual(mode["pred_minus_fixed_depth_pairwise_accuracy"]["mean"],-1/6)
         self.assertTrue(mode["pred_minus_fixed_regret"]["ci95"] is not None)
         self.assertEqual(mode["fixed"]["failure_attribution"]["n_positive_regret"],2)
         self.assertEqual(mode["fixed"]["depth_distribution"]["by_depth"]["depth_3cm"]["num_actions"],2)
+
+    def test_pairwise_quality_ties_are_excluded(self):
+        family={i:{"score":float(4-i),"quality":0.0} for i in range(4)}
+        agreed=_depth_pairwise_agreement(family)
+        self.assertEqual(agreed["comparable_pairs"],0)
+        self.assertIsNone(agreed["pairwise_accuracy"])
+        family[1]["quality"]=1.0
+        agreed=_depth_pairwise_agreement(family)
+        self.assertEqual(agreed["comparable_pairs"],3)
+        self.assertTrue(0.0 <= agreed["pairwise_accuracy"] <= 1.0)
 
     def test_refuse_geometry_or_score_or_selected_width_mismatch(self):
         for attribute,value in (("score",.1),("center",(.2,.1,.5)),("width_m",.075)):
