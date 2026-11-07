@@ -6,7 +6,7 @@ import torch
 
 from diagnostics.rayrope_action_lattice import (
     build_p2_actions, count_width_status, decode_cdf_lattice,
-    physical_action_id, select_p2_queries,
+    physical_action_id, select_p2_queries, validate_paired_insertion_records,
 )
 from diagnostics.analyze_rayrope_p2_lattice import (
     query_winner_pairs, sweep_families, summarize_sweep,
@@ -92,6 +92,24 @@ class ActionLatticeTests(unittest.TestCase):
             ifam=[y for y in insert if y.query_id==q]
             self.assertEqual(len({round(float(y.row[1]),7) for y in ifam}),1)
             self.assertEqual(len({round(float(y.row[3]),7) for y in ifam}),x.num_depths)
+
+    def test_insertion_both_uses_same_scores_and_selected_physical_action(self):
+        x=fixture_lattice()
+        x.grasp[x.depth_id==0,1]=np.float32(.06)
+        x.raw_width_m[x.depth_id==0]=np.float32(.06)
+        sampled=select_p2_queries(x,num_query_anchors=2,
+                                  nonwinner_per_query=1,seed=42)
+        out=build_p2_actions(x,sampled,insertion_width="both",
+                             widths_m=(.04,.06,.08,.10),max_width_m=.1)
+        contract=validate_paired_insertion_records(out)
+        self.assertEqual(contract["matched_families"],2)
+        self.assertEqual(contract["matched_depth_pairs"],4)
+        fixed=[a for a in out if a.condition=="insertion_sweep_fixed_width"]
+        predicted=[a for a in out if a.condition=="insertion_sweep_predicted_width"]
+        self.assertEqual(len(fixed),len(predicted))
+        self.assertTrue(any(abs(float(a.row[1])-float(b.row[1]))>.001
+                            for a in fixed for b in predicted
+                            if a.parent_id==b.parent_id and a.depth_id==b.depth_id))
 
     def test_cap_histogram_near_not_greater(self):
         widths=[0.08,0.1,0.100000002,0.1001]
