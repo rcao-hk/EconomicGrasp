@@ -180,6 +180,7 @@ python diagnostics/analyze_rayrope_p3_action_consistency.py \
   --candidate_csv /path/to/test_similar_p3_both.csv \
   --candidate_csv /path/to/test_novel_p3_both.csv \
   --output_json "$P3_DIR/p3_action_consistency.json" \
+  --output_md "$P3_DIR/RESULTS_CN_P3.md" \
   --require_both_width_modes \
   --expected_frames 18 --expected_scenes 9 --expected_families 288 \
   --n_boot 5000 --seed 20261107
