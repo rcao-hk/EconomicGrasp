@@ -294,6 +294,63 @@ def build_p2_actions(
     return distinct
 
 
+
+def validate_paired_insertion_records(records: Sequence[ActionRecord],
+                                      tol: float=1e-6) -> dict:
+    """Fail closed unless both insertion protocols encode the same depth lattice.
+
+    Within a family, the native query and in-plane angle are identical.
+    The only permitted cross-protocol change at a given depth is width.
+    At the native selected depth, the widths and exact physical actions must
+    coincide. Return protocol counts for the run manifest.
+    """
+    by_parent = {}
+    for rec in records:
+        if rec.condition not in ("insertion_sweep_fixed_width",
+                                 "insertion_sweep_predicted_width"):
+            continue
+        key = (rec.parent_id, rec.condition, rec.depth_id)
+        if key in by_parent:
+            raise ValueError(f"Duplicate insertion action {key}")
+        by_parent[key] = rec
+    parents = sorted({k[0] for k in by_parent})
+    if not parents:
+        raise ValueError("No insertion sweep actions to pair")
+    n_depth = 0
+    for parent in parents:
+        fixed = {key[2]:rec for key,rec in by_parent.items()
+                 if key[0]==parent and key[1]=="insertion_sweep_fixed_width"}
+        pred = {key[2]:rec for key,rec in by_parent.items()
+                if key[0]==parent and key[1]=="insertion_sweep_predicted_width"}
+        if len(fixed)<2 or fixed.keys()!=pred.keys():
+            raise ValueError(f"Unmatched insertion depth bins for {parent}")
+        fixed_widths = [float(x.row[1]) for x in fixed.values()]
+        if max(fixed_widths)-min(fixed_widths)>tol:
+            raise ValueError(f"Fixed protocol does not preserve executed width: {parent}")
+        winner_count=0
+        for d in sorted(fixed):
+            a,b=fixed[d],pred[d]
+            if (a.query_id!=b.query_id or a.angle_id!=b.angle_id or
+                a.depth_id!=b.depth_id or a.query_winner!=b.query_winner):
+                raise ValueError(f"Source query/angle/depth mismatch: {parent}/{d}")
+            if not np.allclose(a.row[3:16], b.row[3:16], atol=tol, rtol=0):
+                raise ValueError(f"Insertion geometry mismatch: {parent}/{d}")
+            if not np.isclose(float(a.row[0]),float(b.row[0]),atol=tol,rtol=0):
+                raise ValueError(f"Depth CDF score differs by width protocol: {parent}/{d}")
+            if not np.isclose(float(a.original_width_m),float(b.row[1]),atol=tol,rtol=0):
+                raise ValueError(f"Source predicted width mismatch: {parent}/{d}")
+            if a.query_winner:
+                winner_count+=1
+                if a.candidate_id!=b.candidate_id:
+                    raise ValueError(f"Native selected action differs across protocols: {parent}/{d}")
+            n_depth+=1
+        if winner_count!=1:
+            raise ValueError(f"Expected one native selected depth for {parent}, got {winner_count}")
+    return {"matched_families":len(parents),"matched_depth_pairs":n_depth,
+            "native_selected_actions_equal":True}
+
+
+
 def count_width_status(widths_m: Sequence[float], cap_m: float, tol_m: float=1e-6) -> dict:
     w = np.asarray(widths_m, dtype=float)
     if not (np.isfinite(w).all() and 0 < cap_m <= 0.3 and tol_m >= 0):
