@@ -84,6 +84,13 @@ def construct_replay(rows,width_column="width_predicted_decoded_m",max_width_m=.
         widths=[float(r["width_m"]) for r in records]
         if np.ptp(widths)>tol:
             raise ValueError(f"Fixed-width intervention did not keep width constant: {key}")
+        base=_row(records[0],height_m=float(records[0]["raw"].get("height_m") or .02))
+        for item in records[1:]:
+            candidate=_row(item,height_m=float(item["raw"].get("height_m") or .02))
+            if not np.allclose(base[2:3],candidate[2:3],atol=tol,rtol=0):
+                raise ValueError(f"Fixed insertion family changes gripper height: {key}")
+            if not np.allclose(base[4:16],candidate[4:16],atol=tol,rtol=0):
+                raise ValueError(f"Fixed insertion family changes center or rotation: {key}")
         chosen_depth=sorted(by_depth)[int(np.argmax([r["score"] for r in records]))]
         selected_flags=[d for d,r in by_depth.items() if str(r["raw"].get("query_winner","")).strip() in ("1","True","true")]
         if selected_flags and (len(selected_flags)!=1 or selected_flags[0]!=chosen_depth):
