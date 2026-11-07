@@ -482,15 +482,41 @@ def _clean(x):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--candidate_csv",required=True)
+    p.add_argument("--candidate_csv",required=True,action="append",
+                   help="Repeat this flag to aggregate disjoint Seen/Similar/Novel files.")
     p.add_argument("--output_json",required=True)
     p.add_argument("--n_boot",type=int,default=5000)
     p.add_argument("--seed",type=int,default=20261107)
+    p.add_argument("--require_both_width_modes",action="store_true",
+                   help="Fail rather than report incomplete paired insertion diagnostics.")
+    p.add_argument("--expected_frames",type=int,default=0)
+    p.add_argument("--expected_scenes",type=int,default=0)
+    p.add_argument("--expected_families",type=int,default=0)
     args=p.parse_args()
-    rows,schema=load_candidates(args.candidate_csv,None,"m")
+    rows=[]
+    schemas={}
+    seen=set()
+    for file in args.candidate_csv:
+        subset,schema=load_candidates(file,None,"m")
+        for item in subset:
+            key=(item["sample"],item["condition"],item["candidate"])
+            if key in seen:
+                raise ValueError(f"Duplicate physical action across input CSV files: {key}")
+            seen.add(key)
+        rows.extend(subset)
+        schemas[file]=schema
     result=analyze(rows,n_boot=args.n_boot,seed=args.seed)
+    if args.require_both_width_modes and not result["fixed_vs_predicted_width"]["available"]:
+        raise RuntimeError("Required paired fixed/predicted insertion depth protocols are missing")
+    for name,expected,observed in (
+        ("frames",args.expected_frames,result["num_frames"]),
+        ("scenes",args.expected_scenes,result["num_scenes"]),
+        ("paired families",args.expected_families,result["fixed_vs_predicted_width"].get("families",0)),
+    ):
+        if expected and observed!=expected:
+            raise RuntimeError(f"Expected {expected} {name}, found {observed}")
     result["input_csv"]=args.candidate_csv
-    result["schema"]=schema
+    result["schema_by_input"]=schemas
     dest=Path(args.output_json)
     dest.parent.mkdir(parents=True,exist_ok=True)
     tmp=dest.with_suffix(dest.suffix+".tmp")
