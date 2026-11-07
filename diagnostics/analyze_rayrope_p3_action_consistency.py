@@ -147,6 +147,13 @@ def _validate_pair(a,b,key,depth_id,tol=1e-5):
         raise ValueError(f"Insertion mismatch {key}/d{depth_id}")
     if abs(a["score"]-b["score"])>tol:
         raise ValueError(f"CDF score changed across width modes {key}/d{depth_id}")
+    height_a=_number(a["raw"].get("height_m"))
+    height_b=_number(b["raw"].get("height_m"))
+    if height_a is not None and height_b is not None and abs(height_a-height_b)>tol:
+        raise ValueError(f"Gripper height changed across width protocols {key}/d{depth_id}")
+    expected_width=_number(b["raw"].get("width_predicted_decoded_m"))
+    if expected_width is not None and abs(expected_width-b["width_m"])>tol:
+        raise ValueError(f"Predicted-width row violates exported depth-bin width {key}/d{depth_id}")
     if a["raw"].get("angle_id","")!=b["raw"].get("angle_id",""):
         raise ValueError(f"Angle ID mismatch {key}/d{depth_id}")
     if a["raw"].get("query_id","")!=b["raw"].get("query_id",""):
@@ -434,6 +441,10 @@ def analyze(rows,n_boot=5000,seed=20261107):
     for r in rows:
         if not math.isfinite(r["quality"]):
             raise ValueError("P3 requires exact-action quality, not --diag_skip_eval")
+        if r["condition"] in (FIXED,PRED):
+            semantics=str(r["raw"].get("score_semantics","")).lower()
+            if "not_depth_specific" in semantics or "native_frozen" in semantics:
+                raise ValueError("Insertion action has a frozen native score, not a matching depth-specific CDF score")
     paired=_width_protocol_compare(rows,n_boot,seed)
     fixed=_group(rows,FIXED)
     predicted=_group(rows,PRED)
@@ -449,10 +460,32 @@ def analyze(rows,n_boot=5000,seed=20261107):
         extra_pred=_variant_summary(
             [_family_stats(f,PRED) for f in predicted.values()],predicted,n_boot,seed
         ) if predicted else None
+    by_split={}
+    for split in sorted({r["split"] for r in rows}):
+        subset=[r for r in rows if r["split"]==split]
+        pair_subset=_width_protocol_compare(subset,n_boot,seed)
+        rank_subset=_rank12(subset,n_boot,seed)
+        width_subset=_width_baselines(subset,n_boot,seed)
+        fixed_subset=_group(subset,FIXED)
+        pred_subset=_group(subset,PRED)
+        by_split[split]={
+            "frames":len({r["sample"] for r in subset}),
+            "scenes":len({r["scene"] for r in subset if r["scene"] is not None}),
+            "paired_insertion_available":pair_subset["available"],
+            "paired_insertion_families":pair_subset.get("families",0),
+            "fixed_mean_regret":pair_subset.get("mean_fixed_regret",
+                mean([_family_stats(g,FIXED)["regret"] for g in fixed_subset.values()]) if fixed_subset else None),
+            "predicted_mean_regret":pair_subset.get("mean_predicted_regret",
+                mean([_family_stats(g,PRED)["regret"] for g in pred_subset.values()]) if pred_subset else None),
+            "pred_minus_fixed_regret":pair_subset.get("pred_minus_fixed_regret"),
+            "rank2_minus_rank1":rank_subset.get("rank2_minus_rank1"),
+            "width_constant_baselines":width_subset.get("constant_baselines"),
+        }
     return {
         "num_rows":len(rows),
         "num_frames":len({r["sample"] for r in rows}),
         "num_scenes":len({(r["split"],r["scene"]) for r in rows if r["scene"] is not None}),
+        "by_split":by_split,
         "fixed_vs_predicted_width":paired,
         "fixed_only_when_unpaired":extra_fixed,
         "predicted_only_when_unpaired":extra_pred,
