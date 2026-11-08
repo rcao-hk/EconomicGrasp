@@ -1,0 +1,6 @@
+{
+  "backbone": "point_gvar",
+  "checkpoint": "REPLACE_BY_BIND_COMMAND",
+  "checkpoint_sha256": "",
+  "model_args": ["--multi_modal", "--use_cdf", "--extend_angle", "--enable_point_rayrope", "--enable_gvar", "--kview_mode", "A1", "--pose_depth_mode", "global_film", "--use_fuse_depth", "--rayrope_group_chunk", "2048", "--gvar_action_chunk", "2048", "--rayrope_checkpoint_chunks", "0", "--gvar_activation_checkpoint", "0"]
+}
