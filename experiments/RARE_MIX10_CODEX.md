@@ -1,5 +1,9 @@
 # RARE-style Grasp Ranking：10% Original + 10% GN-Trans
 
+> **50%+50% 后续独立协议：** 请使用 [RARE_MIX50_CODEX.md](RARE_MIX50_CODEX.md) 和
+> [scripts/rare_mix50/run.sh](../scripts/rare_mix50/run.sh)。
+> 本文只记录原10%+10%实验；50%的训练帧、checkpoint、cache与结果目录必须隔离。
+
 日期：2026-11-09。独立分支 `exp/rare-ranking-mix10`，从
 `main@7a956d37aaa427a32e598f21fdc6b910ed3c2704` 创建。不是旧 GVAR/P3 分支的合并。
 
