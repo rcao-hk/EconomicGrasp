@@ -27,6 +27,20 @@ def protocol_rows(path, partition, domain=None, split=None):
     return p, rows
 
 
+def check_model_matches_manifest(config: dict, protocol: dict) -> None:
+    """Reject mixing a 50% checkpoint with 10% caches or vice versa."""
+    fraction = float(config.get('mix_training_fraction', 0.1))
+    canonical = make_protocol(fraction)
+    if protocol['protocol_sha256'] != canonical['protocol_sha256']:
+        raise ValueError(
+            f'Checkpoint fraction {fraction} incompatible with frame manifest; '
+            'do not relabel or reuse a different sampling protocol')
+    counts = protocol.get('training_count_by_domain', {})
+    expected = 12800 if fraction == 0.5 else 2600
+    if any(counts.get(d) != expected for d in ('original', 'gntrans')):
+        raise ValueError('Train frame counts mismatch bound checkpoint fraction')
+
+
 def ensure_new_dir(path):
     p=Path(path)
     if p.exists() and any(p.iterdir()):
@@ -50,6 +64,7 @@ def mine(a):
     rows=[r for i,r in enumerate(rows) if i%a.num_shards==a.shard_index]
     if a.limit: rows=rows[:a.limit]
     runtime=Runtime(a.config,a.dataset_root,a.gntrans_root,a.device)
+    check_model_matches_manifest(runtime.config, p)
     root=Path(a.output);root.mkdir(parents=True,exist_ok=True)
     contract=dict(schema=SCHEMA,protocol_sha256=p['protocol_sha256'],partition=a.partition,
                   config_digest=runtime.config_digest,config=runtime.config,
@@ -170,8 +185,17 @@ def fit(a):
     va={(e['row']['domain'],e['row']['scene'],e['row']['anno']) for e in val['entries']}
     if tr&va: raise ValueError('Same image in rank training and validation')
     if any(s>=100 for _,s,_ in tr|va): raise ValueError('Official test scenes forbidden for fitting/selection')
-    if not a.smoke and (len(train['entries'])!=5200 or len(val['entries'])!=40):
-        raise ValueError('Formal experiment requires 5200 train +40 held-out-view validation images')
+    source_config = train['contract']['config']
+    fraction = float(source_config.get('mix_training_fraction', 0.1))
+    canonical = make_protocol(fraction)
+    if train['contract']['protocol_sha256'] != canonical['protocol_sha256']:
+        raise ValueError('Cache indices do not match the checkpoint training fraction')
+    if not a.smoke and (len(train['entries']) != len(canonical['train']) or
+                        len(val['entries']) != len(canonical['validation'])):
+        raise ValueError(
+            f'Formal {fraction}+{fraction} experiment requires '
+            f'{len(canonical["train"])} training +{len(canonical["validation"])} '
+            'held-out-frame validation images')
     if a.epochs<1 or a.batch_frames<1 or a.lr<=0 or min(a.point_weight,a.pair_weight)<0:
         raise ValueError('Invalid training settings')
     root=ensure_new_dir(a.output);device=torch.device(a.device)
@@ -228,6 +252,7 @@ def infer(a):
     if a.limit: rows=rows[:a.limit]
     root=ensure_new_dir(a.output)
     rt=Runtime(a.config,a.dataset_root,a.gntrans_root,a.device)
+    check_model_matches_manifest(rt.config, p)
     ranker=None;rk=None
     if a.ranker:
         rk=torch.load(a.ranker,map_location='cpu',weights_only=False)
@@ -349,11 +374,15 @@ def diagnose_cache(a):
 def main():
     p=argparse.ArgumentParser(description=__doc__);sp=p.add_subparsers(dest='cmd',required=True)
     m=sp.add_parser('manifest');m.add_argument('--output',required=True)
-    m.set_defaults(func=lambda a:write_json(a.output,make_protocol()))
+    m.add_argument('--train-fraction', type=float, choices=(0.1,0.5), default=0.1)
+    m.set_defaults(func=lambda a:write_json(a.output,make_protocol(a.train_fraction)))
     b=sp.add_parser('bind');b.add_argument('--template',required=True);b.add_argument('--checkpoint',required=True);b.add_argument('--output',required=True)
+    b.add_argument('--historical-e15', action='store_true',
+                   help='Explicitly accept verified mixed50 epoch16; never silently reuse incomplete history')
     def bind(a):
         from .runtime import bind_config
-        bind_config(a.template,a.checkpoint,a.output)
+        bind_config(a.template,a.checkpoint,a.output,
+                    allow_historical_e15=bool(a.historical_e15))
     b.set_defaults(func=bind)
     m=sp.add_parser('mine');m.set_defaults(func=mine)
     for k in ('config','protocol','dataset-root','output'):m.add_argument('--'+k,required=True)
