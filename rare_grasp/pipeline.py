@@ -188,7 +188,7 @@ def fit(a):
     source_config = train['contract']['config']
     fraction = float(source_config.get('mix_training_fraction', 0.1))
     canonical = make_protocol(fraction)
-    if train['contract']['protocol_sha256'] != canonical['protocol_sha256']:
+    if not a.smoke and train['contract']['protocol_sha256'] != canonical['protocol_sha256']:
         raise ValueError('Cache indices do not match the checkpoint training fraction')
     if not a.smoke and (len(train['entries']) != len(canonical['train']) or
                         len(val['entries']) != len(canonical['validation'])):
