@@ -27,15 +27,13 @@ require_bound() {
   [[ -f "$CONFIG" && -f "$PROTOCOL" ]] ||
     { echo "Run prepare+bind first (no automatic training)" >&2; exit 2; }
 }
-check) 
+case "$STAGE" in
+check)
   python -m unittest discover -s tests -p 'test_rare_mix10.py' -v
   python -m unittest discover -s tests -p 'test_rare_mix50.py' -v
   python -m compileall -q rare_grasp tests/test_rare_mix50.py
   bash -n scripts/rare_mix50/run.sh
-  exit 0
   ;;
-esac
-case "$STAGE" in
 prepare)
   [[ ! -e "$PROTOCOL" ]] || { echo "Protocol already exists; refuse overwrite" >&2; exit 2; }
   python -m rare_grasp.pipeline manifest --train-fraction 0.5 --output "$PROTOCOL"
