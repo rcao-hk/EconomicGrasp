@@ -83,6 +83,33 @@ def bind_config(template: str, checkpoint: str, output: str,
         raise ValueError('Point/GVAR architecture mismatch')
     if ck.get('pose_depth_mode') != 'global_film':
         raise ValueError('This primary protocol requires global_film')
+    if ck.get('use_fuse_depth') is not True:
+        raise ValueError('This protocol requires fused-depth supervision in source checkpoint')
+
+    # Memory-only chunk parameters are serialized in grasp_design. Derive them
+    # from the trusted checkpoint instead of silently using template defaults.
+    # The strict design+state loader still checks all architectural settings.
+    args = list(config['model_args'])
+    def sync_option(flag: str, value: object) -> None:
+        token = '--' + flag
+        if args.count(token) != 1:
+            raise ValueError(f'Bound model args must include exactly one {token}')
+        index = args.index(token)
+        if index + 1 >= len(args):
+            raise ValueError(f'Missing value for {token}')
+        args[index + 1] = str(int(value))
+    ray = design.get('rayrope')
+    if not isinstance(ray, dict):
+        raise ValueError('Point RayRoPE design metadata is required')
+    sync_option('rayrope_group_chunk', ray['group_chunk'])
+    sync_option('rayrope_checkpoint_chunks', ray['checkpoint_chunks'])
+    if expected_gvar:
+        gvar = design.get('gvar')
+        if not isinstance(gvar, dict):
+            raise ValueError('GVAR design metadata is required')
+        sync_option('gvar_action_chunk', gvar['action_chunk'])
+        sync_option('gvar_activation_checkpoint', gvar['activation_checkpoint'])
+    config['model_args'] = args
     config.update(checkpoint=str(Path(checkpoint).resolve()),
                   checkpoint_sha256=sha256(checkpoint),
                   expected_checkpoint_epoch=epoch,
