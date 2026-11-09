@@ -48,34 +48,60 @@ def frame_seed(r: dict, seed: int) -> int:
     return int(digest([frame_key(r), int(seed)])[:8], 16)
 
 
-def make_protocol() -> dict:
-    """Exactly 2600 TRAIN images per domain. Validation is separate views.
+def mix_frame_stride(train_fraction: float) -> int:
+    """Allow exactly the preregistered 10% or 50% training-frame protocols."""
+    fraction = float(train_fraction)
+    if fraction == 0.1:
+        return 10
+    if fraction == 0.5:
+        return 2
+    raise ValueError(f'Only mix training fractions 0.1 and 0.5 are supported, got {train_fraction}')
 
-    Validation uses 40 additional training-domain images, NOT scene-held-out;
-    fixed final epoch is the preregistered primary result, not selected on test.
+
+def make_protocol(train_fraction: float = 0.1) -> dict:
+    """Paired, per-scene RGB training views; unchanged 10% evaluation protocol.
+
+    10% is 26 frames/scene (0,10,...,250); 50% is 128 (0,2,...,254).
+    The 40 validation images are held-out *frames* from training scenes,
+    NOT independent scenes, and do not overlap either training frame set.
+    Without an argument, returns the original mix10 manifest byte-equivalent
+    after JSON serialization to preserve its legacy contract fingerprint.
     """
+    stride = mix_frame_stride(train_fraction)
+    count_per_domain = 100 * len(range(0, 256, stride))
+
     def row(domain, scene, anno, partition):
         split = 'train' if scene < 100 else ('test_seen' if scene < 130 else
                                            'test_similar' if scene < 160 else 'test_novel')
         return dict(domain=domain, scene=scene, anno=anno, split=split, partition=partition)
+
     train = [row(d, s, a, 'train') for d in ('original', 'gntrans')
-             for s in range(100) for a in range(0, 256, 10)]
+             for s in range(100) for a in range(0, 256, stride)]
     val = [row(d, s, a, 'validation') for d in ('original', 'gntrans')
            for s in range(10) for a in (5, 135)]
     test = [row(d, s, a, 'test') for d in ('original', 'gntrans')
             for s in range(100, 190) for a in range(0, 256, 10)]
     obj = dict(schema=SCHEMA, base_main=BASE_SHA, train=train, validation=val, test=test,
-               training_count_by_domain={'original': 2600, 'gntrans': 2600},
+               training_count_by_domain={'original': count_per_domain,
+                                         'gntrans': count_per_domain},
                validation_note='40 frame-held-out train-domain views; NOT scene-independent',
                primary_selection='fixed final epoch; no test AP checkpoint selection')
+    if stride == 2:
+        # New fields only in mix50: old mix10 JSON and SHA remain unchanged.
+        obj['mix_training_fraction'] = 0.5
+        obj['test_frame_fraction'] = 0.1
+        obj['protocol_variant'] = 'rare-mix50-train-test10-v1'
     obj['protocol_sha256'] = digest(obj)
     return obj
 
 
 def verify_protocol(p: dict) -> None:
-    want = make_protocol()
+    if not isinstance(p, dict):
+        raise ValueError('Protocol must be a JSON object')
+    fraction = p.get('mix_training_fraction', 0.1)
+    want = make_protocol(fraction)
     if p != want:
-        raise ValueError('Protocol differs from preregistered 10%+10% frame manifest')
+        raise ValueError(f'Frame manifest differs from preregistered {fraction}+{fraction} protocol')
 
 
 def success_bits(friction: np.ndarray, invalid: np.ndarray) -> np.ndarray:
