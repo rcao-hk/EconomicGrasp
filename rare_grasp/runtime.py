@@ -17,33 +17,77 @@ from .core import sha256, digest, frame_key, frame_seed, physical_ids, success_b
 def read_bound_config(path: str) -> dict:
     config = json.loads(Path(path).read_text(encoding='utf-8'))
     if not config.get('checkpoint_sha256') or sha256(config['checkpoint']) != config['checkpoint_sha256']:
-        raise ValueError('Checkpoint SHA missing/mismatch; bind config to a verified mix10 checkpoint first')
+        raise ValueError('Checkpoint SHA missing/mismatch; bind a verified mix10 or mix50 checkpoint')
     return config
 
 
-def check_mix10(ck: dict) -> None:
+def check_mix_protocol(ck: dict, train_fraction: float = 0.1,
+                       expected_epoch: int = 20) -> None:
+    """Validate immutable MIX provenance, not just the filename/model weights.
+
+    Existing historical 50% e15 checkpoints may be used ONLY with explicit
+    epoch=16 approval and a complete true MIX protocol in the checkpoint.
+    Do not reconstruct, invent or patch metadata to make an old weight pass.
+    """
+    from .core import mix_frame_stride
+    stride = mix_frame_stride(train_fraction)
+    expected_per_domain = 100 * len(range(0, 256, stride))
     p = ck.get('gntrans_mix_protocol', {})
+    if not isinstance(p, dict):
+        raise ValueError('No structured gntrans_mix_protocol in checkpoint')
     for key in ('original_train_count', 'gntrans_train_count'):
-        if p.get(key) != 2600:
-            raise ValueError(f'{key} must equal 2600; mixed50/historical unsupported weights forbidden')
-    if p.get('mixed_train_count') != 5200 or p.get('train_fraction_each_domain') != .1:
-        raise ValueError('Checkpoint is not exact mixed10+10 training')
-    if not ck.get('use_cdf') or ck.get('epoch') != 20:
-        raise ValueError('Primary base is fixed e19 (checkpoint epoch=20), CDF required')
+        if p.get(key) != expected_per_domain:
+            raise ValueError(
+                f'{key} mismatch: checkpoint={p.get(key)} expected={expected_per_domain} '
+                f'for train_fraction={train_fraction}')
+    if (p.get('mixed_train_count') != expected_per_domain * 2 or
+            p.get('train_fraction_each_domain') != float(train_fraction)):
+        raise ValueError('Mixed checkpoint train-fraction or total frame count mismatch')
+    if float(train_fraction) == 0.5:
+        if (p.get('paired_scene_frame_sampling') is not True or
+                not p.get('original_train_index_sha256') or
+                not p.get('gntrans_train_index_sha256')):
+            raise ValueError('Mix50 requires paired sampling and recorded original/GNTrans frame hashes')
+        if p['original_train_index_sha256'] != p['gntrans_train_index_sha256']:
+            raise ValueError('Mix50 Original/GNTrans frame indices differ')
+    if not ck.get('use_cdf'):
+        raise ValueError('CDF-only checkpoint required')
+    if int(expected_epoch) not in ((20, 16) if float(train_fraction) == 0.5 else (20,)):
+        raise ValueError('Unsupported checkpoint epoch; use fixed e19 or explicit historical 50% e15')
+    if ck.get('epoch') != int(expected_epoch):
+        raise ValueError(
+            f'Checkpoint epoch={ck.get("epoch")} does not match explicitly selected '
+            f'checkpoint epoch={expected_epoch}')
 
 
-def bind_config(template: str, checkpoint: str, output: str) -> None:
+def check_mix10(ck: dict) -> None:
+    """Backwards-compatible original 10% contract and unit test."""
+    check_mix_protocol(ck, 0.1, 20)
+
+
+def bind_config(template: str, checkpoint: str, output: str,
+                allow_historical_e15: bool = False) -> None:
     from .core import write_json
-    ck = torch.load(checkpoint, map_location='cpu', weights_only=False)
-    check_mix10(ck)
     config = json.loads(Path(template).read_text(encoding='utf-8'))
+    fraction = float(config.get('mix_training_fraction', 0.1))
+    from .core import mix_frame_stride
+    mix_frame_stride(fraction)
+    if allow_historical_e15 and fraction != 0.5:
+        raise ValueError('--historical-e15 is only supported for verified 50%+50% weights')
+    epoch = 16 if allow_historical_e15 else 20
+    ck = torch.load(checkpoint, map_location='cpu', weights_only=False)
+    check_mix_protocol(ck, fraction, epoch)
     expected_gvar = config['backbone'] == 'point_gvar'
     design = ck.get('grasp_design', {})
     if not design.get('enable_point_rayrope') or bool(design.get('enable_gvar')) != expected_gvar:
         raise ValueError('Point/GVAR architecture mismatch')
     if ck.get('pose_depth_mode') != 'global_film':
         raise ValueError('This primary protocol requires global_film')
-    config.update(checkpoint=str(Path(checkpoint).resolve()), checkpoint_sha256=sha256(checkpoint),
+    config.update(checkpoint=str(Path(checkpoint).resolve()),
+                  checkpoint_sha256=sha256(checkpoint),
+                  expected_checkpoint_epoch=epoch,
+                  provenance_status=('historical_e15_seen_monitored' if allow_historical_e15
+                                     else 'fixed_e19'),
                   source_mix_protocol=ck['gntrans_mix_protocol'], source_grasp_design=design)
     write_json(output, config)
 
@@ -83,7 +127,13 @@ class Runtime:
             ray_gravity_hidden_dim=getattr(cfgs,'ray_gravity_hidden_dim',64),
             ray_gravity_mid_dim=getattr(cfgs,'ray_gravity_mid_dim',32)).to(self.device)
         ck = torch.load(self.config['checkpoint'], map_location='cpu', weights_only=False)
-        check_mix10(ck); validate_checkpoint_design(self.model, ck)
+        check_mix_protocol(
+            ck, float(self.config.get('mix_training_fraction', 0.1)),
+            int(self.config.get('expected_checkpoint_epoch', 20))
+        )
+        if ck['gntrans_mix_protocol'] != self.config.get('source_mix_protocol'):
+            raise ValueError('Bound checkpoint training protocol changed since binding')
+        validate_checkpoint_design(self.model, ck)
         if bool(ck['grasp_design'].get('enable_gvar')) != (self.config['backbone']=='point_gvar'):
             raise ValueError('Config backbone name does not match actual model')
         if cfgs.grasp_max_width != .1:
