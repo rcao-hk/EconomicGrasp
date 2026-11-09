@@ -130,6 +130,10 @@ class CheckpointTests(unittest.TestCase):
             check_mix_protocol(ck, 0.5, 20)
         ck = fake_checkpoint()
         ck['gntrans_mix_protocol']['gntrans_train_index_sha256'] = 'b' * 64
+        # Dataset-internal indices need not be equal when semantic frame pairs
+        # were verified by the producer.
+        check_mix_protocol(ck, 0.5, 20)
+        del ck['gntrans_mix_protocol']['gntrans_train_index_sha256']
         with self.assertRaises(ValueError):
             check_mix_protocol(ck, 0.5, 20)
 
