@@ -33,6 +33,10 @@ def _load_label(labels_root: Path, record: dict, graph_manifest_sha: str):
     if not path.is_file() or sha256_file(path) != record["labels_sha256"]:
         raise RuntimeError(f"Missing/corrupt exact-action labels: {path}")
     meta = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+    if digest(meta.get("contract", {})) != meta.get("contract_sha256"):
+        raise RuntimeError(f"Label sidecar contract fingerprint mismatch: {path}")
+    if meta.get("contract") != record.get("contract") or meta.get("contract_sha256") != record.get("contract_sha256"):
+        raise RuntimeError(f"Label manifest/sidecar provenance mismatch: {path}")
     if meta.get("contract", {}).get("graph_manifest_sha256") != graph_manifest_sha:
         raise RuntimeError(f"Label cache graph provenance mismatch: {path}")
     with np.load(path, allow_pickle=False) as z:
