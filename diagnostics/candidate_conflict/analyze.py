@@ -98,7 +98,10 @@ def _frame_ap(
     ap["per_mu_success_oracle"] = per_mu
 
     suppressed = np.flatnonzero(np.asarray(suppressor) >= 0)
-    better = suppressed[q_count[suppressed] > q_count[suppressor[suppressed]]]
+    suppressed_gap = q_count[suppressed] - q_count[suppressor[suppressed]]
+    better = suppressed[suppressed_gap > 0]
+    tied = suppressed[suppressed_gap == 0]
+    worse = suppressed[suppressed_gap < 0]
     return ap, {
         "native_nms_survivors": int(len(native_keep)),
         "quality_nms_survivors": int(len(q_keep)),
@@ -109,6 +112,8 @@ def _frame_ap(
         "component_oracle": component_info,
         "suppressed_candidates": int(len(suppressed)),
         "suppressed_candidates_with_higher_q_than_suppressor": int(len(better)),
+        "suppressed_candidates_tied_with_suppressor": int(len(tied)),
+        "suppressed_candidates_lower_q_than_suppressor": int(len(worse)),
         "fraction_suppressed_better": float(len(better) / len(suppressed)) if len(suppressed) else 0.0,
         "mean_q_gap_better_suppressed": float(
             np.mean(q_count[better] - q_count[suppressor[better]])
@@ -291,8 +296,11 @@ def main():
         per_scene_acc = {}
         graph_totals = dict(nodes=0, edges=0, components=0, native_survivors=0)
         selection_totals = dict(
-            suppressed=0, suppressed_q_better=0, component_exact_nodes=0,
-            component_total_nodes=0, component_exact_components=0, component_fallback_components=0,
+            suppressed=0, suppressed_q_better=0, suppressed_q_tied=0,
+            suppressed_q_worse=0, native_selected_q_sum=0,
+            quality_nms_selected_q_sum=0, component_selected_q_sum=0,
+            component_exact_nodes=0, component_total_nodes=0,
+            component_exact_components=0, component_fallback_components=0,
         )
         parity_errors = []
 
@@ -357,7 +365,16 @@ def main():
                 "native_survivor_q": float(q_count[native_keep].mean() / 6.0) if len(native_keep) else 0.0,
                 "quality_nms_survivor_q": float(q_count[greedy_nms(q_priority(q_count, g[:, 0]), edges)[0]].mean() / 6.0) if len(g) else 0.0,
                 "suppressed_q_better": metrics["suppressed_candidates_with_higher_q_than_suppressor"],
+                "suppressed_q_tied": metrics["suppressed_candidates_tied_with_suppressor"],
+                "suppressed_q_worse": metrics["suppressed_candidates_lower_q_than_suppressor"],
                 "suppressed_candidates": metrics["suppressed_candidates"],
+                "quality_nms_survivors": metrics["quality_nms_survivors"],
+                "quality_nms_changed_nodes": metrics["quality_nms_changed_nodes"],
+                "native_selected_q_sum": metrics["native_selected_q_sum"],
+                "quality_nms_selected_q_sum": metrics["quality_nms_selected_q_sum"],
+                "component_selected_q_sum": metrics["component_selected_q_sum"],
+                "component_exact_nodes": metrics["component_oracle"]["exact_nodes"],
+                "component_fallback_components": metrics["component_oracle"]["fallback_components"],
                 "component_exact_node_coverage": metrics["component_oracle"]["exact_node_coverage"],
                 "native_ap_percent": frame_native,
             }
@@ -372,6 +389,11 @@ def main():
             graph_totals["native_survivors"] += len(native_keep)
             selection_totals["suppressed"] += metrics["suppressed_candidates"]
             selection_totals["suppressed_q_better"] += metrics["suppressed_candidates_with_higher_q_than_suppressor"]
+            selection_totals["suppressed_q_tied"] += metrics["suppressed_candidates_tied_with_suppressor"]
+            selection_totals["suppressed_q_worse"] += metrics["suppressed_candidates_lower_q_than_suppressor"]
+            selection_totals["native_selected_q_sum"] += metrics["native_selected_q_sum"]
+            selection_totals["quality_nms_selected_q_sum"] += metrics["quality_nms_selected_q_sum"]
+            selection_totals["component_selected_q_sum"] += metrics["component_selected_q_sum"]
             selection_totals["component_exact_nodes"] += metrics["component_oracle"]["exact_nodes"]
             selection_totals["component_total_nodes"] += metrics["component_oracle"]["total_nodes"]
             selection_totals["component_exact_components"] += metrics["component_oracle"]["exact_components"]
