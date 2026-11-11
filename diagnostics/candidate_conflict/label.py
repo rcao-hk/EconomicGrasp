@@ -86,6 +86,8 @@ def _label_scene(task: dict) -> dict:
             "graph_sha256_by_method": graph_shas,
             "evaluator": "ExactGraspNetActionEvaluator",
             "evaluator_source_sha256": task["evaluator_source_sha256"],
+            "label_script_sha256": task["label_script_sha256"],
+            "core_source_sha256": task["core_source_sha256"],
             "fc_mode": "official",
             "width_clip_m": float(task["max_width"]),
             "num_unique_actions": int(len(grasps)),
@@ -198,6 +200,8 @@ def main():
             "frames": frames,
             "graph_manifest_sha256": manifest["manifest_sha256"],
             "evaluator_source_sha256": sha256_file(evaluator_path),
+            "label_script_sha256": sha256_file(Path(__file__)),
+            "core_source_sha256": sha256_file(Path(__file__).with_name("core.py")),
             "max_width": manifest["protocol"]["max_width_m"],
         })
 
