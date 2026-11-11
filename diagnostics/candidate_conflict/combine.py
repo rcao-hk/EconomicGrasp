@@ -198,6 +198,17 @@ def main():
                 f"| {method} | {variant} | {boot['mean']:.4f} | "
                 f"[{boot['ci95'][0]:.4f}, {boot['ci95'][1]:.4f}] |"
             )
+    lines += ["", "## Candidate graph and suppression totals", "",
+              "| Method | Nodes | NMS edges | Components | Native survivors | Suppressed Q-better | Exact component coverage |",
+              "|---|---:|---:|---:|---:|---:|---:|"]
+    for method, result in method_results.items():
+        g = result["graph_totals"]
+        sel = result["selection_totals"]
+        lines.append(
+            f"| {method} | {g['nodes']} | {g['edges']} | {g['components']} | "
+            f"{g['native_survivors']} | {sel['suppressed_q_better']} | "
+            f"{sel['component_exact_node_coverage']:.3f} |"
+        )
     lines += ["", "## Interpretation limits", "",
               "- Q-based policies use exact labels and are not deployable models.",
               "- Per-μ oracle uses six different threshold-specific policies.",
