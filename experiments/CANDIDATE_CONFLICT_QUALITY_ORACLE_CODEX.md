@@ -177,7 +177,7 @@ The paths above are placeholders. Verify the exact roots and AP files from execu
 ### 4.1 CPU tests and one-frame smoke
 
 ```bash
-python -m unittest tests.test_candidate_conflict -v
+python -m unittest discover -s tests -p 'test_candidate_conflict.py' -v
 python -m compileall -q diagnostics/candidate_conflict
 ```
 
@@ -207,6 +207,16 @@ python -m diagnostics.candidate_conflict.label \
 ```
 
 For a smoke analysis, the official AP array is the full split array, but only one frame is present; use `--allow-partial --skip-official-parity`. This is a pipeline smoke only, not a result.
+
+```bash
+python -m diagnostics.candidate_conflict.analyze \
+  --graph-root "$OUT/smoke/test_novel" \
+  --labels-root "$OUT/smoke/test_novel_labels" \
+  --official-ap "MM=$MM_AP" --official-ap "MR=$MR_AP" \
+  --official-ap "RM=$RM_AP" --official-ap "RR=$RR_AP" \
+  --allow-partial --skip-official-parity \
+  --output "$OUT/smoke/test_novel_analysis"
+```
 
 ### 4.2 Full graph construction: all 7,680 frames per split
 
