@@ -214,8 +214,10 @@ For a smoke analysis, the official AP array is the full split array, but only on
 python -m diagnostics.candidate_conflict.analyze \
   --graph-root "$OUT/smoke/test_novel" \
   --labels-root "$OUT/smoke/test_novel_labels" \
-  --official-ap "MM=$MM_AP" --official-ap "MR=$MR_AP" \
-  --official-ap "RM=$RM_AP" --official-ap "RR=$RR_AP" \
+  --official-ap "MM=$MM_AP_ROOT/ap_test_novel_realsense.npy" \
+  --official-ap "MR=$MR_AP_ROOT/ap_test_novel_realsense.npy" \
+  --official-ap "RM=$RM_AP_ROOT/ap_test_novel_realsense.npy" \
+  --official-ap "RR=$RR_AP_ROOT/ap_test_novel_realsense.npy" \
   --allow-partial --skip-official-parity \
   --output "$OUT/smoke/test_novel_analysis"
 ```
