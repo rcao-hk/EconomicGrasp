@@ -422,7 +422,7 @@ def main():
             "scene_bootstrap": boot,
             "official_ap_parity": parity,
             "ap_by_mu_percent": {
-                variant: frame_ap[variant].mean(axis=(0, 1)).tolist()
+                variant: (frame_ap[variant].mean(axis=(0, 1)) * 100.0).tolist()
                 for variant in VARIANTS
             },
         }
@@ -437,15 +437,13 @@ def main():
         write_npz(method_out / "frame_ap.npz", **{
             v: frame_ap[v].astype(np.float32) for v in VARIANTS
         })
-        _write = per_frame_rows
-        _write_csv = _write
         # Keep per-method CSVs as well as the combined file.
-        keys = list(_write[0]) if _write else []
+        keys = list(per_frame_rows[0]) if per_frame_rows else []
         with (method_out / "per_frame.csv").open("w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=keys)
             if keys:
                 writer.writeheader()
-                writer.writerows(_write)
+                writer.writerows(per_frame_rows)
 
     # A formal run is not complete if any method's native AP replay differs.
     if not a.skip_official_parity:
