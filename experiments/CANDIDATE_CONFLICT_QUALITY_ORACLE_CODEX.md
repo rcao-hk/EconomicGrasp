@@ -125,6 +125,9 @@ The four methods may share many physical actions. Label the union once per frame
   - native AP replay parity;
   - NMS/quality/set oracles, per-\(\mu\) ceilings, suppression Q-loss;
   - per-frame/per-scene outputs and scene-cluster bootstrap.
+- `diagnostics/candidate_conflict/combine.py`
+  - combines the three split summaries over 90 scenes;
+  - paired 90-scene bootstrap and `RESULTS_CN_ALL_SPLITS.md`.
 - `tests/test_candidate_conflict.py`
   - CPU-only graph, greedy NMS, component oracle, exact-action bits, official AP formula and CLI tests.
 
@@ -286,7 +289,17 @@ The per-\(\mu\) oracle has six different rankings. It is not one scalar policy a
 
 ### 4.5 Cross-split aggregation and interpretation
 
-Keep the three split outputs separate first. Then prepare `RESULTS_CN_ALL_SPLITS.md` with:
+Keep the three split outputs separate first. Then combine the three 30-scene results (90 unique scenes) using the dedicated aggregator:
+
+```bash
+python -m diagnostics.candidate_conflict.combine \
+  --split-dir "test_seen=$OUT/test_seen/analysis" \
+  --split-dir "test_similar=$OUT/test_similar/analysis" \
+  --split-dir "test_novel=$OUT/test_novel/analysis" \
+  --output "$OUT/all_splits" --bootstrap 5000 --seed 0
+```
+
+It writes `summary_all_splits.json`, `per_scene_all_splits.csv`, and `RESULTS_CN_ALL_SPLITS.md` with:
 - per-method and per-split graph size/edge/component statistics;
 - native AP parity status;
 - Q-NMS representative-only AP gain;
@@ -294,7 +307,7 @@ Keep the three split outputs separate first. Then prepare `RESULTS_CN_ALL_SPLITS
 - Q-NMS+Q-rank gain;
 - component-set oracle gain and exact-node coverage;
 - per-\(\mu\) optimistic ceilings;
-- scene-cluster 95% CIs;
+- paired 90-scene 95% CIs;
 - candidate counts and exact-label cost.
 
 Do not average all candidates or frames as IID samples. The scene is the bootstrap unit. The 30-scene interval does not include training-seed variance.
