@@ -163,10 +163,10 @@ export MR_DUMP_ROOT=/ABS/PATH/MR/pre_nms_dumps
 export RM_DUMP_ROOT=/ABS/PATH/RM/pre_nms_dumps
 export RR_DUMP_ROOT=/ABS/PATH/RR/pre_nms_dumps
 
-export MM_AP=/ABS/PATH/MM/ap_test_seen_realsense.npy
-export MR_AP=/ABS/PATH/MR/ap_test_seen_realsense.npy
-export RM_AP=/ABS/PATH/RM/ap_test_seen_realsense.npy
-export RR_AP=/ABS/PATH/RR/ap_test_seen_realsense.npy
+export MM_AP_ROOT=/ABS/PATH/MM/official_ap_arrays
+export MR_AP_ROOT=/ABS/PATH/MR/official_ap_arrays
+export RM_AP_ROOT=/ABS/PATH/RM/official_ap_arrays
+export RR_AP_ROOT=/ABS/PATH/RR/official_ap_arrays
 
 export DATASET_ROOT=/data/robotarm/dataset/graspnet
 export OUT=/data/robotarm/result/grasp/rgbgrasp/candidate_conflict_oracle_20261111
@@ -188,8 +188,10 @@ python -m diagnostics.candidate_conflict.build \
   --split test_novel --camera realsense \
   --method "MM=$MM_DUMP_ROOT" --method "MR=$MR_DUMP_ROOT" \
   --method "RM=$RM_DUMP_ROOT" --method "RR=$RR_DUMP_ROOT" \
-  --official-ap "MM=$MM_AP" --official-ap "MR=$MR_AP" \
-  --official-ap "RM=$RM_AP" --official-ap "RR=$RR_AP" \
+  --official-ap "MM=$MM_AP_ROOT/ap_test_novel_realsense.npy" \
+  --official-ap "MR=$MR_AP_ROOT/ap_test_novel_realsense.npy" \
+  --official-ap "RM=$RM_AP_ROOT/ap_test_novel_realsense.npy" \
+  --official-ap "RR=$RR_AP_ROOT/ap_test_novel_realsense.npy" \
   --input-stage sensor_filtered_pre_nms \
   --scenes 167 --anno-start 196 --anno-stop 197 \
   --output "$OUT/smoke/test_novel"
@@ -224,6 +226,10 @@ Run one split at a time. Use a new output directory per split; `--resume` only w
 
 ```bash
 for SPLIT in test_seen test_similar test_novel; do
+  MM_AP="$MM_AP_ROOT/ap_${SPLIT}_realsense.npy"
+  MR_AP="$MR_AP_ROOT/ap_${SPLIT}_realsense.npy"
+  RM_AP="$RM_AP_ROOT/ap_${SPLIT}_realsense.npy"
+  RR_AP="$RR_AP_ROOT/ap_${SPLIT}_realsense.npy"
   python -m diagnostics.candidate_conflict.build \
     --split "$SPLIT" --camera realsense \
     --method "MM=$MM_DUMP_ROOT" --method "MR=$MR_DUMP_ROOT" \
@@ -270,6 +276,10 @@ Each worker processes a scene and reuses its CAD/Dex-Net scene model cache. Adju
 
 ```bash
 for SPLIT in test_seen test_similar test_novel; do
+  MM_AP="$MM_AP_ROOT/ap_${SPLIT}_realsense.npy"
+  MR_AP="$MR_AP_ROOT/ap_${SPLIT}_realsense.npy"
+  RM_AP="$RM_AP_ROOT/ap_${SPLIT}_realsense.npy"
+  RR_AP="$RR_AP_ROOT/ap_${SPLIT}_realsense.npy"
   python -m diagnostics.candidate_conflict.analyze \
     --graph-root "$OUT/$SPLIT/graph" \
     --labels-root "$OUT/$SPLIT/labels" \
