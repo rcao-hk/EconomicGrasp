@@ -168,7 +168,7 @@ class APTests(unittest.TestCase):
 
 class CLITests(unittest.TestCase):
     def test_cli_help(self):
-        for module in ("build", "label", "analyze"):
+        for module in ("build", "label", "analyze", "combine"):
             result = subprocess.run(
                 [sys.executable, "-m", f"diagnostics.candidate_conflict.{module}", "--help"],
                 cwd=ROOT, capture_output=True, text=True, timeout=30,
