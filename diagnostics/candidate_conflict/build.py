@@ -183,9 +183,11 @@ def main():
     protocol_sha = digest(protocol)
     old_manifest = None
     if manifest_path.exists():
-        old_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        old_manifest = load_verified_manifest(manifest_path)
         if old_manifest.get("protocol_sha256") != protocol_sha:
             raise RuntimeError("Resume graph manifest protocol differs; use a new output directory")
+        if set(old_manifest.get("methods", {})) != set(methods):
+            raise RuntimeError("Resume graph manifest method set differs")
 
     records = {name: [] for name in methods}
     if old_manifest:
