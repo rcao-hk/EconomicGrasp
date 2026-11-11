@@ -20,6 +20,17 @@ SPLITS = {
 }
 
 
+def load_verified_manifest(path: Path) -> dict:
+    obj = json.loads(path.read_text(encoding="utf-8"))
+    actual = obj.pop("manifest_sha256", None)
+    if actual is None or digest(obj) != actual:
+        raise ValueError("Graph manifest fingerprint mismatch")
+    obj["manifest_sha256"] = actual
+    if obj.get("schema") != SCHEMA:
+        raise ValueError("Wrong graph manifest schema")
+    return obj
+
+
 def parse_named(values, field):
     out = {}
     for item in values or []:
