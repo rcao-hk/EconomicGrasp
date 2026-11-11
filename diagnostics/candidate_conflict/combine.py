@@ -112,9 +112,11 @@ def main():
             for key in ("nodes", "edges", "components", "native_survivors")
         }
         selection_keys = (
-            "suppressed", "suppressed_q_better", "component_exact_nodes",
-            "component_total_nodes", "component_exact_components",
-            "component_fallback_components",
+            "suppressed", "suppressed_q_better", "suppressed_q_tied",
+            "suppressed_q_worse", "native_selected_q_sum",
+            "quality_nms_selected_q_sum", "component_selected_q_sum",
+            "component_exact_nodes", "component_total_nodes",
+            "component_exact_components", "component_fallback_components",
         )
         selection = {
             key: int(sum(summaries[split]["methods"][method]["selection_totals"][key]
@@ -199,14 +201,15 @@ def main():
                 f"[{boot['ci95'][0]:.4f}, {boot['ci95'][1]:.4f}] |"
             )
     lines += ["", "## Candidate graph and suppression totals", "",
-              "| Method | Nodes | NMS edges | Components | Native survivors | Suppressed Q-better | Exact component coverage |",
+              "| Method | Nodes | NMS edges | Components | Native survivors | Q-better / tied / worse suppressed | Exact component coverage |",
               "|---|---:|---:|---:|---:|---:|---:|"]
     for method, result in method_results.items():
         g = result["graph_totals"]
         sel = result["selection_totals"]
         lines.append(
             f"| {method} | {g['nodes']} | {g['edges']} | {g['components']} | "
-            f"{g['native_survivors']} | {sel['suppressed_q_better']} | "
+            f"{g['native_survivors']} | {sel['suppressed_q_better']} / "
+            f"{sel['suppressed_q_tied']} / {sel['suppressed_q_worse']} | "
             f"{sel['component_exact_node_coverage']:.3f} |"
         )
     lines += ["", "## Interpretation limits", "",
