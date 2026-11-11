@@ -233,8 +233,10 @@ def main():
             raise RuntimeError("Formal analysis requires complete 100% graph and label manifests")
     if not a.skip_official_parity and not gm.get("complete"):
         raise RuntimeError("Official AP parity cannot be skipped for a formal complete run")
-    if a.max_exact_component_nodes < 1:
-        raise ValueError("--max-exact-component-nodes must be positive")
+    if a.max_exact_component_nodes < 1 or a.bootstrap < 1:
+        raise ValueError("--max-exact-component-nodes and --bootstrap must be positive")
+    if set(lm.get("methods", [])) != set(gm["methods"]):
+        raise ValueError("Graph and label method sets differ")
 
     ap_paths = {}
     for item in a.official_ap:
@@ -257,6 +259,8 @@ def main():
 
     summary = {
         "schema": SCHEMA,
+        "analysis_script_sha256": sha256_file(Path(__file__)),
+        "core_source_sha256": sha256_file(Path(__file__).with_name("core.py")),
         "split": gm["split"],
         "camera": gm["camera"],
         "num_frames": len(next(iter(gm["methods"].values()))["entries"]),
@@ -402,6 +406,7 @@ def main():
             "mean_abs": float(np.mean(parity_errors)) if parity_errors else None,
             "tolerance": float(a.ap_tolerance),
             "official_ap_path": str(official_path) if official_path else None,
+            "official_ap_sha256": sha256_file(official_path) if official_path is not None else None,
         }
         method_summary = {
             "num_frames": len(entries),
