@@ -164,6 +164,8 @@ def main():
     rot_rad = np.deg2rad(a.rotation_thresh_deg)
     protocol = {
         "schema": SCHEMA,
+        "builder_source_sha256": sha256_file(Path(__file__)),
+        "core_source_sha256": sha256_file(Path(__file__).with_name("core.py")),
         "split": a.split,
         "camera": a.camera,
         "input_stage": a.input_stage,
@@ -213,6 +215,9 @@ def main():
             raise RuntimeError(f"{method}: graph count {len(records[method])} != requested {len(frames)}")
         for rec in records[method]:
             graph_file = out_root / rec["graph_path"]
+            source_file = Path(rec["source_path"])
+            if not source_file.is_file() or sha256_file(source_file) != rec["source_sha256"]:
+                raise RuntimeError(f"Source candidate dump changed/missing: {source_file}")
             if not graph_file.is_file() or sha256_file(graph_file) != rec["graph_sha256"]:
                 raise RuntimeError(f"Graph artifact missing/corrupt: {graph_file}")
 
