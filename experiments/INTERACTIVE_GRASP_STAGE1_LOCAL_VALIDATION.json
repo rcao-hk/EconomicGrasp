@@ -1,0 +1,94 @@
+{
+  "date": "2026-11-13",
+  "base_main": "7a956d37aaa427a32e598f21fdc6b910ed3c2704",
+  "branch": "exp/interactive-grasp-stage1",
+  "environment": {
+    "python": "3.13.5",
+    "torch": "2.10.0+cpu",
+    "cuda_available": false
+  },
+  "checks": {
+    "unittest": "PASS: 31 tests",
+    "unittest_command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m unittest discover -s tests -p 'test_interactive_stage1*.py' -v",
+    "compileall": "PASS",
+    "bash_syntax": "PASS"
+  },
+  "test_log_sha256": "1bdf65459d68b462136ccfbdf52bb96f252892736bf63c9faa6966759d82c945",
+  "real_checkpoint_cuda_smoke": false,
+  "real_dataset_cad_smoke": false,
+  "server_training_or_ap": false,
+  "notes": [
+    "CPU tests include synthetic native interfaces, four-variant training, exact epoch-boundary resume and fixed physical-action dump checks.",
+    "Historical server runtime adapter may still be required; no permissive checkpoint loading."
+  ],
+  "files": {
+    "configs/interactive_stage1/source_template.json": {
+      "sha256": "546fe80d78e3c9497637fecaa7f542690c3a916e77b90f5db0d8fc79e661cd71",
+      "git_blob_sha1": "2cc30934e723b94f89b672a84d12640f99adbbf2"
+    },
+    "experiments/INTERACTIVE_GRASP_STAGE1_CODEX.md": {
+      "sha256": "86f6043861b158fa9a5142b26133a0ab16938fbfe39104137ec54283721552b5",
+      "git_blob_sha1": "05f16370223d3c248dc479494c45d1d18e50c4bc"
+    },
+    "interactive_grasp/__init__.py": {
+      "sha256": "a780c273ec4f10ab6437d1f9593c69ac2f54d8816e28937fa4ff52ea88e8b983",
+      "git_blob_sha1": "739982fb95766fdbba8347decd3da40f813ac2b1"
+    },
+    "interactive_grasp/analyze.py": {
+      "sha256": "7611505f69a41dcb5fb29e12e30aaea02a71016cfc9a9127a4015a15409d24cf",
+      "git_blob_sha1": "a238e152201b7479caeed78b61ca73ea80df0fa8"
+    },
+    "interactive_grasp/capture.py": {
+      "sha256": "d99390e7ed993a03ec3d7fd88e5cd01390f5561c673e2f9c6b7ae360a528bb23",
+      "git_blob_sha1": "696d431d81b2d8198d035723855ec15b865888ec"
+    },
+    "interactive_grasp/cli.py": {
+      "sha256": "6669d26ba284e617b69b6d125f35bc8a002c366d78b85073646f97927423c0a7",
+      "git_blob_sha1": "ce5d764926e31cb61e22d4c66ac7416354c1a8d3"
+    },
+    "interactive_grasp/contracts.py": {
+      "sha256": "e3a67f654533c8266a2ec3cb12d97811bfc1a8868593c001264f81b2a9a7a79a",
+      "git_blob_sha1": "3114ada53d1e30298d6bec7724053923cebbf322"
+    },
+    "interactive_grasp/data.py": {
+      "sha256": "a9681977fda14b1c357877a57c74d77467c5a623576e01058f15ff84507b6fcf",
+      "git_blob_sha1": "eafd6e2b94d004e69938a98dc0dc9d28de9ea78f"
+    },
+    "interactive_grasp/export.py": {
+      "sha256": "7d6f323d57fd169c73a81363842b0ffb3353390e05190acd203f5bfb3e3d821d",
+      "git_blob_sha1": "a6d0d85cd9940e3c7a865c3e8e3bf09186bda9a5"
+    },
+    "interactive_grasp/infer.py": {
+      "sha256": "9a61b830d4078f1280ede0516887d39dd776a8d1f01c48b30978c185a26950cd",
+      "git_blob_sha1": "39e7d59cef519674eb4a2261e1432160bd2e6442"
+    },
+    "interactive_grasp/model.py": {
+      "sha256": "47403a5884ed3e5fe20a494a2e07afe97b2cf7581345ca7b4f6901c02ae61752",
+      "git_blob_sha1": "a0b8bafcfecb69a01d2e5a46430a6c5ed1eb956c"
+    },
+    "interactive_grasp/native.py": {
+      "sha256": "36182551583dc015786b563c804f2ebb8157ebd067cd993224aaf57e6d7925f8",
+      "git_blob_sha1": "3df73b18d3e583c0e284369c61822fd1804728fe"
+    },
+    "interactive_grasp/objectives.py": {
+      "sha256": "19fd4bfa46c1fc590c54c21edc429658fad33e17b01ece0a33c0b4c99bef88ba",
+      "git_blob_sha1": "0ea082b29cde35a959ac1375b141bdef0fd8f759"
+    },
+    "interactive_grasp/train.py": {
+      "sha256": "f0fe63fee94de4b46aa6d11bfa06c6de5e3a83af65bdc6513faf4facb66e1e45",
+      "git_blob_sha1": "0e13bd460fa412c1878fa642bdf4bb40742b3f8c"
+    },
+    "scripts/interactive_stage1/run.sh": {
+      "sha256": "68bac53a0a1502e6bd412f66022c951b77b8f1b9dce8b977cec4322a35c11d14",
+      "git_blob_sha1": "d3e7cb5c9ed257fd22d6c361e145a9afb5654034"
+    },
+    "tests/test_interactive_stage1.py": {
+      "sha256": "25c8e80b7baaba7a00af258ca29db43e2bc4bb0c30b130439a1e829f6772e18c",
+      "git_blob_sha1": "6b3a68772fc2d28ef6e929c0c15c9fed331d1478"
+    },
+    "tests/test_interactive_stage1_pipeline.py": {
+      "sha256": "dbfcba398445986c5d5de0d78aea328388787c938eec9b80a20d1be0d51f525b",
+      "git_blob_sha1": "19367af097e9da0c62e70091137c6bfb25ebecf3"
+    }
+  }
+}
