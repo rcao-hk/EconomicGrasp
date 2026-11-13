@@ -1,0 +1,1 @@
+"""Read-only Stage-1 follow-up diagnostics. Does not alter frozen model/source."""
