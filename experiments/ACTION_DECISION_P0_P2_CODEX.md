@@ -5,7 +5,7 @@
 
 ## 0. 为什么不是立即训练 Graph Network？
 
-2026-11-12 的全量 candidate-conflict 报告显示，MM 原生 Mean AP=51.902%，仅使用测试场景真实质量 \`Q\` 的 NMS＋后排序可达83.029%。但这是离线 **known-quality greedy selection**，不是可部署模型，也不是严格AP全局上界；与此同时现有固定连通分量人数的 set oracle 只在约20.6%的节点上执行精确求解。
+2026-11-12 的全量 candidate-conflict 报告显示，MM 原生 Mean AP=51.902%，仅使用测试场景真实质量 `Q` 的 NMS＋后排序可达83.029%。但这是离线 **known-quality greedy selection**，不是可部署模型，也不是严格AP全局上界；与此同时现有固定连通分量人数的 set oracle 只在约20.6%的节点上执行精确求解。
 
 当前需要区分三个竞争假设：
 
