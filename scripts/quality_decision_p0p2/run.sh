@@ -61,15 +61,23 @@ p1-fit)
   done
   ;;
 infer)
-  : "${BOUND_CONFIG:?}" "${DATASET_ROOT:?}" "${PROBE_WEIGHTS:?}"
+  : "${BOUND_CONFIG:?}" "${DATASET_ROOT:?}"
   LABEL="${LABEL:-probe}"
   INTERVAL="${INTERVAL:-10}"
+  extra=()
+  policies=both,depth_only,rank_only
+  if [[ "$LABEL" == native ]]; then
+    policies=native
+  else
+    : "${PROBE_WEIGHTS:?Set scorer checkpoint unless LABEL=native}"
+    extra+=(--weights "$PROBE_WEIGHTS")
+  fi
   for SPLIT in ${SPLITS:-test_seen test_similar test_novel}; do
     python -m diagnostics.quality_decision.infer infer \
-      --config "$BOUND_CONFIG" --weights "$PROBE_WEIGHTS" \
+      --config "$BOUND_CONFIG" "${extra[@]}" \
       --dataset-root "$DATASET_ROOT" --gntrans-root "${GNTRANS_RGB_ROOT:-}" \
       --split "$SPLIT" --sample-interval "$INTERVAL" \
-      --policies both,depth_only,rank_only --device "$DEVICE" \
+      --policies "$policies" --device "$DEVICE" \
       --output "$RUN_ROOT/eval/$LABEL/$SPLIT"
   done
   ;;
