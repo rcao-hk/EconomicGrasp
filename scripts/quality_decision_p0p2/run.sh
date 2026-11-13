@@ -91,6 +91,7 @@ p2)
   python -m diagnostics.quality_decision.global_budget \
     --graph-root "$GRAPH_ROOT" --labels-root "$LABELS_ROOT" \
     --method "$METHOD" --solver "$MODE" \
+    --reference-frame-ap "$P2_REFERENCE_FRAME_AP" \
     --max-solver-nodes "${MAX_SOLVER_NODES:-96}" \
     --solver-seconds "${SOLVER_SECONDS:-10}" \
     --frames-per-scene "${FRAMES_PER_SCENE:-2}" \
