@@ -30,7 +30,7 @@ p1-mine)
     --config "$BOUND_CONFIG" --dataset-root "$DATASET_ROOT" \
     --gntrans-root "$GNTRANS_RGB_ROOT" --output "$RUN_ROOT/p1/cache" \
     --device "$DEVICE" --seed 20261113 --frames-per-scene 4 \
-    --scene-start 0 --scene-end 90 \
+    --scene-start 0 --scene-end 100 \
     --shard-count "${SHARD_COUNT:-1}" --shard-index "${SHARD_INDEX:-0}" \
     ${RESUME:+--resume}
   ;;
@@ -41,7 +41,7 @@ p1-index)
     args+=(--shard-index "$f")
   done
   python -m diagnostics.quality_decision.index "${args[@]}" \
-    --min-scenes 90 --output "$RUN_ROOT/p1/cache/index_merged.json"
+    --min-scenes 100 --output "$RUN_ROOT/p1/cache/index_merged.json"
   ;;
 p1-fit)
   index="$RUN_ROOT/p1/cache/index_merged.json"
