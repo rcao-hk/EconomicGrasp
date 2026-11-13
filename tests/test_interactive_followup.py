@@ -24,6 +24,17 @@ class PureTests(unittest.TestCase):
         for bad in ('0.1,1','0,1,0.2','0,0,1','0,-1,1','0,1.01','0,nan,1'):
             with self.assertRaises(ValueError):parse_alphas(bad)
 
+    def test_extreme_logit_stability_and_empty_sensor_keep(self):
+        with np.errstate(over='raise',invalid='raise'):
+            got=mix_logits(np.array([1e3,-1e3]),np.array([1e3,-1e3]),1)
+        self.assertTrue(np.isfinite(got).all())
+        self.assertAlmostEqual(got[0],1.)
+        self.assertLess(got[1],1e-200)
+        stats=selection_stats(np.array([.8,.2]),np.array([.7,.3]),np.array([-1,-1]),
+                              np.array([False,False]),np.array([False,False]))
+        self.assertIsNone(stats['top1_changed'])
+        self.assertIsNone(stats['top50_overlap'])
+
     def test_pairs_exclude_ties_and_include_repair_damage(self):
         q=np.array([6,0,4,4]);b=np.array([.1,.9,.4,.5]);s=np.array([.9,.1,.4,.6])
         p=quality_pairs(b,s,q,np.ones(4,bool))
