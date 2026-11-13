@@ -235,6 +235,15 @@ def main():
     rows=[]
     scene_values=defaultdict(lambda:defaultdict(list))
     for method in methods:
+        official_path=gm["methods"][method].get("official_ap_path")
+        if not official_path:
+            raise RuntimeError(f"{method}: missing official AP reference for replay parity")
+        official_path=Path(official_path)
+        if not official_path.is_file(): raise FileNotFoundError(official_path)
+        official=np.asarray(np.load(official_path,allow_pickle=False),dtype=np.float64)
+        if official.shape!=(30,256,50,6) or not np.isfinite(official).all():
+            raise RuntimeError(f"{method}: wrong official AP array shape")
+        first_scene=int(min(e["scene"] for e in gm["methods"][method]["entries"]))
         scenes=sorted(set(r["scene"] for r in gm["methods"][method]["entries"]))
         if args.max_scenes: scenes=scenes[:args.max_scenes]
         for e in gm["methods"][method]["entries"]:
@@ -246,6 +255,12 @@ def main():
                 Path(args.graph_root)/e["graph_path"],e["graph_sha256"],
                 labels,args.time_limit,args.workers,args.max_candidates,
                 args.budget,args.per_object)
+            err=float(np.max(np.abs(native_ap-official[scene-first_scene,anno])))
+            if err>1e-5:
+                raise RuntimeError(
+                    f"{method} scene={scene} anno={anno}: official native AP replay "
+                    f"mismatch {err:.8g} (tol 1e-5); abandon P2 oracle interpretation")
+            record["native_ap_parity_max_abs"]=err
             row=dict(method=method,scene=scene,anno=anno,**{
                 k:v for k,v in record.items() if k!="solver"},**record["solver"])
             rows.append(row)
@@ -263,6 +278,9 @@ def main():
             solver_status={x:sum(r["status"]==x for r in subset) for x in sorted({r["status"] for r in subset})},
             full_pool_optimal_fraction=float(np.mean([r["certifies_full_pool_sum_q"] for r in subset])),
             restricted_fraction=float(np.mean([r["restricted"] for r in subset])),
+            native_ap_parity_max_abs=max(r["native_ap_parity_max_abs"] for r in subset),
+            official_ap_sha256=sha256_file(
+                gm["methods"][m]["official_ap_path"]),
             delta_vs_qgreedy=scene_cluster_bootstrap(values,args.bootstrap,0),
             mean_ap={k:float(np.mean([r[k] for r in subset])) for k in
                      ("native_ap","quality_greedy_ap","budget_greedy_ap","optimized_ap")},
