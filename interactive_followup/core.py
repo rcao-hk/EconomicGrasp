@@ -23,7 +23,12 @@ def mix_logits(base_z, trained_z, alpha, exact_base_probability=None):
             raise ValueError('Invalid exact base probabilities')
         return p.copy()
     v=z0+alpha*(z-z0)
-    return np.where(v>=0,1/(1+np.exp(-np.minimum(v,700))),np.exp(np.maximum(v,-700))/(1+np.exp(np.maximum(v,-700))))
+    out=np.empty_like(v,dtype=float)
+    positive=v>=0
+    out[positive]=1/(1+np.exp(-np.minimum(v[positive],700)))
+    exp=np.exp(np.maximum(v[~positive],-700))
+    out[~positive]=exp/(1+exp)
+    return out
 
 
 def quality_pairs(base_scores,new_scores,quality,mask):
@@ -42,8 +47,15 @@ def selection_stats(base,new,quality,label_mask,keep,ks=(1,5,10,50)):
     """Full-pool ranking/membership measured separately from sparse Q supervision."""
     b=np.asarray(base).reshape(-1);s=np.asarray(new).reshape(-1);q=np.asarray(quality).reshape(-1)
     lab=np.asarray(label_mask,dtype=bool).reshape(-1);good=np.asarray(keep,dtype=bool).reshape(-1)
-    if not(b.shape==s.shape==q.shape==lab.shape==good.shape) or not good.any():
-        raise ValueError('No candidates after sensor prefilter or shape mismatch')
+    if not(b.shape==s.shape==q.shape==lab.shape==good.shape):
+        raise ValueError('Selection input shape mismatch')
+    if not good.any():
+        out=dict(top1_changed=None,top1_original_labelled=None,top1_new_labelled=None,
+                 top1_original_q=None,top1_new_q=None)
+        for k in ks:
+            out[f'top{k}_overlap']=None
+            out[f'top{k}_labelled_coverage']=None
+        return out
     ids=np.flatnonzero(good)
     old=ids[np.argsort(-b[ids],kind='stable')];now=ids[np.argsort(-s[ids],kind='stable')]
     out=dict(top1_changed=bool(old[0]!=now[0]),top1_original_labelled=bool(lab[old[0]]),
