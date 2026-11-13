@@ -208,6 +208,7 @@ export GRAPH_ROOT=/ABS/candidate_conflict/test_novel/graph
 export LABELS_ROOT=/ABS/candidate_conflict/test_novel/labels
 export SPLIT_NAME=test_novel
 export METHOD=MM
+export P2_REFERENCE_FRAME_AP=/ABS/candidate_conflict/test_novel/analysis/MM/frame_ap.npz
 
 # Per-split pilot: two pre-fixed frames per scene, 60 frames.
 P2_SOLVER=off FRAMES_PER_SCENE=2 bash scripts/quality_decision_p0p2/run.sh p2
