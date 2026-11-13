@@ -104,6 +104,20 @@ def run_capture(args):
         raise ValueError("Requires GVAR reader, not Point-only scorer")
     seed=int(idx["contract"]["seed"])
     rows=idx["entries"]
+    if args.scene_ids:
+        if not args.smoke:raise ValueError("--scene-ids only permitted for a smoke/partial capture")
+        scenes={int(x) for x in args.scene_ids.split(",") if x}
+        if not scenes or any(x<0 or x>=100 for x in scenes):
+            raise ValueError("Invalid train-domain smoke scene IDs")
+        rows=[e for e in rows if int(e["row"]["scene"]) in scenes]
+    if args.max_per_scene:
+        if not args.smoke:raise ValueError("--max-per-scene only permitted for smoke")
+        counts={};limited=[]
+        for e in rows:
+            key=(e["row"]["domain"],e["row"]["scene"])
+            if counts.get(key,0)>=args.max_per_scene:continue
+            counts[key]=counts.get(key,0)+1;limited.append(e)
+        rows=limited
     if not 0<=args.shard_index<args.num_shards:
         raise ValueError("Invalid shard identity")
     rows=[e for i,e in enumerate(rows) if i%args.num_shards==args.shard_index]
@@ -210,6 +224,8 @@ def main():
     c.add_argument("--shard-index",type=int,default=0)
     c.add_argument("--dtype",choices=("float16","float32"),default="float16")
     c.add_argument("--limit",type=int,default=0)
+    c.add_argument("--scene-ids",default="")
+    c.add_argument("--max-per-scene",type=int,default=0)
     c.add_argument("--smoke",action="store_true")
     c.set_defaults(func=run_capture)
     i=sub.add_parser("index")
