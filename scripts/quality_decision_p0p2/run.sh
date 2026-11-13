@@ -85,6 +85,7 @@ eval)
 p2)
   : "${GRAPH_ROOT:?Graph root for one full GraspNet split}"
   : "${LABELS_ROOT:?Exact-action label root for the same split}"
+  : "${P2_REFERENCE_FRAME_AP:?Accepted prior analysis frame_ap.npz required}"
   METHOD="${METHOD:-MM}"
   MODE="${P2_SOLVER:-off}"
   python -m diagnostics.quality_decision.global_budget \
