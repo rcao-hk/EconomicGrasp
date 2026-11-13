@@ -57,6 +57,13 @@ def merge(paths,output,min_scenes=100):
     scenes={r[1] for r in byframe}
     if len(scenes)<min_scenes:
         raise ValueError(f"Insufficient scene coverage: {len(scenes)} < {min_scenes}")
+    for domain in ("original","gntrans"):
+        for scene in range(100):
+            matched=[key for key in byframe if key[0]==domain and key[1]==scene]
+            if len(matched)!=4:
+                raise ValueError(
+                    f"P1 complete experiment requires four matched frames per "
+                    f"domain/scene: {domain}/{scene} has {len(matched)}")
     entries.sort(key=lambda e:(e["row"]["domain"],e["row"]["scene"],
                                e["row"]["anno"],e["strategy"]))
     data=dict(schema=SCHEMA,kind="decision-cache-index",
