@@ -185,7 +185,8 @@ def analyze_frame(graph, labels, max_solver_nodes=96, solver="off", solver_secon
     ap_native=official_ap_matrix(g,obj,bad,friction,native,g[:,0])
     ap_qnms=official_ap_matrix(g,obj,bad,friction,qnms,priority)
     ap_greedy=ap_for_ranked(g,obj,bad,friction,global_greedy)
-    result=dict(native_ap_percent=float(100*ap_native.mean()),
+    result=dict(_matrix_native=ap_native, _matrix_quality_nms=ap_qnms,
+                native_ap_percent=float(100*ap_native.mean()),
                 quality_nms_ap_percent=float(100*ap_qnms.mean()),
                 global_greedy_ap_percent=float(100*ap_greedy.mean()),
                 native_survivors=len(native),q_nms_survivors=len(qnms),
@@ -227,6 +228,9 @@ def main():
     p.add_argument("--bootstrap",type=int,default=5000)
     p.add_argument("--seed",type=int,default=20261113)
     p.add_argument("--allow-partial",action="store_true")
+    p.add_argument("--reference-frame-ap",required=False,
+                   help="Accepted prior analysis METHOD/frame_ap.npz for per-frame 50x6 parity")
+    p.add_argument("--ap-parity-tol",type=float,default=1e-6)
     a=p.parse_args()
     graph_root=Path(a.graph_root);labels_root=Path(a.labels_root)
     gm=load_graph(graph_root/"graph_manifest.json")
@@ -239,6 +243,8 @@ def main():
         raise ValueError("Method not covered by labels")
     if a.frames_per_scene<0 or a.max_solver_nodes<1 or a.bootstrap<1:
         raise ValueError("Invalid constraints")
+    if not a.allow_partial and not a.reference_frame_ap:
+        raise ValueError("Formal P2 requires accepted reference frame_ap.npz for native/Q-greedy AP parity")
     frames=sorted(gm["methods"][a.method]["entries"],key=lambda x:(x["scene"],x["anno"]))
     if a.frames_per_scene:
         chosen={}
@@ -255,7 +261,16 @@ def main():
     if root.exists() and any(root.iterdir()):
         raise FileExistsError("Use new P2 output directory")
     root.mkdir(parents=True,exist_ok=True)
+    reference=None
+    if a.reference_frame_ap:
+        with np.load(a.reference_frame_ap,allow_pickle=False) as z:
+            reference={k:z[k] for k in ("native","quality_nms_quality_rank")}
+        for name,v in reference.items():
+            if v.shape!=(30,256,50,6) and v.shape!=(30*256,50,6):
+                raise ValueError(f"Accepted reference AP must be [7680,50,6] or [30,256,50,6]: {name} {v.shape}")
+            reference[name]=v.reshape(30*256,50,6)
     rows=[]
+    parity_max=0.
     for k,entry in enumerate(frames,1):
         path=graph_root/entry["graph_path"]
         if sha256_file(path)!=entry["graph_sha256"]:
@@ -267,6 +282,17 @@ def main():
         labels=_load_label(labels_root,labelrec,gm["manifest_sha256"])
         result=analyze_frame(graph,labels,max_solver_nodes=a.max_solver_nodes,
                              solver=a.solver,solver_seconds=a.solver_seconds)
+        native_matrix=result.pop("_matrix_native")
+        quality_matrix=result.pop("_matrix_quality_nms")
+        if reference is not None:
+            scene_base={"test_seen":100,"test_similar":130,"test_novel":160}[gm["split"]]
+            frame_ix=(int(entry["scene"])-scene_base)*256+int(entry["anno"])
+            for name,actual in (("native",native_matrix),
+                                ("quality_nms_quality_rank",quality_matrix)):
+                error=float(np.max(np.abs(actual-reference[name][frame_ix])))
+                parity_max=max(parity_max,error)
+                if error>a.ap_parity_tol:
+                    raise RuntimeError(f"P2 per-frame AP parity failed: {entry['frame_key']}/{name} {error:g}")
         rows.append(dict(scene=int(entry["scene"]),anno=int(entry["anno"]),**result))
         if k%32==0:print(f"[P2] {k}/{len(frames)}",flush=True)
     metric_keys=[k for k in rows[0] if k.endswith("_ap_percent")]
@@ -285,6 +311,8 @@ def main():
                 scene_count=len(set(r["scene"] for r in rows)),
                 frames_per_scene=a.frames_per_scene,solver=a.solver,
                 max_solver_nodes=a.max_solver_nodes,solver_seconds=a.solver_seconds,
+                accepted_frame_ap_sha256=sha256_file(a.reference_frame_ap) if a.reference_frame_ap else None,
+                ap_parity_max_abs=parity_max if reference is not None else None,
                 metric_by_scene=summary,
                 caveat="All Q labels from held-out tests are diagnostic-only. "
                        "CP-SAT exactness is restricted to capped candidate pool and solver OPTIMAL status. "
