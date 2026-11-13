@@ -22,7 +22,7 @@ def load_part(path):
     return data
 
 
-def merge(paths,output,min_scenes=90):
+def merge(paths,output,min_scenes=100):
     if not paths:raise ValueError("No shard indexes")
     shards=[load_part(path) for path in paths]
     reference=shards[0]
@@ -79,7 +79,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--shard-index",required=True,action="append")
     p.add_argument("--output",required=True)
-    p.add_argument("--min-scenes",type=int,default=90)
+    p.add_argument("--min-scenes",type=int,default=100)
     a=p.parse_args()
     data=merge(a.shard_index,a.output,a.min_scenes)
     print(f"Merged {len(data['entries'])} validated P1 arms across {data['unique_scenes']} scenes")
