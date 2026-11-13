@@ -162,6 +162,10 @@ export INTERVAL=10
 
 bash scripts/quality_decision_p0p2/run.sh infer
 bash scripts/quality_decision_p0p2/run.sh eval
+
+# Independently re-evaluate the same frozen native base, no probe weights.
+LABEL=native bash scripts/quality_decision_p0p2/run.sh infer
+LABEL=native bash scripts/quality_decision_p0p2/run.sh eval
 ```
 
 For full **100%** GraspNet, set `INTERVAL=1` in a **new** `RUN_ROOT` (or use the Python module directly with a new output root), since results may not be overwritten or mixed. Each split must then have 7,680 frames and official AP array `(30,256,50,6)`.
