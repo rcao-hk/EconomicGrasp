@@ -160,8 +160,8 @@ def main():
     p.add_argument("--seed",type=int,default=20261113)
     p.add_argument("--frames-per-scene",type=int,default=4)
     p.add_argument("--scene-start",type=int,default=0)
-    p.add_argument("--scene-end",type=int,default=90,
-                   help="Default train probe 0..79 and validation probe 80..89")
+    p.add_argument("--scene-end",type=int,default=100,
+                   help="Mine 0..99, leaving 90..99 for probe confirmation without fit")
     p.add_argument("--shard-count",type=int,default=1)
     p.add_argument("--shard-index",type=int,default=0)
     p.add_argument("--resume",action="store_true")
