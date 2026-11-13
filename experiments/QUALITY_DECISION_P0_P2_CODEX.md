@@ -138,10 +138,10 @@ One-time confirmation after training:
 for STRATEGY in uniform decision; do
   for LOSS in mse rare; do
     python -m diagnostics.quality_decision.confirm \
-      --weights "$RUN_ROOT/p1/heads/\${STRATEGY}_\${LOSS}/best.pt" \
+      --weights "$RUN_ROOT/p1/heads/${STRATEGY}_${LOSS}/best.pt" \
       --index "$RUN_ROOT/p1/cache/index_merged.json" \
       --strategy "$STRATEGY" \
-      --output "$RUN_ROOT/p1_confirmation/\${STRATEGY}_\${LOSS}" \
+      --output "$RUN_ROOT/p1_confirmation/${STRATEGY}_${LOSS}" \
       --device "$DEVICE"
   done
 done
