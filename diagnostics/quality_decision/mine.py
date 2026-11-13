@@ -48,18 +48,17 @@ def choose_queries(snapshot, rt, row, seed, count=64):
         keep,suppressor,order=greedy_nms(filtered[:,0],edges)
         top=keep[:50]
         top_set=set(int(x) for x in top)
-        candidates=[]
-        # Include both high-priority survivors and nearby suppressed candidates.
-        for i in top:
-            candidates.append(int(qs[i]))
+        # Give genuinely suppressed alternatives first priority. Otherwise
+        # top-32 survivor sampling would exhaust the budget before observing a
+        # SINGLE conflict pair and could not test decision-aware learning.
         suppressed=np.flatnonzero(suppressor>=0)
         suppressed=sorted((int(i) for i in suppressed
                             if int(suppressor[i]) in top_set),
                           key=lambda i:-float(filtered[i,0]))
-        for i in suppressed:
-            candidates.append(int(qs[i]))
-        for i in order:
-            candidates.append(int(qs[i]))
+        candidates=([int(qs[i]) for i in suppressed[:16]]
+                    + [int(qs[i]) for i in top]
+                    + [int(qs[i]) for i in suppressed[16:]]
+                    + [int(qs[i]) for i in order])
     else:
         candidates=[]
     chosen=list(map(int,uniform[:32]))
@@ -88,7 +87,11 @@ def choose_queries(snapshot, rt, row, seed, count=64):
                native_nms_survivors=len(keep) if len(filtered) else 0,
                competition_selected=len(focused),
                unique_families_across_arms=len(np.union1d(uniform,decision)),
-               shared_first_32=len(set(map(int,uniform[:32])) & set(map(int,decision))))
+               shared_first_32=len(set(chosen) & set(map(int,decision))),
+               suppressed_queries_selected=len(
+                   set(focused) & set(int(qs[i]) for i in suppressed)) if len(filtered) else 0,
+               native_survivor_queries_selected=len(
+                   set(focused) & set(int(qs[i]) for i in top)) if len(filtered) else 0)
     return uniform,decision,audit
 
 
