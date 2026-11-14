@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -178,6 +179,7 @@ def _frame(args,rt,compiled,entry,root,contract,resume):
         return meta
     # Only newly selected action labels are expensive; an exact resume does
     # not re-run CAD/Dex-Net.
+    t0=time.perf_counter()
     if len(query_ids):
         labels=rt.label(row,label_input.astype(np.float64))
         count=np.asarray(labels["count"],dtype=np.int64)
@@ -229,6 +231,7 @@ def _frame(args,rt,compiled,entry,root,contract,resume):
         new_competition_q0_vs_positive=int(np.sum((pair_arr[:,2]==0)&(pair_arr[:,3]>0))),
         sampled_q0_by_stratum={name:int(np.sum(count[strata==name]==0)) for name in STRATA},
         sample_count_by_stratum={name:int(np.sum(strata==name)) for name in STRATA})
+    label_seconds=float(time.perf_counter()-t0)
     values=dict(query_ids=query_ids,physical_id=physical_ids(label_input),
                 grasps=np.asarray(label_input,dtype=np.float64),
                 source_score=np.asarray([score_by_query[int(q)] for q in query_ids]),
@@ -244,7 +247,8 @@ def _frame(args,rt,compiled,entry,root,contract,resume):
               source_pack_sha256=entry["sha256"],
               path=str(npz.resolve()),sha256=sha(npz),
               contract=frame_contract,contract_sha256=digest(frame_contract),
-              audit=audit,new_actions=len(query_ids))
+              audit=audit,new_actions=len(query_ids),
+              label_seconds=label_seconds)
     write_json(side,meta)
     return meta
 
@@ -355,7 +359,8 @@ def summarize(args):
             if not path_np.is_file() or sha(path_np)!=r["sha256"]:
                 raise ValueError(f"Missing/modified support-label frame: {path_np}")
             rows.append(dict(domain=row["domain"],scene=int(row["scene"]),anno=int(row["anno"]),
-                             new_actions=int(r["new_actions"]),**r["audit"]))
+                             new_actions=int(r["new_actions"]),
+                             label_seconds=float(r.get("label_seconds",0.)),**r["audit"]))
     expected=100*len(contract["domains"])*contract["frames_per_scene"]
     if not args.allow_partial and (len(rows)!=expected or len(manifests)!=shard_expected):
         raise ValueError(f"Expected all {expected} train-domain frames and {shard_expected} shards")
@@ -371,6 +376,7 @@ def summarize(args):
             missed_top50=sum(r["top50_n"]-r["top50_cached_n"] for r in part),
             missed_competitors=sum(r["competition_nodes_n"]-r["competition_cached_n"] for r in part),
             newly_labeled=sum(r["new_actions"] for r in part),
+            total_new_label_seconds=sum(r["label_seconds"] for r in part),
             new_high_score_q0=sum(r["sampled_high_score_q0_n"] for r in part),
             known_high_score_q0=sum(r["cached_high_score_q0_n"] for r in part),
             sampled_q0_collision=sum(r["sampled_q0_collision_n"] for r in part),
