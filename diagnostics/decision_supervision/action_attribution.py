@@ -113,14 +113,22 @@ def _frame_label(rt_eval, scene, anno, base, selected, output, contract, resume)
                                       physical_ids(base[indices]).astype(str))):
             raise RuntimeError(f"Cached label physical actions changed: {path}")
         return values,meta
-    result=rt_eval.evaluate(scene,anno,np.asarray(base[indices],dtype=np.float64))
-    values=dict(indices=indices,
-                physical_id=physical_ids(base[indices]),
-                assigned_obj=np.asarray(result.assigned_obj,dtype=np.int64),
-                collision_or_empty=np.asarray(result.collision_or_empty,dtype=np.uint8),
-                pure_collision=np.asarray(result.pure_collision,dtype=np.uint8),
-                empty=np.asarray(result.empty,dtype=np.uint8),
-                friction=np.asarray(result.friction,dtype=np.float64))
+    if len(indices):
+        result=rt_eval.evaluate(scene,anno,np.asarray(base[indices],dtype=np.float64))
+        values=dict(indices=indices,
+                    physical_id=physical_ids(base[indices]),
+                    assigned_obj=np.asarray(result.assigned_obj,dtype=np.int64),
+                    collision_or_empty=np.asarray(result.collision_or_empty,dtype=np.uint8),
+                    pure_collision=np.asarray(result.pure_collision,dtype=np.uint8),
+                    empty=np.asarray(result.empty,dtype=np.uint8),
+                    friction=np.asarray(result.friction,dtype=np.float64))
+    else:
+        values=dict(indices=indices,physical_id=np.empty(0,dtype="<U64"),
+                    assigned_obj=np.empty(0,dtype=np.int64),
+                    collision_or_empty=np.empty(0,dtype=np.uint8),
+                    pure_collision=np.empty(0,dtype=np.uint8),
+                    empty=np.empty(0,dtype=np.uint8),
+                    friction=np.empty(0,dtype=np.float64))
     for field in ("assigned_obj","collision_or_empty","friction"):
         if len(values[field]) != len(indices):
             raise ValueError(f"Evaluator returned incomplete {field} labels")
@@ -175,7 +183,10 @@ def analyze(args):
     source_sha={seed:{arm:dict(inference=info["manifest_sha256"],
                               official_ap=info["official_ap_sha256"])
                       for arm,info in arms.items()} for seed,arms in sources.items()}
-    out=Path(args.output);out.mkdir(parents=True,exist_ok=True)
+    out=Path(args.output)
+    if out.exists() and any(out.iterdir()) and not args.resume:
+        raise FileExistsError("Use a new empty P0 diagnostic directory or explicit --resume")
+    out.mkdir(parents=True,exist_ok=True)
     first=SPLITS[args.split]
     keys=[(scene,anno) for scene in range(first,first+30) for anno in range(0,256,10)]
     if args.limit:keys=keys[:args.limit]
@@ -209,8 +220,6 @@ def analyze(args):
             for arm in (args.left,args.right):
                 frame_inputs[(seed,arm)]=_dump(sources[seed][arm],key)
         base=common_bank(frame_inputs)
-        if not len(base):
-            raise RuntimeError(f"Unexpected empty candidate pool: scene {scene} frame {anno}")
         keep={}
         for label, g in frame_inputs.items():
             keep[label]=compiled_keep(g,compiled)
