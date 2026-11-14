@@ -182,6 +182,15 @@ def replay(base, scores_left, scores_right, keep_left, keep_right,
     a1 = ap_from_fixed_membership(fixed_rank, invalid, friction)  # No cap/NMS recomputation
     a2 = ap(kl, sr)         # Fix NMS survivors; reapply per-obj/global budgets
     a3 = ap(kr, sr)         # New NMS survivors, new rank
+    # Verify the explicit final-rank reconstruction independently for BOTH
+    # endpoint models; otherwise membership-set attribution is ill-defined.
+    for name, raw, from_set in (
+        ("left", a0, ap_from_fixed_membership(lfinal, invalid, friction)),
+        ("right", a3, ap_from_fixed_membership(rfinal, invalid, friction))
+    ):
+        error = float(np.max(np.abs(raw - from_set)))
+        if error > 1e-12:
+            raise RuntimeError(f"{name} final membership/rank replay mismatch {error:.9g}")
     for name, current, expected in (
         ("left", a0, official_left), ("right", a3, official_right)):
         if expected is not None:
