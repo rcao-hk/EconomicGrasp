@@ -210,3 +210,24 @@ POLICY=both bash scripts/decision_supervision/run.sh report
 保留：交叉审计矩阵、trace shards/每帧hash、固定plan及sampling audits、12头protocol/history/pairs_epoch/last.pt、完整官方AP与prefix指标、每seed/scene差值、因素主效应和交互报告。
 
 本实现已经在本地用**合成CPU数据**测试四臂训练、旧head兼容、交叉池评价、关系追踪接口、无重复pair与ties排除、阶段隔离和shell入口。真实117权重、扩展库、编译NMS及CAD标签验收仍需在上述运行环境中完成。不存在本轮新增真实AP数值。
+
+## 9. 四臂三seed结果之后的P0/P1诊断（2026-11-14）
+
+上一轮四臂三seed正式验收完成后，继续在**本分支**实现两项诊断，不修改原12头训练与官方AP结果。完整工作单参见：
+
+**[P0_ACTION_ATTRIBUTION_P1_SUPPORT_AUDIT_CODEX.md](P0_ACTION_ATTRIBUTION_P1_SUPPORT_AUDIT_CODEX.md)**
+
+- P0：对已经保存的rank_executed动作、官方AP和原生编译NMS重放，逐帧分解固定最终集合重排／每物体与全局预算重选／NMS存活集合替换；仅对所有比较评分头的compiled NMS survivor并集进行精确CAD标注，并严格核对两端已有官方AP。
+- P1：在完整1024个native queries中审计旧U∪D的sensor-valid、native top50和冲突邻居支持域；训练场景固定采样，按有限预算新标注native实际执行depth动作，不训练新模型，不将抽样q=0发现率当完整总体发生率。
+
+新增入口：
+```bash
+bash scripts/decision_supervision/run.sh check
+# 设置RUNS_JSON/DATASET_ROOT，先smoke后正式执行
+bash scripts/decision_supervision/run.sh p0-attribution
+# 设置ACCEPTED_PLAN/BOUND_CONFIG/GNTRANS_RGB_ROOT后执行
+bash scripts/decision_supervision/run.sh p1-support-mine
+bash scripts/decision_supervision/run.sh p1-support-summarize
+```
+
+**状态：**GitHub脚本已提交，真实117/119 CUDA、CAD和逐帧官方AP验收尚未在本次会话执行。不得把上一轮已验收结果当成新诊断结果。
