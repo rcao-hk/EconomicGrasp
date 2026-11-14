@@ -38,6 +38,8 @@ def common_bank(runs):
 def compiled_keep(grasps, run_nms):
     """Use the installed compiled NMS, tagging the otherwise unused object id."""
     g = np.asarray(grasps, dtype=np.float64)
+    if g.shape == (0, 17):
+        return np.empty(0, dtype=np.int64)
     tagged = g.copy()
     tagged[:, 16] = np.arange(len(g))
     kept = np.asarray(run_nms(tagged.copy()), dtype=np.float64)
