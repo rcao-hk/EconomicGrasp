@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -113,6 +114,7 @@ def _frame_label(rt_eval, scene, anno, base, selected, output, contract, resume)
                                       physical_ids(base[indices]).astype(str))):
             raise RuntimeError(f"Cached label physical actions changed: {path}")
         return values,meta
+    t0=time.perf_counter()
     if len(indices):
         result=rt_eval.evaluate(scene,anno,np.asarray(base[indices],dtype=np.float64))
         values=dict(indices=indices,
@@ -134,8 +136,10 @@ def _frame_label(rt_eval, scene, anno, base, selected, output, contract, resume)
             raise ValueError(f"Evaluator returned incomplete {field} labels")
     if not np.isfinite(values["friction"]).all():
         raise ValueError("Exact evaluator returned nonfinite friction")
+    elapsed=time.perf_counter()-t0
     write_npz(path,values)
     meta=dict(schema=SCHEMA,kind="P0_action_labels",scene=scene,anno=anno,
+              label_seconds=float(elapsed),
               path=str(path.resolve()),sha256=sha(path),
               contract=contract,contract_sha256=digest(contract),
               num_labeled=len(indices))
