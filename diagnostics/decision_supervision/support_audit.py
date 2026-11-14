@@ -377,15 +377,33 @@ def summarize(args):
             sampled_q0_empty=sum(r["sampled_q0_empty_n"] for r in part),
             sampled_q0_other=sum(r["sampled_q0_other_n"] for r in part),
             paired_competition_edges=sum(r["new_competition_pairs_with_both_q"] for r in part),
+            paired_distinct_quality=sum(r["new_competition_pairs_quality_distinct"] for r in part),
+            paired_new_zero_vs_positive_leader=sum(r["new_competition_q0_vs_positive"] for r in part),
             q0_new_sampled=sum(r["sampled_q0_n"] for r in part),
             by_stratum={name:dict(
                 labeled=sum(r["sample_count_by_stratum"][name] for r in part),
                 q0=sum(r["sampled_q0_by_stratum"][name] for r in part))
                 for name in STRATA})
+    # Fixed scene groups: scorer training / scorer validation / previously
+    # inspected audit. All are backbone-train scenes, not an independent test.
+    scene_group_bounds={"probe_fit_scenes_0_79":(0,80),
+                        "probe_validation_scenes_80_89":(80,90),
+                        "reused_audit_scenes_90_99":(90,100)}
+    by_scene_group={}
+    for name,(lo,hi) in scene_group_bounds.items():
+        part=[r for r in rows if lo <= r["scene"] < hi]
+        by_scene_group[name]=dict(
+            frames=len(part),new_labels=sum(r["new_actions"] for r in part),
+            missed_top50=sum(r["top50_n"]-r["top50_cached_n"] for r in part),
+            missed_conflict_neighbors=sum(r["competition_nodes_n"]-r["competition_cached_n"] for r in part),
+            new_high_score_zero_quality=sum(r["sampled_high_score_q0_n"] for r in part),
+            paired_distinct_quality=sum(r["new_competition_pairs_quality_distinct"] for r in part),
+            new_zero_vs_positive_leader=sum(r["new_competition_q0_vs_positive"] for r in part))
     summary=dict(schema=SCHEMA,kind="P1_support_summary",
                  complete=(len(rows)==expected and len(manifests)==shard_expected and not args.allow_partial),
                  frames=len(rows),expected_frames=expected,new_labels=total_new,
                  contract=contract,shard_sha256=shas,by_domain=by_domain,
+                 by_scene_group=by_scene_group,
                  limitations=["Labels acquired only for selected new native executed depths, not all unseen families or four depths.",
                               "Sampling by score/competition is not IID; q=0 rates describe sampled strata, not global candidate prevalence.",
                               "Existing U∪D four-depth quality and full sensor candidate geometry are reused without test labels.",
