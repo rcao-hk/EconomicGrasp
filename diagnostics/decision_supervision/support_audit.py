@@ -213,8 +213,15 @@ def _frame(args,rt,compiled,entry,root,contract,resume):
                  and value["count"]==0]
     new_high_q0=[q for q,c in zip(query_ids,count)
                  if score_by_query[int(q)]>=audit["quantile75"] and int(c)==0]
+    pure_collision=np.asarray(labels["collision"],dtype=bool)
+    empty=np.asarray(labels["empty"],dtype=bool)
+    if pure_collision.shape!=count.shape or empty.shape!=count.shape:
+        raise ValueError("Exact evaluator collision/empty shape mismatch")
     audit.update(
         sampled_q0_n=int(np.sum(count==0)),sampled_q_positive_n=int(np.sum(count>0)),
+        sampled_q0_collision_n=int(np.sum((count==0)&pure_collision)),
+        sampled_q0_empty_n=int(np.sum((count==0)&empty)),
+        sampled_q0_other_n=int(np.sum((count==0)&(~pure_collision)&(~empty))),
         sampled_high_score_q0_n=len(new_high_q0),
         cached_high_score_q0_n=len(old_high_q0),
         new_competition_pairs_with_both_q=int(len(pair_arr)),
@@ -366,6 +373,9 @@ def summarize(args):
             newly_labeled=sum(r["new_actions"] for r in part),
             new_high_score_q0=sum(r["sampled_high_score_q0_n"] for r in part),
             known_high_score_q0=sum(r["cached_high_score_q0_n"] for r in part),
+            sampled_q0_collision=sum(r["sampled_q0_collision_n"] for r in part),
+            sampled_q0_empty=sum(r["sampled_q0_empty_n"] for r in part),
+            sampled_q0_other=sum(r["sampled_q0_other_n"] for r in part),
             paired_competition_edges=sum(r["new_competition_pairs_with_both_q"] for r in part),
             q0_new_sampled=sum(r["sampled_q0_n"] for r in part),
             by_stratum={name:dict(
