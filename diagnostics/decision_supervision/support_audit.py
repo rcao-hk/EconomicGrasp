@@ -220,7 +220,7 @@ def _frame(args,rt,compiled,entry,root,contract,resume):
     audit.update(
         sampled_q0_n=int(np.sum(count==0)),sampled_q_positive_n=int(np.sum(count>0)),
         sampled_q0_collision_n=int(np.sum((count==0)&pure_collision)),
-        sampled_q0_empty_n=int(np.sum((count==0)&empty)),
+        sampled_q0_empty_n=int(np.sum((count==0)&(~pure_collision)&empty)),
         sampled_q0_other_n=int(np.sum((count==0)&(~pure_collision)&(~empty))),
         sampled_high_score_q0_n=len(new_high_q0),
         cached_high_score_q0_n=len(old_high_q0),
