@@ -77,16 +77,21 @@ def _sample_new(eligible, scores, native_keep, edges, *, old, quotas=DEFAULT_QUO
     def sort_desc(items):
         return sorted(items,key=lambda q:(-scores_by_query[q],q))
     survivor=sort_desc(top&available)
-    comp=sorted(neighbor&available,
-                key=lambda q:(-int(bool(leader_neighbors.get(q,set()) & (old|top))),
-                              -scores_by_query[q],q))
     high=sort_desc({q for q in available if q not in top and q not in neighbor
                     and scores_by_query[q]>=threshold}) if threshold is not None else []
     rng=np.random.default_rng(seed)
-    random_pool=sorted(available-top-neighbor-set(high))
-    random_pool=list(rng.permutation(random_pool))
+    random_pool=list(rng.permutation(sorted(available-top-neighbor-set(high))))
     chosen=[];labels=[];deficit=[]
-    for pool,quota,name in zip((survivor,comp,high,random_pool),quotas,STRATA[:4]):
+    # Pick survivors FIRST. Then prefer a competitor if its top50 endpoint is
+    # actually labeled already (old U∪D) or is among newly selected survivors.
+    first=survivor[:quotas[0]]
+    chosen.extend(first);labels.extend([STRATA[0]]*len(first))
+    deficit.append(quotas[0]-len(first))
+    available_leaders=old|set(chosen)
+    comp=sorted(neighbor&available,
+                key=lambda q:(-int(bool(leader_neighbors.get(q,set()) & available_leaders)),
+                              -scores_by_query[q],q))
+    for pool,quota,name in zip((comp,high,random_pool),quotas[1:],STRATA[1:4]):
         accepted=[q for q in pool if q not in chosen][:quota]
         chosen.extend(accepted);labels.extend([name]*len(accepted))
         deficit.append(quota-len(accepted))
