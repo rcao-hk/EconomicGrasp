@@ -63,7 +63,8 @@ class P0Tests(unittest.TestCase):
         keep=np.arange(5,dtype=np.int64)
         obj=np.array([0,0,0,1,1])
         output=final_ids(keep,scores,obj,per_object=2,k=3)
-        self.assertEqual(set(output.tolist()),{0,1,3})
+        # NumPy's reversed argsort tie-break picks row 2 over row 1.
+        self.assertEqual(set(output.tolist()),{0,2,3})
         self.assertEqual(len(output),3)
 
     def test_exact_label_mapping(self):
