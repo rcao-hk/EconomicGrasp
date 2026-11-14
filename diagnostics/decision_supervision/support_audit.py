@@ -147,6 +147,32 @@ def _frame(args,rt,compiled,entry,root,contract,resume):
                            f"< {args.min_new_actions}: {frame_name(row)}")
     source_map={int(q):i for i,q in enumerate(qids)}
     label_input=filtered[np.asarray([source_map[int(q)] for q in query_ids],dtype=int)]
+    name=frame_name(row)
+    npz=root/"frames"/(name+".npz")
+    side=npz.with_suffix(".json")
+    frame_contract=dict(schema=SCHEMA,kind="P1_support_audit_frame",
+                        plan_sha256=contract["plan_sha256"],
+                        script_sha256=contract["script_sha256"],
+                        source_pack_sha256=entry["sha256"],
+                        scene=row["scene"],anno=row["anno"],domain=row["domain"],
+                        base_checkpoint_sha256=BASE_SHA,
+                        native_bank_physical_sha256=digest(physical_ids(winners).tolist()),
+                        sensor_valid_ids_sha256=digest(qids.tolist()),
+                        compiled_survivors_sha256=digest(nms.tolist()),
+                        requested_new_families=64,original_snapshot_seed=args.snapshot_seed)
+    if npz.exists() or side.exists():
+        if not resume or not (npz.is_file() and side.is_file()):
+            raise FileExistsError(f"Existing/incomplete P1 support cache: {npz}")
+        meta=json.loads(side.read_text(encoding="utf-8"))
+        if (meta["contract_sha256"]!=digest(frame_contract) or sha(npz)!=meta["sha256"]):
+            raise RuntimeError("P1 resume cannot reuse different source/actions")
+        with np.load(npz,allow_pickle=False) as z:
+            if (not np.array_equal(z["query_ids"],query_ids) or
+                    not np.array_equal(z["physical_id"].astype(str),physical_ids(label_input))):
+                raise RuntimeError("P1 resume sample identity mismatch")
+        return meta
+    # Only newly selected action labels are expensive; an exact resume does
+    # not re-run CAD/Dex-Net.
     if len(query_ids):
         labels=rt.label(row,label_input.astype(np.float64))
         count=np.asarray(labels["count"],dtype=np.int64)
@@ -191,30 +217,6 @@ def _frame(args,rt,compiled,entry,root,contract,resume):
         new_competition_q0_vs_positive=int(np.sum((pair_arr[:,2]==0)&(pair_arr[:,3]>0))),
         sampled_q0_by_stratum={name:int(np.sum(count[strata==name]==0)) for name in STRATA},
         sample_count_by_stratum={name:int(np.sum(strata==name)) for name in STRATA})
-    name=frame_name(row)
-    npz=root/"frames"/(name+".npz")
-    side=npz.with_suffix(".json")
-    frame_contract=dict(schema=SCHEMA,kind="P1_support_audit_frame",
-                        plan_sha256=contract["plan_sha256"],
-                        script_sha256=contract["script_sha256"],
-                        source_pack_sha256=entry["sha256"],
-                        scene=row["scene"],anno=row["anno"],domain=row["domain"],
-                        base_checkpoint_sha256=BASE_SHA,
-                        native_bank_physical_sha256=digest(physical_ids(winners).tolist()),
-                        sensor_valid_ids_sha256=digest(qids.tolist()),
-                        compiled_survivors_sha256=digest(nms.tolist()),
-                        requested_new_families=64,original_snapshot_seed=args.snapshot_seed)
-    if npz.exists() or side.exists():
-        if not resume or not (npz.is_file() and side.is_file()):
-            raise FileExistsError(f"Existing/incomplete P1 support cache: {npz}")
-        meta=json.loads(side.read_text(encoding="utf-8"))
-        if (meta["contract_sha256"]!=digest(frame_contract) or sha(npz)!=meta["sha256"]):
-            raise RuntimeError("P1 resume cannot reuse different source/actions")
-        with np.load(npz,allow_pickle=False) as z:
-            if not np.array_equal(z["query_ids"],query_ids) or not np.array_equal(z["physical_id"].astype(str),physical_ids(label_input)):
-                raise RuntimeError("P1 resume sample identity mismatch")
-        # Do not silently overwrite old label arrays even if hashes agree.
-        return meta
     values=dict(query_ids=query_ids,physical_id=physical_ids(label_input),
                 grasps=np.asarray(label_input,dtype=np.float64),
                 source_score=np.asarray([score_by_query[int(q)] for q in query_ids]),
