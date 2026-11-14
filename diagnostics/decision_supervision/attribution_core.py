@@ -75,6 +75,28 @@ def final_ids(keep, scores, objects, per_object=10, k=50):
     return chosen[np.argsort(-scores[chosen])]
 
 
+def ap_from_fixed_membership(ranked, invalid, friction, k=50):
+    """Evaluate a fixed final membership in a supplied order WITHOUT re-trimming.
+
+    Official AP prefixes count missing positions as failures. This is the
+    exact fixed-membership ranking counterfactual, even when official score
+    ties made the baseline final set larger than K.
+    """
+    ranked=np.asarray(ranked,dtype=np.int64).reshape(-1)
+    f=np.asarray(friction,dtype=np.float64)[ranked]
+    bad=np.asarray(invalid,dtype=bool)[ranked]
+    if not np.isfinite(f).all():
+        raise ValueError("Nonfinite quality labels")
+    out=np.zeros((k,6),dtype=np.float64)
+    for j,mu in enumerate((.2,.4,.6,.8,1.,1.2)):
+        success=(~bad)&(f>0)&(f<=mu+1e-6)
+        cumulative=np.cumsum(success,dtype=np.float64)
+        for idx in range(k):
+            if len(cumulative):
+                out[idx,j]=cumulative[min(idx,len(cumulative)-1)]/(idx+1)
+    return out
+
+
 def arrange_labels(num_nodes, selected, eval_result):
     """Fill only labeled NMS-surviving nodes. Unlabeled ones cannot be selected."""
     ids = np.asarray(selected, dtype=np.int64)
@@ -156,7 +178,8 @@ def replay(base, scores_left, scores_right, keep_left, keep_right,
     def ap(sel, rank):
         return official_ap_matrix(g, assigned, invalid, friction, sel, rank)
     a0 = ap(kl, sl)         # Original native model-side choice and score
-    a1 = ap(lfinal, sr)     # Fix final member set; change only rank
+    fixed_rank=lfinal[np.argsort(-sr[lfinal])]
+    a1 = ap_from_fixed_membership(fixed_rank, invalid, friction)  # No cap/NMS recomputation
     a2 = ap(kl, sr)         # Fix NMS survivors; reapply per-obj/global budgets
     a3 = ap(kr, sr)         # New NMS survivors, new rank
     for name, current, expected in (
