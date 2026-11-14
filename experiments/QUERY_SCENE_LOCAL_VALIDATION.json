@@ -1,0 +1,41 @@
+{
+  "status": "CPU_SYNTHETIC_PASS",
+  "tests": 24,
+  "test_duration_seconds": 20.175,
+  "torch": "2.10.0+cpu",
+  "base_commit": "a1caddd2de2637648730b4bdf2973b6b1607d56c",
+  "production_sources_modified": false,
+  "checks": [
+    "unittest 24 passed",
+    "compileall passed",
+    "bash -n passed",
+    "local code Git blob identities match uploaded source commit"
+  ],
+  "not_run": [
+    "117 historical runtime",
+    "CUDA parity",
+    "real CAD labels",
+    "real training",
+    "official AP"
+  ],
+  "parameters_feature128_scene128": {
+    "local": 319435,
+    "candidate": 319391,
+    "scene": 319509
+  },
+  "experiment_code_sha256": "99cb2fcb58815db79d35e989066793406e67bdd0ec52e7a55513994c19c812e5",
+  "test_log_sha256": "d00e7845b9b19ee1f4fa1e05b61cc678e29fcfe9885630c62ba4ab8e504c37d0",
+  "sha256": {
+    "experiments/QUERY_SCENE_EVIDENCE_ACCESS_CODEX.md": "9f655c990bc583d599501fcebef1fc8832face45d7a008b9f14ea222be30b720",
+    "query_scene/__init__.py": "98ebc6cb944a142108c69325af10b4541cfa7cd944db0a86ba42b375cc82d36e",
+    "query_scene/cli.py": "2648b3666bdb51595ee0f27ab9486bb72edd4aabe0715ecb98151b08d6804a92",
+    "query_scene/core.py": "7d2c0e796e075fab4b716ff7703a15604a220bddd0a95ffe81c38e4bebdd761f",
+    "query_scene/diagnose.py": "1551394965cfa542eb988273d115592e784dba953757c053627b9552cd6cf28d",
+    "query_scene/model.py": "a42b873b99887460230db738ce9e514e2b9c6f6cb4af75e7a0ebb72344f2da03",
+    "query_scene/pipeline.py": "21a10e57423e6abe62088e2fa2eea88b7bba2822c78bb0ed56ffa5f3212f998a",
+    "query_scene/report.py": "26fefc7ce036ab3ee25540edc9b4f2c826240084e99b19bfcadff5002232e170",
+    "query_scene/runtime.py": "99bd3ae7150c4fe1b48246aa32c9eaaf3ac0093c02e46170dcd521f08f387614",
+    "scripts/query_scene/run.sh": "128bf4dc2122b751addc15cc4b6761179df1671f448dfc70cce3884d10fbaab9",
+    "tests/test_query_scene.py": "a8de9f77e838bd7e7b5e2d095c2f3b5aeb0a1011b5cdcdd92f0f4109de7c2260"
+  }
+}
