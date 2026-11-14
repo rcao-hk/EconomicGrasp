@@ -2,7 +2,7 @@
 # Independent next-round worktree; no background execution or automatic training.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-STAGE="${1:?Use check|cross-old|trace|plan|fit|audit|infer|eval|report}"
+STAGE="${1:?Use check|cross-old|trace|plan|fit|audit|infer|eval|report|p0-attribution|p1-support-mine|p1-support-summarize}"
 : "${RUN_ROOT:?Set a NEW output directory}"
 DEVICE="${DEVICE:-cuda:0}"
 FACTORY="${FACTORY:-rare_grasp.runtime:Runtime}"
@@ -11,7 +11,8 @@ mkdir -p "$RUN_ROOT"
 case "$STAGE" in
 check)
   OMP_NUM_THREADS=1 python -m unittest discover -s tests -p 'test_decision_supervision.py' -v
-  python -m compileall -q diagnostics/decision_supervision tests/test_decision_supervision.py
+  OMP_NUM_THREADS=1 python -m unittest discover -s tests -p 'test_p0_p1_decision_diagnostics.py' -v
+  python -m compileall -q diagnostics/decision_supervision tests/test_decision_supervision.py tests/test_p0_p1_decision_diagnostics.py
   bash -n scripts/decision_supervision/run.sh
   ;;
 cross-old)
@@ -85,6 +86,45 @@ report)
   : "${RUNS_JSON:?seed -> arm -> split -> inference directory mapping}"
   python -m diagnostics.decision_supervision.report --runs "$RUNS_JSON" \
     --policy "${POLICY:-rank_executed}" --output "$RUN_ROOT/reports/${POLICY:-rank_executed}"
+  ;;
+p0-attribution)
+  : "${RUNS_JSON:?Accepted 3-seed A/B/C/D inference roots}" "${DATASET_ROOT:?GraspNet dataset root}"
+  split="${P0_SPLIT:-test_novel}"
+  left="${P0_LEFT:-A}"; right="${P0_RIGHT:-C}"
+  out="${P0_OUTPUT:-$RUN_ROOT/p0_attribution/$split/${left}_vs_${right}}"
+  extra=()
+  if [[ "${P0_LIMIT:-0}" != 0 ]]; then
+    [[ -n "${P0_OUTPUT:-}" ]] || { echo "P0_LIMIT smoke requires an independent P0_OUTPUT" >&2; exit 2; }
+    extra+=(--limit "$P0_LIMIT" --allow-partial)
+  fi
+  [[ "${RESUME:-0}" != 1 ]] || extra+=(--resume)
+  python -m diagnostics.decision_supervision.action_attribution \
+    --runs "$RUNS_JSON" --split "$split" --left "$left" --right "$right" \
+    --seeds "${P0_SEEDS:-20261113,20261114,20261115}" --policy rank_executed \
+    --dataset-root "$DATASET_ROOT" --output "$out" \
+    --max-compiled-pairs "${P0_COMPILED_PAIR_CHECKS:-64}" "${extra[@]}"
+  ;;
+p1-support-mine)
+  : "${DATASET_ROOT:?}" "${GNTRANS_RGB_ROOT:?}" "${BOUND_CONFIG:?Verified MIX50 GVAR bound config}"
+  out="${P1_SUPPORT_ROOT:-$RUN_ROOT/p1_support/cache}"
+  extra=()
+  if [[ "${P1_LIMIT:-0}" != 0 ]]; then
+    [[ -n "${P1_SUPPORT_ROOT:-}" ]] || { echo "P1_LIMIT smoke requires an independent P1_SUPPORT_ROOT" >&2; exit 2; }
+    extra+=(--limit "$P1_LIMIT")
+  fi
+  [[ "${RESUME:-0}" != 1 ]] || extra+=(--resume)
+  python -m diagnostics.decision_supervision.support_audit mine \
+    --plan "$PLAN" --config "$BOUND_CONFIG" --factory "$FACTORY" \
+    --dataset-root "$DATASET_ROOT" --gntrans-root "$GNTRANS_RGB_ROOT" \
+    --device "$DEVICE" --output "$out" --domains "${P1_DOMAINS:-original,gntrans}" \
+    --frames-per-scene "${P1_FRAMES_PER_SCENE:-2}" --snapshot-seed 20261113 \
+    --shards "${SHARDS:-1}" --shard-index "${SHARD_INDEX:-0}" "${extra[@]}"
+  ;;
+p1-support-summarize)
+  out="${P1_SUPPORT_ROOT:-$RUN_ROOT/p1_support/cache}"
+  extra=(); [[ "${P1_PARTIAL:-0}" != 1 ]] || extra+=(--allow-partial)
+  python -m diagnostics.decision_supervision.support_audit summarize \
+    --root "$out" --output "$RUN_ROOT/p1_support/summary" "${extra[@]}"
   ;;
 *) echo "Unknown stage $STAGE" >&2; exit 2 ;;
 esac
