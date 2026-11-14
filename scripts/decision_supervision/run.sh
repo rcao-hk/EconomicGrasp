@@ -114,7 +114,7 @@ p1-support-mine)
   fi
   [[ "${RESUME:-0}" != 1 ]] || extra+=(--resume)
   python -m diagnostics.decision_supervision.support_audit mine \
-    --plan "$PLAN" --config "$BOUND_CONFIG" --factory "$FACTORY" \
+    --plan "${ACCEPTED_PLAN:-$PLAN}" --config "$BOUND_CONFIG" --factory "$FACTORY" \
     --dataset-root "$DATASET_ROOT" --gntrans-root "$GNTRANS_RGB_ROOT" \
     --device "$DEVICE" --output "$out" --domains "${P1_DOMAINS:-original,gntrans}" \
     --frames-per-scene "${P1_FRAMES_PER_SCENE:-2}" --snapshot-seed 20261113 \
@@ -124,7 +124,7 @@ p1-support-summarize)
   out="${P1_SUPPORT_ROOT:-$RUN_ROOT/p1_support/cache}"
   extra=(); [[ "${P1_PARTIAL:-0}" != 1 ]] || extra+=(--allow-partial)
   python -m diagnostics.decision_supervision.support_audit summarize \
-    --root "$out" --output "$RUN_ROOT/p1_support/summary" "${extra[@]}"
+    --root "$out" --output "${P1_SUPPORT_SUMMARY_OUTPUT:-$RUN_ROOT/p1_support/summary}" "${extra[@]}"
   ;;
 *) echo "Unknown stage $STAGE" >&2; exit 2 ;;
 esac
