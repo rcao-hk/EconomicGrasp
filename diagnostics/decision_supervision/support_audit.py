@@ -72,9 +72,6 @@ def _sample_new(eligible, scores, native_keep, edges, *, old, quotas=DEFAULT_QUO
             neighbor.add(a);leader_neighbors.setdefault(a,set()).add(b)
     threshold=float(np.quantile(score, .75)) if n else None
     available=nodes-old
-    lists=[
-        sorted(top&available,key=lambda q:(-float(scores_by_query[q]),q)) if False else None
-    ]
     # scores is indexed like eligible, not by raw 1024-index query id.
     scores_by_query={int(q):float(v) for q,v in zip(eligible,score)}
     def sort_desc(items):
@@ -107,9 +104,7 @@ def _sample_new(eligible, scores, native_keep, edges, *, old, quotas=DEFAULT_QUO
                high_score_cached_n=sum(scores_by_query[q]>=threshold for q in nodes&old) if n else 0,
                unseen_sensor_valid_n=len(available),
                quantile75=threshold,quotas=list(quotas),
-               strata_selected=dict(zip(STRATA[:4],[len(chosen)-64+sum(quotas) if False else
-                                                        len([x for x in labels if x==name])
-                                                        for name in STRATA[:4]])),
+               strata_selected={name:int(labels.count(name)) for name in STRATA[:4]},
                quota_deficits=dict(zip(STRATA[:4],deficit)),
                fallback_n=len(fallback),new_labeled_n=len(chosen))
     return np.asarray(chosen,dtype=np.int64),np.asarray(labels,dtype="<U40"),audit,leader_neighbors
