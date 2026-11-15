@@ -22,7 +22,9 @@ from diagnostics.evidence_decodability.core import (
 from diagnostics.evidence_decodability.capture import GVARCapture
 from diagnostics.evidence_decodability.train import _frame_subset
 from diagnostics.evidence_decodability.p0_match import _inversion_counts
-from diagnostics.evidence_decodability.cache import _choose_frames, _join_and_validate
+from diagnostics.evidence_decodability.cache import _choose_frames, _join_and_validate, _old_native
+from diagnostics.evidence_decodability.infer import native_actions
+from diagnostics.evidence_decodability.core import sha256
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -183,6 +185,69 @@ class SamplingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _choose_frames({"entries":entries})
 
+    def test_original_old_failure_flags_are_recovered_from_signed_full_cache(self):
+        # The intermediate U∪D trace strips collision/empty, so recover only
+        # through the two hashed original four-depth P1 source files.
+        n=8
+        g=np.zeros((n,17),dtype=np.float32)
+        g[:,0]=np.array([.4,.7,.95,.5,.5,.6,.75,.4])
+        g[:,1]=.06;g[:,2]=.02;g[:,3]=np.tile([.01,.02,.03,.04],2)
+        g[:,4:13]=np.eye(3).reshape(9)
+        g[:,13]=np.repeat([.0,.1],4);g[:,15]=.6;g[:,16]=-1
+        f=np.repeat([0,1],4);d=np.tile(np.arange(4),2)
+        ids=physical_ids(g)
+        counts=np.array([0,0,0,0,0,0,0,0],np.int64)
+        bits=np.zeros((n,6),np.uint8)
+        collision=np.array([0,0,1,0,0,0,0,0],np.uint8)
+        empty=np.array([0,0,0,0,0,0,1,0],np.uint8)
+        pack=dict(family=f,depth=d,grasps=g,physical_id=ids,count=counts,
+                  bits=bits,native_sensor_valid=np.array([True,True]))
+        with tempfile.TemporaryDirectory() as td:
+            arms={}
+            for name in ("uniform","decision"):
+                path=Path(td)/(name+".npz")
+                np.savez_compressed(path,family=f,depth=d,grasps=g,
+                    physical_id=ids,count=counts,bits=bits,
+                    collision=collision,empty=empty)
+                arms[name]=dict(file=str(path),sha256=sha256(path))
+            result=_old_native(pack,arms)
+            self.assertEqual(result["q"].tolist(),[0,1])
+            self.assertEqual(result["collision"].tolist(),[1,0])
+            self.assertEqual(result["empty"].tolist(),[0,1])
+
+    def test_native_depth_inference_preserves_geometry(self):
+        from unittest.mock import MagicMock
+        Q,D=1024,4
+        bank=np.zeros((Q,D,17),dtype=np.float32)
+        bank[...,0]=np.arange(1,5)[None,:]*.1
+        bank[...,1]=.06;bank[...,2]=.02
+        bank[...,3]=np.arange(1,5)[None,:]*.01
+        bank[...,4:13]=np.eye(3).reshape(9)
+        bank[...,13]=np.arange(Q)[:,None]*.0001
+        bank[...,15]=.7;bank[...,16]=-1
+        snap=dict(grasps=bank,
+                  features=np.zeros((Q,D,64),dtype=np.float32),
+                  base_logit=np.log(bank[...,0]/(1-bank[...,0])),
+                  angles=np.zeros(Q,dtype=int))
+        model=EvidenceProbe(32,"score64","quality",width=32)
+        class FakeRT:
+            def snapshot(self,row,seed):return snap
+        fake_capture=MagicMock()
+        fake_capture.__enter__.return_value=fake_capture
+        fake_capture.chosen.return_value=dict(
+            pre_reader=np.zeros((Q,32),dtype=np.float32),
+            post_reader=np.zeros((Q,32),dtype=np.float32),
+            reader_delta=np.zeros((Q,32),dtype=np.float32),
+            role_tokens=np.zeros((Q,6,64),dtype=np.float32),
+            role_mass=np.zeros((Q,6),dtype=np.float32),
+            role_valid=np.zeros((Q,6),dtype=np.float32),
+            pred_geometry=np.zeros((Q,6,6),dtype=np.float32))
+        with patch("diagnostics.evidence_decodability.infer.GVARCapture",
+                   return_value=fake_capture):
+            result,_=native_actions(FakeRT(),dict(scene=0),7,model=model)
+        self.assertEqual(result.shape,(Q,17))
+        np.testing.assert_array_equal(result[:,1:16],bank[:,-1,1:16])
+
     def test_high_score_failure_inversion(self):
         x=sample(12)
         x["quality_count"][:]=0
@@ -198,7 +263,7 @@ class SamplingTests(unittest.TestCase):
 
 class CLITests(unittest.TestCase):
     def test_help_all_stages(self):
-        for module in ("cache","p0_match","train","infer","compare"):
+        for module in ("cache","p0_match","train","audit","infer","compare"):
             cmd=[sys.executable,"-m",f"diagnostics.evidence_decodability.{module}","--help"]
             r=subprocess.run(cmd,cwd=ROOT,text=True,capture_output=True,timeout=35)
             self.assertEqual(r.returncode,0,f"{module}: {r.stderr}")
