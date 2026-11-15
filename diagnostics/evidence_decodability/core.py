@@ -30,7 +30,7 @@ FEATURE_FIELDS = (
     "role_tokens", "role_mass", "role_valid", "pred_geometry",
 )
 LABEL_FIELDS = ("quality_count", "quality_bits", "pure_collision", "empty")
-ROW_FIELDS = ("query_id", "depth_id", "native_score", "grasps",
+ROW_FIELDS = ("query_id", "depth_id", "native_score", "base_logit", "grasps",
               "physical_id", "source_new", "sensor_valid", "nms_role")
 
 
@@ -135,7 +135,7 @@ def check_bank(x, *, require_labels=True):
         raise ValueError("Expected six roles x six relative geometry values")
     if "reference_geometry" in x and np.asarray(x["reference_geometry"]).shape != (n,6,6):
         raise ValueError("Invalid privileged reference geometry")
-    for k in ("native_score","source_new","sensor_valid","nms_role","physical_id"):
+    for k in ("native_score","base_logit","source_new","sensor_valid","nms_role","physical_id"):
         if np.asarray(x[k]).shape != (n,):
             raise ValueError(f"Invalid one-dimensional field {k}")
     if not np.array_equal(physical_ids(x["grasps"]), x["physical_id"].astype(str)):
@@ -145,8 +145,8 @@ def check_bank(x, *, require_labels=True):
     if np.any((x["query_id"]<0)|(x["query_id"]>=1024)|
               (x["depth_id"]<0)|(x["depth_id"]>3)):
         raise ValueError("Query/depth identifiers out of range")
-    if not np.isfinite(x["native_score"]).all():
-        raise ValueError("Nonfinite native scores")
+    if not np.isfinite(x["native_score"]).all() or not np.isfinite(x["base_logit"]).all():
+        raise ValueError("Nonfinite native scores/logits")
     for k in FEATURE_FIELDS + ("grasps",):
         if not np.isfinite(x[k]).all():
             raise ValueError(f"Nonfinite evidence: {k}")
