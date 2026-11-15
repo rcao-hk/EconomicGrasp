@@ -30,6 +30,7 @@ This is NOT a three-independent-backbone experiment. The base trained on train s
 - `cache.py` — 400 accepted native-depth train frames: old U∪D queried actions + 64 new support-audit actions, strict physical-ID/logit/score-feature parity, source SHA and resume. Optional reference GT/CAD depth is *explicitly declared, pixel-aligned and train-only*.
 - `p0_match.py` — Old/Expanded quality heads on identical native-executed actions, conditional old/new/quality/native-score/sensor-valid/NMS-role/failure diagnostics, pair inversions.
 - `train.py` — independent fixed10-epoch, 64-actions-per-frame, same-data, same-capacity trained **quality** and **failure** probes; frozen GVAR, 3 train-head seeds, validation 80..89.
+- `audit.py` — same-action per-class/per-source/per-native-score/NMS-role diagnostics on validation80..89 and previously inspected90..99; saves per-action predictions/labels, scene-level metrics, and conditional strata.
 - `infer.py` — native-depth-only score replacement for all 1024 Original test queries; original sensor collision, GraspNet NMS/Top10-object/Top50 and official evaluation unchanged. Reject failure classifiers and privileged reference.
 - `compare.py` — paired split/scene AP with conditional CIs; seed variability separate.
 - `scripts/evidence_p0_p1/run.sh` — staged P0/P1 commands.
@@ -163,6 +164,19 @@ Primary report:
 - trends split by old/new and native high score;
 - same-head-seed paired scene analysis, not IID action CIs;
 - interpret role tokens as mixed learned evidence, not ground-truth contact readings.
+
+Run fixed-epoch matched-action auditing WITHOUT retraining and without official test quality labels:
+
+```bash
+export P1_WEIGHTS="$RUN_ROOT/p1_heads/quality/20261113/post_reader/last.pt"
+LABEL=post_reader_20261113 PARTITION=validation \
+  bash scripts/evidence_p0_p1/run.sh p1-audit
+# Previously observed training-domain audit: not fresh confirmation.
+LABEL=post_reader_20261113 PARTITION=reused_audit \
+  bash scripts/evidence_p0_p1/run.sh p1-audit
+```
+
+For a failure-class head, use `p1_heads/failure/SEED/MODE/last.pt` and run only this audit. Its predictions do not define official grasp ranking.
 
 If privileged CAD/reference aligned raster is supplied, train `reference_geometry` as a **separate offline oracle** with same train/validation scenes, but never include in deployable test or compare it as a standard RGB-only model.
 
