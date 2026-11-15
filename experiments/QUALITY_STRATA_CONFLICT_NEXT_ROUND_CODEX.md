@@ -231,3 +231,17 @@ bash scripts/decision_supervision/run.sh p1-support-summarize
 ```
 
 **状态：**GitHub脚本已提交，真实117/119 CUDA、CAD和逐帧官方AP验收尚未在本次会话执行。不得把上一轮已验收结果当成新诊断结果。
+
+## 10. Expanded-support 阴性结果后的 Physical Evidence P0/P1（2026-11-15）
+
+根据已验收的 `Expanded-support_DETAILED_ANALYSIS_CN.md`：固定预算的新支持域训练使 Seen/Similar/Novel 均下降，且共同验证池排序一致性下降。暂停继续调样本比例/随机pair权重，改为两项同分支实验：
+
+1. **P0 同动作条件误差分层**：Old与Expanded评分器在已标注共同物理动作池上比较，按native score分位、真实质量、collision/empty、sensor-valid、旧/新标签来源和NMS角色分层，不重新训练。
+2. **P1 GVAR物理证据可解码性**：从真实冻结GVAR volume_rel reader收集前后query、六类角色attention token与预测深度相对几何，用相同动作与同容量head分别训练quality和failure-type探针；只用Original测试的部署条件做正式AP，privileged CAD参考深度仅在训练场景作离线上限。
+
+实现及完整Codex执行合同：
+**[PHYSICAL_EVIDENCE_P0_P1_CODEX.md](PHYSICAL_EVIDENCE_P0_P1_CODEX.md)**。
+
+入口：`scripts/evidence_p0_p1/run.sh check|cache|p0|p1-fit|p1-audit|p1-infer|p1-eval|p1-compare`。
+
+截至本工作单更新，本轮新增代码已提交；尚未执行117真实模型smoke、CPU测试或官方AP，不将旧报告数值作为新证据。
