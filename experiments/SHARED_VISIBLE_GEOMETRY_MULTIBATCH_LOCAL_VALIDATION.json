@@ -1,0 +1,29 @@
+{
+  "branch": "exp/shared-visible-geometry-multibatch",
+  "base_commit": "8a3a6251c0f5a52cf68a92f64a894df696c0149d",
+  "date": "2026-11-15",
+  "validation_environment": "CPU only; PyTorch 2.10.0+cpu",
+  "existing_cpu_tests": 27,
+  "additional_multibatch_cpu_tests": 14,
+  "synthetic_cuda_smoke": "NOT_RUN",
+  "physical_B_supported": [
+    1,
+    2,
+    4
+  ],
+  "train_default_batch_size": 4,
+  "train_default_accumulate": 1,
+  "validation_default_batch_size": 4,
+  "inference_head_default_batch_size": 1,
+  "frozen_provider_batch_size": 1,
+  "new_files_sha256": {
+    "shared_geometry/model.py": "ed794d7189a446dd8e0dee1cf41221d113e14454aafba839ff2399113da6c4ab",
+    "shared_geometry/data.py": "9e6ce03371d09c9c1dbd120d2af2fac629b328463037ced023d6c3359ca4ee51",
+    "shared_geometry/experiment.py": "51b378ade18d8c0ac837970cd6ed2879c42dadcf23e5c19ae475a83a26b0ee2d",
+    "shared_geometry/inference.py": "1f5ce4311d535a3b940d26ad6962f872f4b0975b35bfe597e2d6d459ccd6a78f",
+    "shared_geometry/cli.py": "67780ed4b9055a2d062fae5bb109b4e809adf01493db5e6c4a64f804dd0b91b2",
+    "scripts/shared_geometry/run.sh": "1f1fa2fbd2d8da8f86e0a3d83638d96ca5917ff33b4e7d4b0a57979606a36e20",
+    "tests/test_shared_geometry_multibatch.py": "747ea1854d45715283cf319c8deef6e534f99acf397797b8e6266febba36e29e",
+    "experiments/SHARED_VISIBLE_GEOMETRY_MULTIBATCH_CODEX.md": "2268e5eb91e0364eec53b0ab6150c686147e9ff4cea5ed007571de429c98e9c8"
+  }
+}

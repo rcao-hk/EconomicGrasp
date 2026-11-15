@@ -55,13 +55,15 @@ train)
   for mode in ${MODES:-$MODE}; do
     python -m shared_geometry.cli train --train-index "$RUN_ROOT/train_index.json" \
       --val-index "$RUN_ROOT/validation_index.json" --mode "$mode" --hidden 64 \
-      --epochs 20 --accumulate 4 --seed 0 --geometry-weight 1 --device "$DEVICE" \
+      --epochs 20 --batch-size "${BATCH_SIZE:-4}" --accumulate "${ACCUMULATE:-1}" \
+      --val-batch-size "${VAL_BATCH_SIZE:-4}" --seed 0 --geometry-weight 1 --device "$DEVICE" \
       --output "$RUN_ROOT/models/$mode"
   done
   ;;
 diagnose)
   python -m shared_geometry.cli diagnose --index "$RUN_ROOT/validation_index.json" \
-    --weight "$RUN_ROOT/models/$MODE/best.pt" --device "$DEVICE" --output "$RUN_ROOT/diagnose_$MODE.json"
+    --weight "$RUN_ROOT/models/$MODE/best.pt" --device "$DEVICE" \
+    --batch-size "${VAL_BATCH_SIZE:-4}" --output "$RUN_ROOT/diagnose_$MODE.json"
   ;;
 paired)
   python -m shared_geometry.cli paired --index "$RUN_ROOT/validation_index.json" \
@@ -71,7 +73,8 @@ infer)
   : "${REFERENCE_ROOT:?Original frozen-MSE full pre-NMS dumps required}" "${DATASET_ROOT:?}"
   for split in ${SPLITS:-test_seen test_similar test_novel}; do
     python -m shared_geometry.cli infer "${args[@]}" --weight "$RUN_ROOT/models/$MODE/best.pt" \
-      --reference-root "$REFERENCE_ROOT" --split "$split" --output "$RUN_ROOT/test/$MODE/$split"
+      --reference-root "$REFERENCE_ROOT" --split "$split" \
+      --head-batch-size "${INFER_HEAD_BATCH_SIZE:-1}" --output "$RUN_ROOT/test/$MODE/$split"
   done
   ;;
 eval)

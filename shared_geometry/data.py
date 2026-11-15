@@ -23,6 +23,51 @@ def tensor_scene(arrays, device):
             for k in ('feature_map', 'pred_depth', 'K')}
 
 
+# Deliberately limited to model inputs, never CAD/teacher/sensor fields.
+MODEL_INPUT_KEYS = ('feature_map', 'pred_depth', 'K', 'bank', 'local_features')
+TRAIN_TARGET_KEYS = ('quality_count', 'target_xyz', 'target_udf',
+                     'target_projective', 'target_state', 'target_udf_mask',
+                     'target_projective_mask')
+
+
+def collate_inputs(frames, with_targets=False):
+    """Stack independent scenes into an actual B dimension.
+
+    Fail closed on ragged families, evidence grids or target point budgets;
+    zero padding could introduce fake physical actions or mismatched geometry.
+    Values stay in numpy until a single batch transfer in predict/train.
+    """
+    if not frames:
+        raise ValueError('Empty multi-image batch')
+    keys = MODEL_INPUT_KEYS + (TRAIN_TARGET_KEYS if with_targets else ())
+    result = {}
+    for key in keys:
+        values = []
+        expected = None
+        for i, frame in enumerate(frames):
+            if key not in frame:
+                raise ValueError(f'Missing {key} in image {i}')
+            v = np.asarray(frame[key])
+            if expected is None:
+                expected = v.shape
+            elif v.shape != expected:
+                raise ValueError(f'Ragged {key}: image 0 has {expected}, image {i} has {v.shape}; '
+                                 'use shape buckets, never pad grasp actions')
+            values.append(v)
+        result[key] = np.stack(values, axis=0)
+    # Crucial: the input-only mode never carries quality labels or rendered geometry.
+    if result['bank'].ndim != 4 or result['bank'].shape[-1] != 17:
+        raise ValueError('Batch grasp bank must be [B,F,K,17]')
+    if result['feature_map'].ndim != 4 or result['pred_depth'].ndim != 3 or result['K'].shape[-2:] != (3,3):
+        raise ValueError('Batch image geometry shapes invalid')
+    return result
+
+
+def collate_frames(frames):
+    """Aligned training/validation batch including exact labels (never model input)."""
+    return collate_inputs(frames, with_targets=True)
+
+
 def family_indices(scores, n, seed):
     if not 1 <= n <= len(scores):
         raise ValueError('Invalid family budget')
