@@ -228,6 +228,12 @@ class EvidenceProbe(nn.Module):
         groups=[]
         for key in keys:
             data=convert(key)
+            # Pure, parameter-free per-action normalization of learned GVAR
+            # representations. This avoids conflating information content with
+            # feature-scale differences; relative geometry and 0..1 validity/
+            # attention weights retain their original physical meaning.
+            if key in ("score64","pre_reader","post_reader","reader_delta","role_tokens"):
+                data=F.layer_norm(data,(data.shape[-1],))
             if key not in enabled:
                 data=torch.zeros_like(data)
             groups.append(data)
