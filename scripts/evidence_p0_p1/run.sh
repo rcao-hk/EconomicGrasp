@@ -2,7 +2,7 @@
 # Same-branch P0 distribution matching + P1 frozen-GVAR evidence decodability.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-STAGE="${1:?Usage: run.sh check|cache|p0|p1-fit|p1-infer|p1-eval|p1-compare}"
+STAGE="${1:?Usage: run.sh check|cache|p0|p1-fit|p1-audit|p1-infer|p1-eval|p1-compare}"
 : "${RUN_ROOT:?Set an independent output directory; never overwrite prior rounds}"
 DEVICE="${DEVICE:-cuda:0}"
 FACTORY="${FACTORY:-rare_grasp.runtime:Runtime}"
@@ -62,6 +62,15 @@ p1-fit)
       done
     done
   done
+  ;;
+p1-audit)
+  : "${P1_WEIGHTS:?Fixed P1 evidence probe checkpoint}"
+  LABEL="${LABEL:-quality_probe}"
+  PARTITION="${PARTITION:-validation}"
+  python -m diagnostics.evidence_decodability.audit \
+    --cache-manifest "$EVIDENCE_INDEX" --weights "$P1_WEIGHTS" \
+    --partition "$PARTITION" --device "$DEVICE" \
+    --output "$RUN_ROOT/p1_audit/$LABEL/$PARTITION"
   ;;
 p1-infer)
   : "${BOUND_CONFIG:?}" "${DATASET_ROOT:?}"
