@@ -125,7 +125,7 @@ def _join_and_validate(snap,old,new):
             g[oldn:,:16]-new["grasps"][:,:16]))>1e-6:
         raise RuntimeError("New native action geometry/score differs")
     nfeat=np.asarray(snap["features"])[old["q"],old["d"]]
-    if np.max(np.abs(nfeat-old["features"]))>1e-6 if "features" in old else False:
+    if "features" in old and np.max(np.abs(nfeat-old["features"]))>1e-6:
         raise RuntimeError("Old GVAR cached feature mismatch")
     return q,d,g
 
