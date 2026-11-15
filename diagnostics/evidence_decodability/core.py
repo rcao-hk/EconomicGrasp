@@ -30,8 +30,9 @@ FEATURE_FIELDS = (
     "role_tokens", "role_mass", "role_valid", "pred_geometry",
 )
 LABEL_FIELDS = ("quality_count", "quality_bits", "pure_collision", "empty")
-ROW_FIELDS = ("query_id", "depth_id", "native_score", "base_logit", "grasps",
-              "physical_id", "source_new", "sensor_valid", "nms_role")
+ROW_FIELDS = ("query_id", "depth_id", "native_score", "base_logit",
+              "native_score_percentile", "grasps", "physical_id", "source_new",
+              "sensor_valid", "nms_role")
 
 
 def sha256(path):
@@ -135,7 +136,8 @@ def check_bank(x, *, require_labels=True):
         raise ValueError("Expected six roles x six relative geometry values")
     if "reference_geometry" in x and np.asarray(x["reference_geometry"]).shape != (n,6,6):
         raise ValueError("Invalid privileged reference geometry")
-    for k in ("native_score","base_logit","source_new","sensor_valid","nms_role","physical_id"):
+    for k in ("native_score","base_logit","native_score_percentile",
+              "source_new","sensor_valid","nms_role","physical_id"):
         if np.asarray(x[k]).shape != (n,):
             raise ValueError(f"Invalid one-dimensional field {k}")
     if not np.array_equal(physical_ids(x["grasps"]), x["physical_id"].astype(str)):
@@ -145,8 +147,12 @@ def check_bank(x, *, require_labels=True):
     if np.any((x["query_id"]<0)|(x["query_id"]>=1024)|
               (x["depth_id"]<0)|(x["depth_id"]>3)):
         raise ValueError("Query/depth identifiers out of range")
-    if not np.isfinite(x["native_score"]).all() or not np.isfinite(x["base_logit"]).all():
-        raise ValueError("Nonfinite native scores/logits")
+    if (not np.isfinite(x["native_score"]).all()
+            or not np.isfinite(x["base_logit"]).all()
+            or not np.isfinite(x["native_score_percentile"]).all()
+            or np.any((x["native_score_percentile"]<0)|
+                      (x["native_score_percentile"]>1))):
+        raise ValueError("Nonfinite/invalid native score and percentile")
     for k in FEATURE_FIELDS + ("grasps",):
         if not np.isfinite(x[k]).all():
             raise ValueError(f"Nonfinite evidence: {k}")
