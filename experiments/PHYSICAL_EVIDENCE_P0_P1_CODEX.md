@@ -79,7 +79,7 @@ export FACTORY=rare_grasp.runtime:Runtime
 bash scripts/evidence_p0_p1/run.sh check
 ```
 
-The data must be the **accepted** 800-frame native trace plan, the **accepted** 400-frame exact new support-label audit, and the base GVAR checkpoint bound by SHA. If observed source keys differ, adapt with an explicit, tested schema adapter; do not silently fill dummy values, apply strict=False or edit checkpoint metadata.
+The data must be the **accepted** 800-frame native trace plan, the **accepted** 400-frame exact new support-label audit, and the base GVAR checkpoint bound by SHA. The native U∪D traced pack intentionally retained quality counts/bits but not collision/empty; the cache builder therefore follows the plan's original signed **source_index_path** back to the U/D full label NPZ files, verifies their SHA, physical IDs, and four-depth count/bits, and recovers collision/empty without relabeling. Those original source files must still exist at their authenticated paths. If observed source keys differ, adapt with an explicit, tested schema adapter; do not silently fill dummy values, apply strict=False or edit checkpoint metadata.
 
 ## 4. Evidence caching: first smoke, then complete 400 frames
 
