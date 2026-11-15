@@ -48,7 +48,7 @@ Captured groups:
 - `reader_delta`: post−pre.
 - `role_tokens`: six attention-weighted 64D role token means + attention masses/valid ratios. Tokens include projected appearance, learned role embeddings, action metadata and geometry; **not** measured contact forces, not isolated pure RGB.
 - `pred_geometry`: six-by-six means of reader's local surfaceXYZ/dz/known/valid features, computed from **RGB predicted depth** only.
-- `score_plus_roles`, `score_plus_geometry`, `all`: ablations with same input projection dimensions, inactive groups masked to zero. Same number of trainable parameters within task for all modes.
+- `score_plus_roles`, `score_plus_geometry`, `all`: ablations with same input projection dimensions, inactive groups masked to zero. Same number of trainable parameters within task for all modes. A parameter-free per-action LayerNorm is applied to learned score/reader/role-token vectors before masking; physical relative-geometry scalars, role masses and 0–1 validity masks retain their original scale.
 - `reference_geometry` (optional): the same predicted-depth relative geometry calculation re-evaluated on an independently provided, pixel-aligned CAD/reference depth raster. This is a privileged **offline train/validation evidence ceiling**, prohibited during test inference, and cannot be called an RGB-only method.
 
 CAUTION: The reader geometry treats missing/occluded surfaces as unknown, **not** as confirmed free space. Collision/empty/contact failure classification from exact CAD labels is an offline supervision task, not an ability to sense true contacts from a single image.
