@@ -225,14 +225,14 @@ def main():
     groups=defaultdict(list)
     for r in all_buckets:
         key=tuple(r[k] for k in
-                  ("stage","native_quartile","failure","role","source","sensor_valid"))
+                  ("stage","native_quartile","quality_group","failure","role","source","sensor_valid"))
         groups[key].append(r)
     for k,rs in sorted(groups.items()):
         n=sum(r["count"] for r in rs)
         if n<args.min_bucket_actions:continue
         strata_rows.append(dict(
-            stage=k[0],native_quartile=k[1],failure=k[2],
-            nms_role=k[3],source_new=k[4],sensor_valid=k[5],
+            stage=k[0],native_quartile=k[1],quality_group=k[2],failure=k[3],
+            nms_role=k[4],source_new=k[5],sensor_valid=k[6],
             actions=n,mean_quality=float(np.average([r["mean_quality"] for r in rs],
                                                      weights=[r["count"] for r in rs])),
             delta_mse=float(np.average([r["delta_mse"] for r in rs],
