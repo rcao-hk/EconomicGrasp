@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from diagnostics.decision_supervision.core import BASE_SHA, physical_ids
-from diagnostics.decision_supervision.data import load_plan, read_pack, frame_name
+from diagnostics.decision_supervision.data import load_plan, source_index, read_pack, frame_name
 from diagnostics.decision_supervision.runtime import make_runtime
 from diagnostics.candidate_conflict.core import build_conflict_edges
 from .core import SCHEMA, check_bank, digest, sha256, write_npz, write_json
@@ -68,7 +68,43 @@ def _support_file(root,name, expected_source_sha):
     return x,path,info
 
 
-def _old_native(pack):
+def _old_native(pack,source_arms):
+    """Recover collision/empty from the immutable original P1 U/D label files.
+
+    The subsequent U∪D trace deliberately retained count/bits but dropped
+    collision/empty. Never fabricate these missing physical failure labels.
+    """
+    seen={}
+    for strategy in ("uniform","decision"):
+        e=source_arms[strategy]
+        path=Path(e["file"])
+        if not path.is_file() or sha256(path)!=e["sha256"]:
+            raise RuntimeError(f"Original P1 label cache changed: {path}")
+        with np.load(path,allow_pickle=False) as z:
+            required=("family","depth","physical_id","collision","empty","bits","count","grasps")
+            if any(k not in z for k in required):
+                raise ValueError(f"Original P1 full failure labels missing: {path}")
+            x={k:z[k] for k in required}
+        n=len(x["family"])
+        if any(len(x[k])!=n for k in required) or x["bits"].shape!=(n,6):
+            raise ValueError("P1 old source failure labels have inconsistent dimensions")
+        if not np.array_equal(x["bits"].sum(1),x["count"]) or not np.array_equal(
+                physical_ids(x["grasps"]),x["physical_id"].astype(str)):
+            raise RuntimeError("Original P1 physical/quality label contract mismatch")
+        for i in range(n):
+            key=(int(x["family"][i]),int(x["depth"][i]))
+            label=(str(x["physical_id"][i]),int(x["collision"][i]),int(x["empty"][i]))
+            if key in seen and seen[key]!=label:
+                raise RuntimeError(f"Original Uniform/Decision disagree: {key}")
+            seen[key]=label
+    if len(seen)!=len(pack["family"]):
+        raise RuntimeError("U∪D full failure labels do not cover traced union")
+    collisions=[];empties=[]
+    for fam,depth,pid in zip(pack["family"],pack["depth"],pack["physical_id"]):
+        key=(int(fam),int(depth))
+        if key not in seen or seen[key][0]!=str(pid):
+            raise RuntimeError(f"Failed to map original exact failure label: {key}")
+        collisions.append(seen[key][1]);empties.append(seen[key][2])
     from diagnostics.decision_supervision.core import native_rows
     ids=native_rows(pack)
     return dict(q=np.asarray(pack["family"][ids],dtype=np.int64),
@@ -78,8 +114,8 @@ def _old_native(pack):
                 ids=np.asarray(pack["physical_id"][ids]).astype(str),
                 count=np.asarray(pack["count"][ids],dtype=np.int64),
                 bits=np.asarray(pack["bits"][ids],dtype=np.uint8),
-                collision=np.asarray(pack["collision"][ids],dtype=np.uint8),
-                empty=np.asarray(pack["empty"][ids],dtype=np.uint8),
+                collision=np.asarray(collisions,dtype=np.uint8)[ids],
+                empty=np.asarray(empties,dtype=np.uint8)[ids],
                 sensor_valid=np.asarray(pack["native_sensor_valid"],dtype=bool))
 
 
@@ -130,11 +166,11 @@ def _join_and_validate(snap,old,new):
     return q,d,g
 
 
-def build_one(rt, entry, args, root, contract):
+def build_one(rt, entry, source_arms, args, root, contract):
     row=entry["row"]
     name=frame_name(row)
     oldpack=read_pack(entry)
-    old=_old_native(oldpack)
+    old=_old_native(oldpack,source_arms)
     # Cache already contains post-GVAR 64D score features for audit parity.
     from diagnostics.decision_supervision.core import native_rows
     old["features"]=np.asarray(oldpack["features"][native_rows(oldpack)])
@@ -149,6 +185,8 @@ def build_one(rt, entry, args, root, contract):
         raise FileNotFoundError(f"Missing aligned reference: {reference_path}")
     frame_contract=dict(schema=SCHEMA,plan_sha256=contract["plan_sha256"],
                         source_pack_sha256=entry["sha256"],
+                        original_arms_sha256={a:source_arms[a]["sha256"]
+                                             for a in ("uniform","decision")},
                         support_file_sha256=sha256(new_path),
                         base_checkpoint_sha256=BASE_SHA,seed=contract["snapshot_seed"],
                         evidence_code_sha256=contract["evidence_code_sha256"],
@@ -237,6 +275,12 @@ def build(args):
     if rt.config_digest!=plan["base_config_digest"]:
         raise RuntimeError("Frozen runtime/config not equal to support plan")
     frames=_choose_frames(plan)
+    source,paired=source_index(plan["source_index_path"],formal=True)
+    if source["index_sha256"]!=plan["source_index_sha256"]:
+        raise RuntimeError("Original P1 signed index differs from accepted U∪D plan")
+    source_by_frame={frame_name(es["uniform"]["row"]):es for _,es in paired}
+    if len(source_by_frame)!=800:
+        raise RuntimeError("Original P1 U/D source index has duplicate/incomplete frames")
     if args.limit:
         frames=frames[:args.limit]
     contract=dict(schema=SCHEMA,kind="evidence-cache",
@@ -253,7 +297,10 @@ def build(args):
                   test_labels_used=False,train_scene_range=[0,100])
     records=[]
     for i,e in enumerate(frames,1):
-        rec=build_one(rt,e,args,root,contract)
+        key=frame_name(e["row"])
+        if key not in source_by_frame:
+            raise RuntimeError(f"Missing original P1 source arms: {key}")
+        rec=build_one(rt,e,source_by_frame[key],args,root,contract)
         records.append(rec)
         if i%16==0 or i==len(frames):
             print(f"[evidence-cache] {i}/{len(frames)} {frame_name(e['row'])} "
