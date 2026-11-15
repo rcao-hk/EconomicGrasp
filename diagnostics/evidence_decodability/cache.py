@@ -58,6 +58,8 @@ def _support_file(root,name, expected_source_sha):
                     ("physical_id","grasps","quality_count","success_bits",
                      "collision","empty","source_score","strata")):
         raise ValueError(f"Incomplete new native-action labels: {path}")
+    if n!=64:
+        raise ValueError(f"Accepted P1 support audit must contain 64 new actions/frame: {n}")
     if x["success_bits"].shape!=(n,6) or not np.array_equal(
             x["success_bits"].sum(1),x["quality_count"]):
         raise ValueError("Quality bits/count mismatch for new actions")
@@ -140,6 +142,11 @@ def build_one(rt, entry, args, root, contract):
     new,new_path,new_meta=_support_file(args.support_root,name,entry["sha256"])
     out=root/"frames"/f"{name}.npz"
     side=out.with_suffix(".json")
+    reference_path=(Path(args.reference_root)/row["domain"]/
+                    f"scene_{row['scene']:04d}"/"realsense"/f"{int(row['anno']):04d}.npy"
+                    if args.reference_root else None)
+    if reference_path is not None and not reference_path.is_file():
+        raise FileNotFoundError(f"Missing aligned reference: {reference_path}")
     frame_contract=dict(schema=SCHEMA,plan_sha256=contract["plan_sha256"],
                         source_pack_sha256=entry["sha256"],
                         support_file_sha256=sha256(new_path),
@@ -147,6 +154,7 @@ def build_one(rt, entry, args, root, contract):
                         evidence_code_sha256=contract["evidence_code_sha256"],
                         capture_code_sha256=contract["capture_code_sha256"],
                         reference_config=contract["reference_config"],
+                        reference_depth_sha256=sha256(reference_path) if reference_path else None,
                         row=row)
     if out.exists() or side.exists():
         if not args.resume or not (out.is_file() and side.is_file()):
@@ -199,13 +207,9 @@ def build_one(rt, entry, args, root, contract):
     if args.reference_root:
         if int(row["scene"])>=100:
             raise ValueError("Never export privileged reference geometry on test scenes")
-        path=Path(args.reference_root)/row["domain"]/f"scene_{row['scene']:04d}"/"realsense"/f"{int(row['anno']):04d}.npy"
-        if not path.is_file():
-            raise FileNotFoundError(f"Missing explicitly aligned reference depth: {path}")
-        ref=np.load(path,allow_pickle=False)
+        ref=np.load(reference_path,allow_pickle=False)
         values["reference_geometry"]=privileged_geometry_from_depth(
             rt,capture,snap,q,d,ref,args.reference_unit)
-        frame_contract["reference_depth_sha256"]=sha256(path)
     check_bank(values)
     write_npz(out,**values)
     meta=dict(schema=SCHEMA,kind="native-evidence-frame",row=row,
