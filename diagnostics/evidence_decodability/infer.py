@@ -42,12 +42,17 @@ def load_probe(path,device):
 
 
 def native_actions(rt,row,seed,model=None):
+    if model is None:
+        # Native baseline requires no extra GVAR probes/attention extraction.
+        # Run the same strictly loaded frozen checkpoint, without modifying it.
+        snap=rt.snapshot(row,seed)
+        bank=np.asarray(snap["grasps"],dtype=np.float32)
+        d=bank[...,0].argmax(axis=1)
+        return bank[np.arange(1024),d].copy(),snap
     with GVARCapture(rt) as capture:
         snap=rt.snapshot(row,seed)
     bank=np.asarray(snap["grasps"],dtype=np.float32)
     d=bank[...,0].argmax(axis=1)
-    if model is None:
-        return bank[np.arange(1024),d].copy(),snap
     q=np.arange(1024,dtype=np.int64)
     evidence=capture.chosen(snap,q,d)
     batch=dict(query_id=q,depth_id=d,
