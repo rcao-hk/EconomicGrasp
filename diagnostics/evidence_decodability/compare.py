@@ -31,9 +31,14 @@ def _read_run(root,split):
     if ap.shape!=expected or not np.isfinite(ap).all():
         raise ValueError(f"Malformed AP array: {ap.shape}")
     identity={k:mf[k] for k in
-              ("base_checkpoint_sha256","interval","snapshot_seed",
-               "collision","selection")}
-    return mf,ap.mean(axis=(1,2,3))*100.,identity
+              ("base_checkpoint_sha256","base_config_digest",
+               "bound_config_sha256","runtime","interval",
+               "snapshot_seed","collision","selection")}
+    frame_banks={(r["scene"],r["anno"]):r["frozen_bank_sha256"]
+                 for r in mf["records"]}
+    if len(frame_banks)!=len(mf["records"]):
+        raise ValueError("Duplicate frozen-frame bank identity")
+    return mf,ap.mean(axis=(1,2,3))*100.,identity,frame_banks
 
 
 def compare_runs(runs, bootstrap=5000,seed=20261115):
@@ -47,6 +52,7 @@ def compare_runs(runs, bootstrap=5000,seed=20261115):
         raise ValueError("Require at least one learned P1 probe")
     raw={}
     contract=None
+    expected_banks={}
     for s in seeds:
         names=runs[s]
         if set(names)!={"native",*all_modes}:
@@ -57,10 +63,13 @@ def compare_runs(runs, bootstrap=5000,seed=20261115):
                 raise ValueError(f"Missing split in {s}/{mode}")
             vals=[]
             for split in SPLITS:
-                manifest,ap,ident=_read_run(names[mode][split],split)
+                manifest,ap,ident,banks=_read_run(names[mode][split],split)
                 if contract is None:contract=ident
                 elif contract!=ident:
                     raise ValueError(f"Base/geometry/frames/collision mismatch: {s}/{mode}/{split}")
+                if split not in expected_banks:expected_banks[split]=banks
+                elif expected_banks[split]!=banks:
+                    raise ValueError(f"Frozen physical grasp bank changed: {s}/{mode}/{split}")
                 vals.append(ap)
             raw[s][mode]=np.stack(vals,axis=0)  # [split=3, scene=30]
     rng=np.random.default_rng(seed)
