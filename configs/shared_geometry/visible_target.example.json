@@ -1,0 +1,10 @@
+{
+  "source": "rendered_visible",
+  "same_camera_as_native": true,
+  "calibration_description": "REPLACE: identify renderer, camera extrinsics and intrinsics; must be native camera frame, not w2c-transformed twice",
+  "depth_template": "/ABS/CLEAN_RENDERED/scene_{scene:04d}/realsense/depth/{anno:04d}.png",
+  "intrinsics_template": "/ABS/GRASPNET/scenes/scene_{scene:04d}/realsense/meta/{anno:04d}.mat",
+  "intrinsics_key": "intrinsic_matrix",
+  "depth_scale_to_m": 0.001,
+  "max_depth_m": 10.0
+}

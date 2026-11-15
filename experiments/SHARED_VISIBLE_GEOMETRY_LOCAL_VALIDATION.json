@@ -1,0 +1,34 @@
+{
+  "status": "CPU_SYNTHETIC_PASSED",
+  "tests": 27,
+  "python": "3.13.5",
+  "torch": "2.10.0+cpu",
+  "numpy": "2.3.5",
+  "scipy": "1.17.0",
+  "cuda_available": false,
+  "compileall": "passed",
+  "shell_syntax": "passed",
+  "parent_commit": "7c41b7551a2209c228b1e2669cf524942c0f9361",
+  "remote_CUDA_CAD_training_AP": "NOT_RUN",
+  "example_parameter_counts_feature128_hidden64": {
+    "h1_h2_h2_stale": 71815,
+    "predicted": 13313,
+    "local_feature128": 13633
+  },
+  "tested_git_blobs": {
+    "configs/shared_geometry/visible_target.example.json": "ed8eef260c26a146318de581ffb9bea595272b2b",
+    "experiments/SHARED_VISIBLE_GEOMETRY_ACTION_REFINEMENT_CODEX.md": "70e647003b76d3fb8978c6847ffc2f295c4b1cf4",
+    "scripts/shared_geometry/run.sh": "c9324240ef97588f29d892ef7e3d422a0c443ef2",
+    "shared_geometry/__init__.py": "7ebbcff01c03e6486972f06a9faa9fd9bf1d942b",
+    "shared_geometry/cli.py": "c58750feffa5b12ee92b96bc8de6faed81cd5833",
+    "shared_geometry/data.py": "637a2712b0b6427c6ec3ad9ed57894abf50dd167",
+    "shared_geometry/experiment.py": "33d62d6a110eb31f3210535939432d6c6ac55594",
+    "shared_geometry/geometry.py": "fef50560951758e288d2f12227b29166261ed01b",
+    "shared_geometry/inference.py": "38ba5c84364c7b0d0c942550de955fd9ab92fb21",
+    "shared_geometry/model.py": "fe50327540b9950f63a673ac81908e85dfb31ebb",
+    "shared_geometry/paired.py": "8b49d2cc69f4c61bed40807dcd990f95013f1b47",
+    "shared_geometry/report.py": "f2096f0bb511dd99077fb49eaf8e1cf62a9b2220",
+    "shared_geometry/runtime.py": "f0a1f52ccf851dd397c232a6940094967187da02",
+    "tests/test_shared_geometry.py": "640731fa44824a462e2658cb0d39de5fec1eb69e"
+  }
+}
