@@ -7,6 +7,7 @@ Privileged reference-depth geometry and failure-class classifiers are forbidden.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -69,7 +70,7 @@ def native_actions(rt,row,seed,model=None):
 
 
 def infer(a):
-    rt,_=make_runtime(a)
+    rt,runtime_identity=make_runtime(a)
     model,protocol=(None,None) if a.weights is None else load_probe(a.weights,rt.device)
     if protocol is not None and protocol.get("cache_manifest_sha256") is None:
         raise ValueError("Missing training evidence cache identity")
@@ -93,9 +94,11 @@ def infer(a):
         out=root/f"scene_{scene:04d}"/"realsense"/f"{anno:04d}.npy"
         out.parent.mkdir(parents=True,exist_ok=True)
         np.save(out,filtered)
+        frozen=np.ascontiguousarray(np.asarray(snap["grasps"])[...,1:16],dtype=np.float32)
         rec.append(dict(scene=scene,anno=anno,path=str(out.relative_to(root)),
                         sha256=sha256(out),num_pre_filter=len(result),
-                        num_post_filter=len(filtered)))
+                        num_post_filter=len(filtered),
+                        frozen_bank_sha256=hashlib.sha256(frozen.tobytes()).hexdigest()))
         if n%26==0 or n==len(frames):
             print(f"[P1 infer] {n}/{len(frames)} scene={scene} frame={anno}",flush=True)
     write_json(root/"inference.json",dict(
@@ -103,6 +106,9 @@ def infer(a):
         complete=not bool(a.limit),split=a.split,camera="realsense",
         interval=a.interval,num_frames=len(frames),
         base_checkpoint_sha256=BASE_SHA,
+        base_config_digest=rt.config_digest,
+        bound_config_sha256=sha256(a.config),
+        runtime=runtime_identity,
         probe_sha256=sha256(a.weights) if a.weights else None,
         probe_protocol=protocol,
         use_privileged_reference=False,used_test_labels=False,
