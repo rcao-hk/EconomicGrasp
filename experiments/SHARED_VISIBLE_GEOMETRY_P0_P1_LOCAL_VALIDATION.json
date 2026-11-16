@@ -1,0 +1,24 @@
+{
+  "contract": "shared-visible-geometry-p0-p1-validation-v1",
+  "parent_branch": "exp/shared-visible-geometry-multibatch",
+  "parent_head_before_edit": "d7d49dc2b2c67b82a288d3fa18a5fbdfbbf1ad76",
+  "evidence_source": "EXPERIMENT_PROTOCOL_RESULTS_CN_20261116.md",
+  "cpu_regression_tests": "51 passed",
+  "cpu_new_tests": "10 passed",
+  "python_compileall": "passed",
+  "shell_bash_n": "passed",
+  "p1_pred_analytic_parity": "passed on synthetic single-scene action family",
+  "p1_b4_grad_parity": "passed on synthetic 4-scene batch",
+  "p1_full_synthetic_pipeline": "two arms trained and compared; optional learned H2 comparison passed",
+  "p0_full_synthetic_pipeline": "existing checkpoint + validation index -> family report passed",
+  "authentic_GPU_CAD_test": "NOT_RUN",
+  "official_test_AP": "NOT_RUN",
+  "no_teacher_inference": "P1 clean_visible has only offline build/train/validation compare; no official test subcommand",
+  "source_sha256": {
+    "shared_geometry/p0_relative_decision.py": "8d520200642e6bb182d8d873517d7695d715395aeb7e4cfe4ed8efcdeff2750a",
+    "shared_geometry/p1_clean_visible.py": "d00ee53ddd07395ea2a82a70a78fd9ad01f482e5284c50310936355e337322ce",
+    "scripts/shared_geometry/run_p0_p1.sh": "c70e0c66550051f6b987a3407471484731cc54919a26a815e572e755dde04441",
+    "tests/test_shared_geometry_p0_p1.py": "4722837a2a1b7ee6b1299a6e755f9bb0c909f08fe894bfe7f3d18fb3ed2ed78e",
+    "experiments/SHARED_VISIBLE_GEOMETRY_P0_P1_CODEX.md": "607123c9209cbe3509e35cc826a0da466fabb512078bd5665257f8946c257318"
+  }
+}
