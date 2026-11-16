@@ -2,7 +2,7 @@
 # Same-branch physical-evidence transfer: strict, non-training P0/P1.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-STAGE="${1:?Usage: run.sh check|collect|p0|stress|make-ledger|index-external|holdout}"
+STAGE="${1:?Usage: run.sh check|validation-replay|collect|p0|stress|make-ledger|index-external|holdout}"
 : "${RUN_ROOT:?Use a NEW evidence-transfer output root, not prior accepted results}"
 DEVICE="${DEVICE:-cuda:0}"
 mkdir -p "$RUN_ROOT"
@@ -12,6 +12,24 @@ check)
     -p 'test_evidence_transfer.py' -v
   python -m compileall -q diagnostics/evidence_transfer tests/test_evidence_transfer.py
   bash -n scripts/evidence_transfer/run.sh
+  ;;
+validation-replay)
+  : "${EVIDENCE_CACHE_MANIFEST:?Accepted 400-frame signed train evidence cache}"
+  : "${SCORE64_WEIGHTS:?Frozen score64 quality head from same cached model}"
+  : "${ALL_QUALITY_HEAD:?Frozen all quality head}"
+  : "${BOUND_CONFIG:?Frozen GVAR bound config}"
+  : "${DATASET_ROOT:?GraspNet root}"
+  extra=()
+  if [[ "${LIMIT:-0}" != 0 ]]; then extra+=(--limit "$LIMIT"); fi
+  python -m diagnostics.evidence_transfer.validation_replay \
+    --cache-manifest "$EVIDENCE_CACHE_MANIFEST" \
+    --weights-score64 "$SCORE64_WEIGHTS" --weights-all "$ALL_QUALITY_HEAD" \
+    --config "$BOUND_CONFIG" --dataset-root "$DATASET_ROOT" \
+    --gntrans-root "${GNTRANS_RGB_ROOT:-}" \
+    --factory "${FACTORY:-rare_grasp.runtime:Runtime}" --device "$DEVICE" \
+    --domain "${DOMAIN:-original}" --snapshot-seed 20261113 \
+    --output "${VALIDATION_REPLAY_ROOT:-$RUN_ROOT/validation_replay_${DOMAIN:-original}}" \
+    "${extra[@]}"
   ;;
 collect)
   : "${ACCEPTED_RUNS_JSON:?JSON native/score64/all accepted inference roots}"
