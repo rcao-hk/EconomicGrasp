@@ -42,7 +42,7 @@ def replay(a):
         raise RuntimeError("Frozen runtime factory and bound-config source hashes differ from accepted evidence cache")
     if int(a.snapshot_seed)!=int(mf["contract"]["snapshot_seed"]):
         raise ValueError("Validation replay must use identical accepted frozen snapshot seed")
-    model={}
+    model={};model_protocol={}
     for mode in ("score64","all"):
         path=getattr(a,"weights_"+mode)
         head,protocol=load_probe(path,a.device)
@@ -50,6 +50,7 @@ def replay(a):
                 protocol.get("cache_manifest_sha256")!=mf["manifest_sha256"]):
             raise RuntimeError(f"{mode} scorer not trained on same evidence cache")
         model[mode]=head
+        model_protocol[mode]=protocol
     root=Path(a.output)
     if root.exists() and any(root.iterdir()):
         raise FileExistsError("Use new validation replay output root")
@@ -119,7 +120,9 @@ def replay(a):
                       runtime=identity,
                       selection="rank_executed; original native depth, unchanged geometry",
                       collision="original sensor voxel0.01 threshold0.01 approach0.05",
-                      probe_sha256=model_source,used_test_labels=False,
+                      probe_sha256=model_source,
+                      probe_protocol=model_protocol.get(name),
+                      used_test_labels=False,
                       seen_by_frozen_backbone=True,
                       previously_inspected_training_domain=True,
                       records=recs)
