@@ -110,6 +110,9 @@ def gate(manifest, ledger, *, require_untouched):
             raise ValueError("External holdout must name its actual evaluation/quality protocol")
         if len(str(provenance["dataset_source_sha256"]))!=64:
             raise ValueError("Bad external dataset source SHA256")
+        source_path=Path(provenance.get("dataset_source",""))
+        if not source_path.is_file() or sha256(source_path)!=provenance["dataset_source_sha256"]:
+            raise ValueError("External dataset version/protocol evidence file missing or modified")
     return report
 
 
