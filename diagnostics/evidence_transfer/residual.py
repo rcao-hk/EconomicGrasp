@@ -190,7 +190,23 @@ def run(a):
             print(f"[P0 residual] {ix}/{len(manifest['frames'])}",flush=True)
     _write_csv(root/"per_action.csv",actions)
     _write_csv(root/"per_frame.csv",frames)
-    scenes=_group_by(frames,("dataset","split","scene"),1)
+    by_scene=defaultdict(list)
+    for frame in frames:
+        by_scene[(frame["dataset"],frame["split"],frame["scene"])].append(frame)
+    scenes=[]
+    count_fields={"actions","zero_actions","collision_actions",
+                  "empty_actions","other_zero_actions","high_native_zero_actions",
+                  "strong_quality_actions","wrong_score64","wrong_all",
+                  "new_wrong_pairs","rescued_pairs"}
+    for (dataset,split,scene),group in sorted(by_scene.items()):
+        row=dict(dataset=dataset,split=split,scene=scene,frames=len(group))
+        for name in group[0]:
+            if name in ("dataset","split","scene","anno"):
+                continue
+            values=[x[name] for x in group if x.get(name) is not None]
+            row[name]=(int(sum(values)) if name in count_fields
+                       else float(np.mean(values)) if values else None)
+        scenes.append(row)
     _write_csv(root/"per_scene.csv",scenes)
     # Object ID is scene-local; never pool object IDs across different scenes.
     objects=_group_by(actions,("dataset","split","scene","assigned_obj"),a.min_cell)
@@ -207,7 +223,7 @@ def run(a):
         records=[r for r in frames if r["dataset"]==dataset and r["split"]==split]
         # First aggregate by scene, then bootstrap scenes: never pretend each
         # frame, object or candidate is an IID new environment.
-        sr=_group_by(records,("scene",),1)
+        sr=[r for r in scenes if r["dataset"]==dataset and r["split"]==split]
         stats[f"{dataset}/{split}"]={
             "frames":len(records),"scenes":len(sr),
             "delta_mse":_bootstrap_scene_difference(sr,"delta_mse",a.bootstrap,a.seed),
