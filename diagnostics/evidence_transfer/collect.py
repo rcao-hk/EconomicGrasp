@@ -71,8 +71,8 @@ def _load_label_index(path):
     if not path:return None
     obj=json.loads(Path(path).read_text(encoding="utf-8"))
     signature=obj.pop("index_sha256",None)
-    if signature!=digest(obj):
-        raise ValueError("Exact-label reuse manifest signature failed")
+    if signature!=digest(obj) or obj.get("schema")!="gvar-exact-label-inventory-v1":
+        raise ValueError("Exact-label reuse manifest signature/schema failed")
     records={}
     for r in obj["records"]:
         key=(str(r["dataset"]),str(r["split"]),str(r["scene"]),int(r["anno"]))
