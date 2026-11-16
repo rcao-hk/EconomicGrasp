@@ -235,6 +235,17 @@ def collect(a):
         raise ValueError("Supply accepted inference roots for native, score64 and all")
     official=a.split.startswith("test_")
     sources={m:_source(path,a.split,require_official=official) for m,path in runs.items()}
+    for method,source in sources.items():
+        manifest=source[0]
+        if method=="native":
+            if manifest.get("probe_sha256") is not None:
+                raise ValueError("Native source unexpectedly used a new learned head")
+        else:
+            protocol=manifest.get("probe_protocol")
+            if not isinstance(protocol,dict) or protocol.get("evidence_mode")!=method:
+                raise ValueError(f"Frozen {method} source must name its actual quality evidence mode")
+            if protocol.get("task")!="quality" or protocol.get("privileged_reference"):
+                raise ValueError("Cannot use failure classifier or privileged reference in physical score comparison")
     if a.split=="probe_validation":
         expected_domain="gntrans" if a.dataset=="GNTrans" else "original"
         for name,src in sources.items():
