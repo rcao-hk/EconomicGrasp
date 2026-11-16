@@ -15,6 +15,7 @@ import numpy as np
 from diagnostics.decision_supervision.core import BASE_SHA, physical_ids
 from diagnostics.decision_supervision.attribution_core import compiled_keep, final_ids
 from rare_grasp.core import success_bits
+from diagnostics.candidate_conflict.core import official_ap_matrix
 from .contract import (SCHEMA, METHODS, SPLITS, sha256, digest, save_npz,
                        save_json, validate_frame, load_manifest)
 
@@ -151,17 +152,24 @@ def _frame(methods,key,compiled,exact,index,dataset,split,a):
         pure_collision=np.asarray(labels["pure_collision"],dtype=np.uint8),
         empty=np.asarray(labels["empty"],dtype=np.uint8),
     )
+    objects=_full_obj(n,chosen,out["assigned_obj"])
+    invalid=np.ones(n,dtype=bool)
+    invalid[chosen]=bad
+    friction=np.full(n,-1.0,dtype=np.float64)
+    friction[chosen]=np.asarray(labels["friction"],dtype=np.float64)
+    ap_replay={}
     for method in METHODS:
-        selected=final_ids(nms[method],arrays[method][:,0],
-                           _full_obj(n,chosen,out["assigned_obj"]))
+        selected=final_ids(nms[method],arrays[method][:,0],objects)
         # final_ids only reads chosen (NMS-surviving) labels;
         # other positions carry -1 but cannot influence selected set.
         for k in (10,50):
             out[f"top{k}_{method}"]=np.isin(chosen,selected[:k]).astype(np.uint8)
+        ap_replay[method]=official_ap_matrix(arrays[method],objects,invalid,
+                                               friction,nms[method],arrays[method][:,0])
     validate_frame(out)
     return out,dict(frame=str(key),full_candidates=n,labeled=len(chosen),
                     label_source="signed_cache" if index is not None and lbl_key in index else "strict_official_relabel",
-                    nms_survivors={m:len(v) for m,v in nms.items()})
+                    nms_survivors={m:len(v) for m,v in nms.items()}),ap_replay
 
 
 def _full_obj(n,chosen,obj):
@@ -180,6 +188,16 @@ def collect(a):
         raise ValueError("Supply accepted inference roots for native, score64 and all")
     official=a.split.startswith("test_")
     sources={m:_source(path,a.split,require_official=official) for m,path in runs.items()}
+    official_arrays={}
+    if official:
+        start={"test_seen":100,"test_similar":130,"test_novel":160}[a.split]
+        for name,(_,root,_) in sources.items():
+            path=root/f"ap_{a.split}_realsense.npy"
+            ap=np.load(path,allow_pickle=False)
+            if (ap.ndim!=4 or ap.shape[0]!=30 or ap.shape[-2:]!=(50,6)
+                    or not np.isfinite(ap).all()):
+                raise ValueError(f"Accepted official AP shape invalid: {path}")
+            official_arrays[name]=ap
     same={k:len(v[2]) for k,v in sources.items()}
     if len(set(same.values()))!=1:
         raise ValueError("Different source frame coverage")
@@ -214,7 +232,20 @@ def collect(a):
     root.mkdir(parents=True,exist_ok=True)
     rows=[]
     for i,key in enumerate(keys,1):
-        arr,audit=_frame(sources,key,compiled,evaluator,index,a.dataset,a.split,a)
+        arr,audit,replayed=_frame(sources,key,compiled,evaluator,index,a.dataset,a.split,a)
+        if official:
+            for name,ap in replayed.items():
+                idx=key[0]-start
+                step=int(sources[name][0]["interval"])
+                if key[1]%step:
+                    raise ValueError("Saved inference annotation grid differs from official AP")
+                expected=official_arrays[name][idx,key[1]//step]
+                if expected.shape!=(50,6):
+                    raise ValueError("Frame official AP matrix malformed")
+                err=float(np.max(np.abs(ap-expected)))
+                if err>a.ap_tolerance:
+                    raise RuntimeError(f"Official AP parity failed: {key}/{name}: {err:.9g}")
+                audit[f"ap_parity_maxabs_{name}"]=err
         p=root/"frames"/f"scene_{key[0]:04d}"/f"{key[1]:04d}.npz"
         save_npz(p,**arr)
         rows.append(dict(dataset=a.dataset,split=a.split,scene=key[0],anno=key[1],
@@ -244,6 +275,8 @@ def main():
     p.add_argument("--dataset-root",required=True)
     p.add_argument("--label-manifest",default=None,
                    help="Signed per-frame exact-label NPZ index with all physical IDs")
+    p.add_argument("--ap-tolerance",type=float,default=1e-6,
+                   help="Formal per-frame official AP replay must pass")
     p.add_argument("--allow-relabel",action="store_true",
                    help="Explicitly pay CAD evaluator cost for missing exact labels")
     p.add_argument("--limit",type=int,default=0,help="Smoke only")
@@ -251,6 +284,8 @@ def main():
     a=p.parse_args()
     if not a.label_manifest and not a.allow_relabel:
         p.error("Require signed label reuse or explicit --allow-relabel")
+    if not 0<a.ap_tolerance<=1e-6:
+        p.error("Do not loosen existing official AP parity tolerance")
     collect(a)
 
 
