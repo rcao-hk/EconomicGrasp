@@ -242,7 +242,7 @@ def main():
     print(json.dumps({"scenes":result["scenes"],
                       "within_scene_slope":result["within_scene_slope"],
                       "interventions":{k:v["same_ray_median_abs_delta"]
-                                       for k,v in mode_stats.items()}},
+                                       for k,v in result["interventions"].items()}},
                       indent=2))
 
 
