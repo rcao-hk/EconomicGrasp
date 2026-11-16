@@ -1,0 +1,15 @@
+{
+  "date": "2026-11-16",
+  "branch": "exp/shared-visible-geometry-multibatch",
+  "parent_sha": "48dc142ffc923463b11e6b4980cdbfe63add8779",
+  "status": "LOCAL_CPU_ACCEPTANCE_ONLY",
+  "tests": {
+    "p0_p1_plus_p2": {"ran": 14, "passed": 14, "failed": 0},
+    "multibatch_regression": {"ran": 14, "passed": 14, "failed": 0},
+    "total_individually_verified": 28,
+    "previous_shared_geometry_suite": "FULL ORIGINAL 27-TEST SUITE NOT COMPLETED ON THIS TURN; do not claim 55 green tests"
+  },
+  "syntax": {"python_compile": "passed", "bash_n": "passed"},
+  "covered": ["P1 matched geometry checkpoint provenance", "native-relative family metric parity", "paired scene source contrast", "signed validation only", "P2 single shared reader two source training", "true B2 synthetic training", "resume same-protocol", "strict no overwrite", "multi-batch legacy regression"],
+  "not_run": ["117 real checkpoints P2 diagnosis", "117 shared reader full training", "official GraspNet AP", "multi-seed full confirmation"]
+}
