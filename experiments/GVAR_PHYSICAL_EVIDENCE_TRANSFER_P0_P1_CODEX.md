@@ -30,7 +30,7 @@
 | `collect.py` | 从已有正式推断dump或验证replay读取同动作候选；编译NMS并集，复用已有CAD标签或显式重新标注；测试帧必须官方50×6 AP逐元素parity≤1e−6 |
 | `residual.py` | 不重训的同动作delta分数、MSE、强质量、碰撞/empty/other-zero、场景/对象/姿态条件统计与scene-bootstrap |
 | `intervene.py` | 冻结all质量头下零化/置乱预定义GVAR证据组及六role的敏感性实验；仅标签已存在的验证/审计场景 |
-| `index.py` | 建立真正有SHA的CAD标签索引、基座训练／历史开发场景清单与外部数据索引 |
+| `index.py` | 建立真正有SHA的CAD标签索引、验证/Novel多manifest严格合并、基座训练／历史开发场景清单与外部数据索引 |
 | `holdout.py` | 验证基础训练、开发历史、外部真实来源和无重叠；同样的native/score64/all质量对照；无资格不能声称independent |
 | `scripts/evidence_transfer/run.sh` | 全部独立执行入口 |
 | `tests/test_evidence_transfer.py` | 无CAD和CUDA的合成单元测试 |
@@ -134,10 +134,22 @@ SPLIT=test_novel COLLECT_ROOT="$RUN_ROOT/collected/test_novel" \
 
 同样创建一次Original验证专用 `ACCEPTED_RUNS_JSON` 指向 `validation_replay_original/{native,score64,all}`，使用 `SPLIT=probe_validation`；需复用验证标签或显式CAD补标。GNTrans独立用 `--dataset GNTrans`（或直接CLI），不能与Original混为一份label协议。
 
+将两份**完整且签名已核验**的Original validation与Novel manifest合并，避免用不同动作池定义的指标直接作“迁移反转”结论：
+
+```bash
+export MERGE_MANIFESTS="$RUN_ROOT/collected/probe_validation/manifest.json $RUN_ROOT/collected/test_novel/manifest.json"
+bash scripts/evidence_transfer/run.sh merge-manifests
+export ACTION_MANIFEST="$RUN_ROOT/merged_matched_manifest.json"
+```
+
+合并会重验每个NPZ的物理动作、精确标签和SHA，重复scene/frame被拒绝。两部分条件分布相同指的是**相同筛选机制**（三模式compiled NMS survivor并集），而不是验证与Novel的动作在物理上完全相同，后者不可能成立。
+
 ## 5. P0-C：精细残差归因，限制事后故事
 
 ```bash
-export ACTION_MANIFEST="$RUN_ROOT/collected/test_novel/manifest.json"
+# 若已构建merged manifest，ACTION_MANIFEST指向其路径；
+# 否则对单一split的manifest分别输出独立P0报告。
+export ACTION_MANIFEST="${ACTION_MANIFEST:-$RUN_ROOT/collected/test_novel/manifest.json}"
 bash scripts/evidence_transfer/run.sh p0
 ```
 
