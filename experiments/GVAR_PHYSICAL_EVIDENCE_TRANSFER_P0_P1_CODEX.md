@@ -261,3 +261,14 @@ REQUIRE_UNTOUCHED=1 bash scripts/evidence_transfer/run.sh holdout
 - [ ] 结果必须单列：物理质量可解码、错误类型、评分迁移与最终动作选择，不能把某一项改善替代其他项。
 
 **本工作单状态：**代码和静态执行协议已写入GitHub；截至本次答复，还没有117上的新验证/新增GT测试结果。CPU合成测试是否完成需以实际日志为准，不能凭代码存在声称通过。
+
+
+## 9. 2026-11-16：GC6D冻结depth head的camera/crop/distance响应（后续工作）
+
+此前GC6D几何审计发现，在1014帧中有523帧背景邻域过滤后无候选，预测深度帧中位约0.397m而参考中位约0.656m；排查K/crop/单位未发现足以解释几十厘米失配的错误。
+
+**新实验独立工作单：** [GC6D_FROZEN_DEPTH_CAMERA_CROP_DISTANCE_CODEX.md](GC6D_FROZEN_DEPTH_CAMERA_CROP_DISTANCE_CODEX.md)
+
+新增 `diagnostics/frozen_depth_response/` 和 `scripts/frozen_depth_response/run.sh`，在**同一分支**严格复用历史MIX50 e15冻结checkpoint，不训练也不修改现有质量头。预注册三部分：同scene13视角距离响应，数字crop/zoom与严格K'=AK且同射线评价，K-only负控制与同scenepose FiLM置换敏感性。
+
+重要边界：数字crop/zoom不等于更换真实相机焦距；不从当前已看过78个GC6D场景拟合倍率、不生成任何“修复后官方抓取AP”。原生GC6D RGB crop使用sensor depth/workspace mask，完整流水线不能被称为sensor-depth-free。新工作单及脚本尚需117服务器CPU/CUDA实际验收。
