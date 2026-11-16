@@ -58,7 +58,7 @@ def frame_record(frame, file, *, base_sha, code_sha):
         reference_source="sensor_depth_m",
         raw_hw=list(frame["raw_hw"]),
         crop_K_error=frame["crop_K_error"],
-        depth_factor_m_divisor=frame["reference"].dtype.name if False else None,
+        depth_factor_divisor=float(frame["depth_factor_divisor"]),
         producer_code_sha256=code_sha)
 
 
