@@ -226,3 +226,19 @@ The comparison uses paired scenes stratified by Seen/Similar/Novel; training-hea
 11. Run CPU synthetic test and 117 CUDA single-frame smoke before claiming complete. This ChatGPT turn did not run any actual 117 CUDA/CAD experiment.
 
 Final Codex deliverables: immutable frame cache manifest, fully verified 400-frame evidence NPZ, P0 matched-strata report, all P1 train histories + fixed last checkpoints, failure-type confusion, official per-split AP arrays and paired scene report, exact sources/checkpoints SHA, per-stage execution/validation logs, and concise Chinese scientific conclusions distinguishing facts from hypotheses.
+
+
+## 9. 2026-11-16：物理残差迁移与真正独立验证（后续诊断）
+
+冻结 GVAR 中间证据在当前训练域留出验证上可解码，特别是empty；但单seed all-score head在已观察Novel的固定最终集合排序更差，且Collision↑、Empty↓、强质量动作↓。新的科学问题是哪些场景/物体/姿态/几何信号改变评分，以及基础模型训练场景内验证是否高估跨场景可迁移性。
+
+**独立工作单：[GVAR_PHYSICAL_EVIDENCE_TRANSFER_P0_P1_CODEX.md](GVAR_PHYSICAL_EVIDENCE_TRANSFER_P0_P1_CODEX.md)**。
+
+新增模块 `diagnostics/evidence_transfer/` 与入口 `scripts/evidence_transfer/run.sh`。这些脚本：
+- 复放相同原生验证动作，复用以前的Novel推断和CAD标签；
+- 对GraspNet正式AP要求逐帧原生50×6 parity≤1e−6；
+- 按物体/场景/姿态/CAD失败类型分析all与score64的同动作评分残差；
+- 在固定all head下执行明确标为OOD的six-role/geometry掩码置乱；
+- 为外部真实新场景建立base训练/历史开发记录双重来源门禁，不将已使用GraspNet Novel误报成independent validation。
+
+不修改原训练头、旧权重或main。不提前宣称已通过真实GPU/CAD验收；执行时先阅读新工作单、测试与来源说明。
