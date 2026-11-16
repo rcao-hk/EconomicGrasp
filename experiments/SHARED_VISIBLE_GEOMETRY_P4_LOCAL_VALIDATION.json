@@ -1,0 +1,72 @@
+{
+  "scope": "local CPU-only; no 117 CUDA/teacher/CAD or new official AP",
+  "base_commit": "a0927a19776753f71badb40c2d904b633751e76c",
+  "torch": "2.10.0+cpu",
+  "cuda_available": false,
+  "tests": {
+    "new_p4": {
+      "run": 20,
+      "passed": 20,
+      "log": "SHARED_VISIBLE_GEOMETRY_P4_TESTS.log"
+    },
+    "legacy_non_cli": {
+      "run": 61,
+      "passed": 61,
+      "log": "SHARED_VISIBLE_GEOMETRY_P4_REGRESSIONS.log"
+    },
+    "legacy_cli": {
+      "old_pipeline_cli": "passed before combined-command timeout",
+      "old_batch_cli": "passed in isolated rerun, 1 test",
+      "logs": [
+        "SHARED_VISIBLE_GEOMETRY_P4_LEGACY_CLI.log",
+        "SHARED_VISIBLE_GEOMETRY_P4_BATCH_CLI.log"
+      ]
+    }
+  },
+  "compileall": "passed",
+  "bash_n": "passed",
+  "new_files": {
+    "shared_geometry/p4_common.py": {
+      "sha256": "f46536ce6170126fec2d754635faa69cbd80783f8a6f1295601565389dcb91d9",
+      "git_blob_sha1": "ad34bb2104d30f72c2ddee573e01c31f80be17ac",
+      "bytes": 7124
+    },
+    "shared_geometry/p4_score_diagnostics.py": {
+      "sha256": "36b9d898986e4083231f0e982dda28e57174da382ac14789680d4ca36e84d945",
+      "git_blob_sha1": "ba52127a47ab7855f25b48d24cb9bdeb99f82e95",
+      "bytes": 16842
+    },
+    "shared_geometry/p4_depth_data.py": {
+      "sha256": "bdeebffbd372d6988a6fe6aeef5196bd7c761ddb65b9286c7751cf44c1c2b187",
+      "git_blob_sha1": "7a6af8a33f9909cbe3a090fb35c9cf43c65aeb70",
+      "bytes": 6015
+    },
+    "shared_geometry/p4_depth_baseline.py": {
+      "sha256": "78814762ee752fa6d78d84929cf715aa3698b41de587a47b2a7218b30d1ecdf4",
+      "git_blob_sha1": "3a1dbeae025b879b67a0dc6f482bea0de86f2866",
+      "bytes": 25465
+    },
+    "scripts/shared_geometry/run_p4.sh": {
+      "sha256": "d9839f2655ac27d71b1a1361fae6e220ad38f2d68e3817ca41322de00fe9f16a",
+      "git_blob_sha1": "17b20e919b087fcd699ab11010ae625bd4013d1e",
+      "bytes": 4713
+    },
+    "tests/test_shared_geometry_p4.py": {
+      "sha256": "6b8e16d11cf799ed8dc297d3e1831cbf916a8e1d8c2ccc67ae051374716cdfb6",
+      "git_blob_sha1": "4926f42a4f594412224ebb43c1d33e305d0279b4",
+      "bytes": 14966
+    },
+    "experiments/SHARED_VISIBLE_GEOMETRY_P4_CODEX.md": {
+      "sha256": "12682fa68a74e49b369709ee8bccf5a87d4f61a631ebceb09a6cec3dc02bef8a",
+      "git_blob_sha1": "aa3c1dd8051ad56e0d71856d493ff7f1ded7e263",
+      "bytes": 12611
+    }
+  },
+  "remote_publish": "All seven source/script/test/doc Git blobs matched local tested bytes; branch ref advancement recorded separately.",
+  "unsupported_claims": [
+    "No new AP",
+    "No claimed GPU speedup",
+    "No P4-2 training",
+    "No causal proof from gradients or hybrid tokens"
+  ]
+}
