@@ -225,10 +225,17 @@ def collect(a):
     if a.split.startswith("test_") and a.dataset != "GraspNet":
         raise ValueError("Built-in Official evaluation only supports GraspNet")
     runs=json.loads(Path(a.runs).read_text(encoding="utf-8"))
+    if a.split=="probe_validation" and a.dataset not in ("GraspNet","GNTrans"):
+        raise ValueError("Built-in validation replay only supports declared GraspNet/ GNTrans domains")
     if set(runs)!=set(METHODS):
         raise ValueError("Supply accepted inference roots for native, score64 and all")
     official=a.split.startswith("test_")
     sources={m:_source(path,a.split,require_official=official) for m,path in runs.items()}
+    if a.split=="probe_validation":
+        expected_domain="gntrans" if a.dataset=="GNTrans" else "original"
+        for name,src in sources.items():
+            if src[0].get("domain")!=expected_domain:
+                raise ValueError(f"Validation domain mismatch for {name}")
     geometry_runtime=None
     if a.capture_pred_geometry:
         from diagnostics.decision_supervision.runtime import make_runtime
@@ -285,7 +292,8 @@ def collect(a):
     for i,key in enumerate(keys,1):
         arr,audit,replayed=_frame(sources,key,compiled,evaluator,index,a.dataset,a.split,a)
         if geometry_runtime is not None:
-            row=dict(domain="original",scene=key[0],anno=key[1],
+            row=dict(domain=("gntrans" if a.dataset=="GNTrans" else "original"),
+                     scene=key[0],anno=key[1],
                      split=("train" if a.split=="probe_validation" else a.split),
                      partition=("train" if a.split=="probe_validation" else "test"))
             geo=_attach_geometry(geometry_runtime,row,arr["physical_id"],a,
