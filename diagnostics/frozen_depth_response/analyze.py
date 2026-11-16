@@ -26,7 +26,9 @@ def _read_rows(path):
            "same_ray_median_abs_delta","same_ray_median_ratio",
            "common_ray_n","overlap_fraction","pose_delta_deg",
            "K_only_maxabs","K_fx","K_fy","K_fx_modified","K_fy_modified",
-           "rendered_median_reference")
+           "rendered_median_reference","pose_film_gamma_abs_mean",
+           "pose_film_beta_abs_mean","pose_film_gamma_shift",
+           "pose_film_beta_shift")
     parsed=[]
     for r in raw:
         x=dict(r)
@@ -148,7 +150,8 @@ def summarize(rows,manifest,*,bootstrap=5000,seed=20261116,min_distance_span=.03
         for r in recs:group[r["scene"]].append(r)
         metrics=("same_ray_median_delta","same_ray_median_abs_delta",
                  "same_ray_median_ratio","sensor_median_error",
-                 "overlap_fraction","pose_delta_deg","K_only_maxabs")
+                 "overlap_fraction","pose_delta_deg","K_only_maxabs",
+                 "pose_film_gamma_shift","pose_film_beta_shift")
         summary={key:_bootstrap_scene(
             [float(np.mean([r[key] for r in items if r[key] is not None]))
              if any(r[key] is not None for r in items) else None
