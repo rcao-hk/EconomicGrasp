@@ -53,10 +53,15 @@ def read_ledger(path):
         actual=Path(x[path_key])
         if not actual.is_file() or sha256(actual)!=x[sha_key]:
             raise ValueError(f"Training/development evidence file missing or changed: {actual}")
-    for key in ("base_training_scene_keys","development_scene_keys"):
+    for key,filekey in (
+        ("base_training_scene_keys","base_training_manifest_path"),
+        ("development_scene_keys","development_log_path")):
         val=x[key]
         if len(set(val))!=len(val):
             raise ValueError(f"Duplicate provenance scene keys: {key}")
+        claimed=json.loads(Path(x[filekey]).read_text(encoding="utf-8"))
+        if not isinstance(claimed,list) or set(claimed)!=set(val):
+            raise ValueError(f"Signed ledger scene keys do not match actual source list: {filekey}")
     # Verified current-project lower bound. No one can declare the already
     # explored 90 GraspNet test scenes to be an untouched holdout.
     known={scene_key("GraspNet",s) for s in range(100,190)}
