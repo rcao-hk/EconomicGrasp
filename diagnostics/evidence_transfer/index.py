@@ -10,6 +10,8 @@ import argparse
 import json
 from pathlib import Path
 
+import numpy as np
+
 from diagnostics.decision_supervision.core import BASE_SHA
 from .contract import SCHEMA, digest, load_frame, save_json, sha256
 from .holdout import PROV_SCHEMA, scene_key
@@ -85,6 +87,44 @@ def external(a):
     print(f"[external] {len(frames)} verified common-action frames in {a.dataset_name}")
 
 
+def label_index(a):
+    """Index EXISTING exact-action label NPZ files; no evaluator is run."""
+    items=json.loads(Path(a.label_files).read_text(encoding="utf-8"))
+    if not isinstance(items,list) or not items:
+        raise ValueError("Require explicit list of existing label NPZ files")
+    seen=set()
+    records=[]
+    for row in items:
+        for key in ("dataset","split","scene","anno","file","sha256"):
+            if key not in row:
+                raise ValueError(f"Label inventory missing {key}")
+        key=(str(row["dataset"]),str(row["split"]),str(row["scene"]),int(row["anno"]))
+        if key in seen:
+            raise ValueError("Duplicate per-frame label inventory")
+        seen.add(key)
+        path=Path(row["file"])
+        if not path.is_file() or sha256(path)!=row["sha256"]:
+            raise ValueError(f"Changed exact label NPZ: {path}")
+        with np.load(path,allow_pickle=False) as z:
+            required=("physical_id","assigned_obj","pure_collision","empty","friction")
+            if any(x not in z for x in required):
+                raise ValueError(f"Label NPZ missing required original fields {required}: {path}")
+            ids=np.asarray(z["physical_id"]).astype(str)
+            n=len(ids)
+            if (n!=len(set(ids)) or
+                any(np.asarray(z[k]).shape!=(n,) for k in required)):
+                raise ValueError(f"Exact-label candidate identity/size inconsistent: {path}")
+            if not np.isfinite(z["friction"]).all():
+                raise ValueError(f"Nonfinite exact CAD friction labels: {path}")
+        records.append(dict(dataset=key[0],split=key[1],scene=key[2],anno=key[3],
+                            file=str(path.resolve()),sha256=row["sha256"]))
+    result=dict(schema="gvar-exact-label-inventory-v1",
+                source_inventory_sha256=sha256(a.label_files),records=records)
+    result["index_sha256"]=digest(result)
+    save_json(a.output,result)
+    print(f"[label-index] {len(records)} exact signed frame-label bundles")
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     sub=p.add_subparsers(dest="command",required=True)
@@ -101,8 +141,12 @@ def main():
     e.add_argument("--evaluator-name",required=True)
     e.add_argument("--prior-use",choices=("never","used"),required=True)
     e.add_argument("--output",required=True)
+    labels=sub.add_parser("labels")
+    labels.add_argument("--label-files",required=True,
+                        help="JSON list of already computed exact CAD label frame files with SHA")
+    labels.add_argument("--output",required=True)
     a=p.parse_args()
-    (ledger if a.command=="ledger" else external)(a)
+    {"ledger":ledger,"external":external,"labels":label_index}[a.command](a)
 
 
 if __name__=="__main__":
