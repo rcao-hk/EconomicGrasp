@@ -22,7 +22,8 @@ import numpy as np
 import torch
 
 from rare_grasp.runtime import Runtime
-from rare_grasp.core import sha256, digest
+from rare_grasp.core import sha256
+from diagnostics.decision_supervision.core import BASE_SHA
 from .geometry import (HW, INTERVENTIONS, pixel_affine, update_K,
                        warp_tensor, recover_crop_box, paired_depth_metrics,
                        matched_warp_response, check_projective_consistency)
@@ -159,7 +160,10 @@ def run(a):
     ds,scenes=_init_dataset(a)
     cfg_sha=sha256(a.bound_config)
     rt=Runtime(a.bound_config,a.dataset_root,"",a.device)
-    if (rt.config.get("backbone")!="point_gvar" or
+    if (rt.config["checkpoint_sha256"]!=BASE_SHA or
+        int(rt.config.get("expected_checkpoint_epoch",-1))!=16 or
+        float(rt.config.get("mix_training_fraction",0))!=.5 or
+        rt.config.get("backbone")!="point_gvar" or
         rt.model.geometry_depth_source!="pred" or
         rt.model.pose_depth_mode!="global_film" or
         rt.model.use_obs_depth):
