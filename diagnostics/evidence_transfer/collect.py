@@ -256,7 +256,8 @@ def collect(a):
         for name,(_,root,_) in sources.items():
             path=root/f"ap_{a.split}_realsense.npy"
             ap=np.load(path,allow_pickle=False)
-            if (ap.ndim!=4 or ap.shape[0]!=30 or ap.shape[-2:]!=(50,6)
+            target_frames=len(range(0,256,int(sources[name][0]["interval"])))
+            if (ap.shape!=(30,target_frames,50,6)
                     or not np.isfinite(ap).all()):
                 raise ValueError(f"Accepted official AP shape invalid: {path}")
             official_arrays[name]=ap
@@ -355,7 +356,7 @@ def main():
                    help="Replay actual frozen GVAR role geometry for aligned selected actions")
     p.add_argument("--reference-depth-root",default=None,
                    help="Optional offline aligned reference depth rasters; forbidden as network input")
-    p.add_argument("--reference-unit",choices=("m","mm"),default="m"),
+    p.add_argument("--reference-unit",choices=("m","mm"),default="m")
     p.add_argument("--label-manifest",default=None,
                    help="Signed per-frame exact-label NPZ index with all physical IDs")
     p.add_argument("--ap-tolerance",type=float,default=1e-6,
