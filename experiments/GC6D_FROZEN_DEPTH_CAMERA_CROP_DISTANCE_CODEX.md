@@ -189,3 +189,18 @@ bash scripts/frozen_depth_response/run.sh analyze
 - [ ] 交付报告明确回答distance响应、crop/zoom稳定性、K代码路径、pose敏感性四项，各列原始证据和限制。
 
 **本工作单撰写时未连接117执行真实GPU结果或CPU tests。需要Codex在117严格按步骤验收，未通过就停。**
+
+## 8. 2026-11-17：训练支持域P0及真实同一表面多视角P1
+
+上一轮冻结响应发现GC6D场景内中位深度对参考的线性响应约−0.031，但同一scene13视角可见物体/表面仍不同，无法确认同一3D表面的物距响应。下一步分成两项低训练成本诊断：
+
+- **P0**：实际训练Original/GNTrans场景与GC6D，在各自原生workspace crop下统计真实/虚拟米制深度、crop K′、前景像素占比与源工作距离支持域；不将虚拟GT当传感器真值。
+- **P1**：依赖源传感器深度与已核验GC6D C2W，逐点追踪世界3D表面到其他相机视角；遮挡、numeric segmentation及目标3D反投影闭环全通过后，比较真实 `Δz_ref` 和冻结模型 `Δz_pred`，bootstrap按scene而非点。
+
+完整脚本/交接工作单：
+
+**[GC6D_DEPTH_SUPPORT_P0_P1_CODEX.md](GC6D_DEPTH_SUPPORT_P0_P1_CODEX.md)**。
+
+执行入口：`scripts/depth_followup/run.sh check|p1-cache-smoke|p1-cache|p0-original|p0-gntrans|p0-gc6d|p0-analyze|p1-track-smoke|p1-track|p1-analyze`。
+
+新代码沿用原分支，不触碰之前的正式AP，也不根据已观察的78场景拟合任何深度尺度或训练新网络。当前只在GitHub提交实现，真实117 GPU/数据验收尚未完成。
