@@ -2,7 +2,7 @@
 # Same-branch physical-evidence transfer: strict, non-training P0/P1.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-STAGE="${1:?Usage: run.sh check|validation-replay|collect|p0|stress|make-ledger|index-external|holdout}"
+STAGE="${1:?Usage: run.sh check|validation-replay|index-labels|collect|p0|stress|make-ledger|index-external|holdout}"
 : "${RUN_ROOT:?Use a NEW evidence-transfer output root, not prior accepted results}"
 DEVICE="${DEVICE:-cuda:0}"
 mkdir -p "$RUN_ROOT"
@@ -30,6 +30,12 @@ validation-replay)
     --domain "${DOMAIN:-original}" --snapshot-seed 20261113 \
     --output "${VALIDATION_REPLAY_ROOT:-$RUN_ROOT/validation_replay_${DOMAIN:-original}}" \
     "${extra[@]}"
+  ;;
+index-labels)
+  : "${EXACT_LABEL_FILES_JSON:?Actual per-frame NPZ label files with SHA256 and dataset/split keys}"
+  python -m diagnostics.evidence_transfer.index labels \
+    --label-files "$EXACT_LABEL_FILES_JSON" \
+    --output "${EXACT_LABEL_MANIFEST_OUT:-$RUN_ROOT/exact_label_index.json}"
   ;;
 collect)
   : "${ACCEPTED_RUNS_JSON:?JSON native/score64/all accepted inference roots}"
