@@ -227,6 +227,11 @@ def run(a):
         pose,gravity,tilt,K_raw,cam_info,factor=_pose_info(ds,idx)
         mask,ref,gt,box,K_error=_mask_and_crop(ds,idx,K,K_raw,sample)
         z0,aux=_depth_forward(depth_model,image[None],pose,gravity,K,device)
+        for key in ("pose_depth_gamma_abs_mean","pose_depth_beta_abs_mean"):
+            if key not in aux:
+                raise RuntimeError(f"Global FiLM depth head failed to export {key}")
+        gamma=float(aux["pose_depth_gamma_abs_mean"].detach().cpu())
+        beta=float(aux["pose_depth_beta_abs_mean"].detach().cpu())
         base=z0[0,0].numpy()
         identity=dict(**scene_info,crop_x0=box[0],crop_y0=box[1],
             crop_x1=box[2],crop_y1=box[3],crop_K_error=K_error,
@@ -234,6 +239,8 @@ def run(a):
             K_cx=float(K[0,2]),K_cy=float(K[1,2]),
             pose_x=float(pose[0]),pose_y=float(pose[1]),pose_z=float(pose[2]),
             camera_tilt_deg=tilt,
+            pose_film_gamma_abs_mean=gamma,
+            pose_film_beta_abs_mean=beta,
             rgb_sha256=_sha_array(image.numpy()),
             native_K_sha256=_sha_array(K),
             reference_sensor_sha256=_sha_array(ref),
@@ -306,7 +313,7 @@ def run(a):
             other_idx,delta=_farthest_pose(idx,ds,pose_by_idx)
             if other_idx is not None:
                 swapped_pose=pose_by_idx[other_idx]
-                zp,_=_depth_forward(depth_model,image[None],swapped_pose,gravity,K,device)
+                zp,pose_aux=_depth_forward(depth_model,image[None],swapped_pose,gravity,K,device)
                 res=paired_depth_metrics(zp[0,0].numpy(),ref,mask,a.min_foreground_pixels)
                 on=(mask&(ref>0)&(base>0))
                 rows.append(dict(**identity,intervention="pose_same_scene_swap",
@@ -314,6 +321,10 @@ def run(a):
                     physical_camera_changed=False,
                     K_fx_modified=float(K[0,0]),K_fy_modified=float(K[1,1]),
                     pose_delta_deg=delta,
+                    pose_film_gamma_shift=float(
+                        pose_aux["pose_depth_gamma_abs_mean"].detach().cpu())-gamma,
+                    pose_film_beta_shift=float(
+                        pose_aux["pose_depth_beta_abs_mean"].detach().cpu())-beta,
                     **{f"sensor_{k}":v for k,v in res.items()},
                     same_ray_median_delta=float(np.median(zp[0,0].numpy()[on]-base[on]))
                                              if on.any() else None,
