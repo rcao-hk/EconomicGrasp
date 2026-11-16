@@ -70,6 +70,9 @@ def per_action(frame, record):
         for method in METHODS:
             for k in (10,50):
                 row[f"top{k}_{method}"]=int(frame[f"top{k}_{method}"][i])
+        row["top10_union"]=int(any(row[f"top10_{m}"] for m in METHODS))
+        row["top10_all_only"]=int(
+            row["top10_all"] and not row["top10_native"] and not row["top10_score64"])
         if geom_err is not None:
             row["geometry_abs_dz_error"]=float(geom_err[i]) if np.isfinite(geom_err[i]) else None
         rows.append(row)
@@ -212,20 +215,40 @@ def run(a):
     objects=_group_by(actions,("dataset","split","scene","assigned_obj"),a.min_cell)
     _write_csv(root/"per_object.csv",objects)
     axes=("failure","native_high","q_strong","polar_bin","width_bin",
-          "center_depth_bin","insertion_bin")
+          "center_depth_bin","insertion_bin","top10_union","top10_all_only")
     strata={}
     for axis in axes:
         grouped=_group_by(actions,("dataset","split",axis),a.min_cell)
         _write_csv(root/f"strata_{axis}.csv",grouped)
         strata[axis]=len(grouped)
     stats={}
+    # Match the previously published three-method Top10-union diagnostic
+    # distribution explicitly; do not infer it from all NMS survivors.
+    top10_actions=[r for r in actions if r["top10_union"]]
+    front_by_scene=defaultdict(list)
+    for row in top10_actions:
+        front_by_scene[(row["dataset"],row["split"],row["scene"])].append(row)
+    front_scene_rows=[]
+    for (dataset,split,scene),group in sorted(front_by_scene.items()):
+        x=summarize_group(group)
+        front_scene_rows.append(dict(dataset=dataset,split=split,scene=scene,**x))
+    _write_csv(root/"front_union_per_scene.csv",front_scene_rows)
     for dataset,split in sorted({(r["dataset"],r["split"]) for r in frames}):
         records=[r for r in frames if r["dataset"]==dataset and r["split"]==split]
         # First aggregate by scene, then bootstrap scenes: never pretend each
         # frame, object or candidate is an IID new environment.
         sr=[r for r in scenes if r["dataset"]==dataset and r["split"]==split]
+        front_scenes=[r for r in front_scene_rows if
+                      r["dataset"]==dataset and r["split"]==split]
         stats[f"{dataset}/{split}"]={
             "frames":len(records),"scenes":len(sr),
+            "front_union_actions":int(sum(x["actions"] for x in front_scenes)),
+            "front_union_delta_mse":_bootstrap_scene_difference(
+                front_scenes,"delta_mse",a.bootstrap,a.seed+5),
+            "front_union_collision_delta_score":_bootstrap_scene_difference(
+                front_scenes,"collision_delta_score",a.bootstrap,a.seed+6),
+            "front_union_empty_delta_score":_bootstrap_scene_difference(
+                front_scenes,"empty_delta_score",a.bootstrap,a.seed+7),
             "delta_mse":_bootstrap_scene_difference(sr,"delta_mse",a.bootstrap,a.seed),
             "collision_delta_score":_bootstrap_scene_difference(sr,"collision_delta_score",a.bootstrap,a.seed+1),
             "empty_delta_score":_bootstrap_scene_difference(sr,"empty_delta_score",a.bootstrap,a.seed+2),
