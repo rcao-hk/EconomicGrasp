@@ -38,7 +38,8 @@ def read_ledger(path):
     if x.get("base_checkpoint_sha256")!=BASE_SHA:
         raise ValueError("Holdout ledger belongs to different frozen GVAR base")
     for required in ("base_training_scene_keys","development_scene_keys",
-                     "base_training_manifest_sha256","development_log_sha256",
+                     "base_training_manifest_path","base_training_manifest_sha256",
+                     "development_log_path","development_log_sha256",
                      "object_overlap_review"):
         if required not in x:
             raise ValueError(f"Missing mandatory holdout provenance: {required}")
@@ -46,6 +47,12 @@ def read_ledger(path):
             not all(len(str(x[k]))==64 for k in
                 ("base_training_manifest_sha256","development_log_sha256"))):
         raise ValueError("Empty/invalid training and development ledgers")
+    for path_key,sha_key in (
+        ("base_training_manifest_path","base_training_manifest_sha256"),
+        ("development_log_path","development_log_sha256")):
+        actual=Path(x[path_key])
+        if not actual.is_file() or sha256(actual)!=x[sha_key]:
+            raise ValueError(f"Training/development evidence file missing or changed: {actual}")
     for key in ("base_training_scene_keys","development_scene_keys"):
         val=x[key]
         if len(set(val))!=len(val):
@@ -79,12 +86,13 @@ def gate(manifest, ledger, *, require_untouched):
         untouched_scene_claim=(not overlapped_training and
                                not overlapped_development and has_external),
         object_disjoint_proven=False,
+        object_disjoint_claimed=bool(
+            ledger["object_overlap_review"].get("disjoint_verified",False)),
         provenance_ledger_sha256=ledger["ledger_sha256"],
         limitation="A signed ledger is a reproducibility and contradiction gate, not independent proof that its human-maintained contents are complete.",
     )
-    if not unverified_object_lineage:
-        report["object_disjoint_proven"]=bool(
-            ledger["object_overlap_review"].get("disjoint_verified",False))
+    # A human-maintained provenance manifest cannot prove physical
+    # object-level CAD independence without a separately executed overlap audit.
     if require_untouched:
         if not report["untouched_scene_claim"]:
             raise ValueError("Previously trained/inspected scenes cannot be independent validation")
@@ -93,6 +101,8 @@ def gate(manifest, ledger, *, require_untouched):
             raise ValueError("Untouched claim requires explicit prior_development_use=false")
         if provenance.get("dataset_source_sha256") is None:
             raise ValueError("External holdout requires dataset provenance SHA256")
+        if not provenance.get("external_evaluator_name"):
+            raise ValueError("External holdout must name its actual evaluation/quality protocol")
         if len(str(provenance["dataset_source_sha256"]))!=64:
             raise ValueError("Bad external dataset source SHA256")
     return report
@@ -186,8 +196,9 @@ def run(a):
                 input_manifest_sha256=mf["manifest_sha256"],
                 ledger_sha256=registry["ledger_sha256"],
                 independence_gate=scope,
-                interpretation=("untouched_external_scene_holdout" if scope["untouched_scene_claim"]
-                                and a.require_untouched else "EXPLORATORY_NOT_INDEPENDENT"),
+                interpretation=("PROVISIONALLY_UNTOUCHED_SCENE_HOLDOUT_LEDGER_GATED"
+                                if scope["untouched_scene_claim"] and a.require_untouched
+                                else "EXPLORATORY_NOT_INDEPENDENT"),
                 by_dataset=report,
                 caution=["No retraining or model selection using evaluation labels",
                          "Object-level independence is separate from scene-level independence",
