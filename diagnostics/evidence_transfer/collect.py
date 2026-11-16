@@ -178,6 +178,47 @@ def _full_obj(n,chosen,obj):
     return result
 
 
+def _attach_geometry(rt, row, physical, a, snapshot_seed):
+    """Replay frozen predicted GVAR geometry on the same physical native actions.
+
+    Never infer geometry error without a second, separately supplied aligned
+    CAD/reference raster; that input is offline analysis only.
+    """
+    from diagnostics.evidence_decodability.capture import (
+        GVARCapture, privileged_geometry_from_depth
+    )
+    with GVARCapture(rt) as captured:
+        snap=rt.snapshot(row,int(snapshot_seed))
+    bank=np.asarray(snap["grasps"])
+    if bank.shape!=(1024,4,17):
+        raise RuntimeError("Different native GVAR query bank on diagnostic replay")
+    depth=bank[...,0].argmax(1)
+    native=bank[np.arange(1024),depth]
+    ids=physical_ids(native)
+    positions={}
+    for i,ident in enumerate(ids):
+        if ident in positions:
+            raise RuntimeError("Ambiguous native physical action -> query identity mapping")
+        positions[ident]=i
+    try:
+        q=np.asarray([positions[str(i)] for i in physical],dtype=np.int64)
+    except KeyError as exc:
+        raise RuntimeError(f"GVAR replay physical action not in frozen snapshot: {exc}") from exc
+    d=depth[q]
+    out=captured.chosen(snap,q,d)
+    values={"pred_geometry":out["pred_geometry"]}
+    if a.reference_depth_root:
+        path=(Path(a.reference_depth_root)/row["domain"]/
+              f"scene_{row['scene']:04d}"/"realsense"/f"{int(row['anno']):04d}.npy")
+        if not path.is_file():
+            raise FileNotFoundError(f"Offline reference depth missing: {path}")
+        depth_ref=np.load(path,allow_pickle=False)
+        values["reference_geometry"]=privileged_geometry_from_depth(
+            rt,captured,snap,q,d,depth_ref,unit=a.reference_unit)
+        values["_reference_sha256"]=sha256(path)
+    return values
+
+
 def collect(a):
     if a.split not in SPLITS or a.split=="external_holdout":
         raise ValueError("External holdouts must use a verified external adapter")
@@ -188,6 +229,16 @@ def collect(a):
         raise ValueError("Supply accepted inference roots for native, score64 and all")
     official=a.split.startswith("test_")
     sources={m:_source(path,a.split,require_official=official) for m,path in runs.items()}
+    geometry_runtime=None
+    if a.capture_pred_geometry:
+        from diagnostics.decision_supervision.runtime import make_runtime
+        if not a.config or not a.dataset_root:
+            raise ValueError("Full frozen GVAR bound config and dataset root required for geometry replay")
+        geometry_runtime,identity=make_runtime(a)
+        for m in METHODS:
+            src=sources[m][0]
+            if src["base_config_digest"]!=geometry_runtime.config_digest:
+                raise ValueError("Frozen geometry replay checkpoint/config differs from accepted inference")
     official_arrays={}
     if official:
         start={"test_seen":100,"test_similar":130,"test_novel":160}[a.split]
@@ -233,6 +284,15 @@ def collect(a):
     rows=[]
     for i,key in enumerate(keys,1):
         arr,audit,replayed=_frame(sources,key,compiled,evaluator,index,a.dataset,a.split,a)
+        if geometry_runtime is not None:
+            row=dict(domain="original",scene=key[0],anno=key[1],
+                     split=("train" if a.split=="probe_validation" else a.split),
+                     partition=("train" if a.split=="probe_validation" else "test"))
+            geo=_attach_geometry(geometry_runtime,row,arr["physical_id"],a,
+                                 sources["native"][0]["snapshot_seed"])
+            audit["reference_depth_sha256"]=geo.pop("_reference_sha256",None)
+            arr.update(geo)
+            validate_frame(arr)
         if official:
             for name,ap in replayed.items():
                 idx=key[0]-start
@@ -260,7 +320,9 @@ def collect(a):
                               source="GraspNet post-sensor-pre-NMS compiled-solver survivor-union",
                               test_labels_for_analysis_only=True,
                               verified_official_source=official,
-                              prior_development_use=True),
+                              prior_development_use=True,
+              predicted_geometry_source=("strict_frozen_GVAR_reader_replay" if a.capture_pred_geometry else None),
+              reference_geometry_offline_only=bool(a.reference_depth_root)),
               frames=rows)
     meta["manifest_sha256"]=digest(meta)
     save_json(root/"manifest.json",meta)
@@ -273,6 +335,15 @@ def main():
     p.add_argument("--dataset",default="GraspNet")
     p.add_argument("--split",choices=SPLITS,required=True)
     p.add_argument("--dataset-root",required=True)
+    p.add_argument("--config",default=None,help="Strict frozen GVAR bound config if capturing predicted geometry")
+    p.add_argument("--gntrans-root",default="")
+    p.add_argument("--factory",default="rare_grasp.runtime:Runtime")
+    p.add_argument("--device",default="cuda:0")
+    p.add_argument("--capture-pred-geometry",action="store_true",
+                   help="Replay actual frozen GVAR role geometry for aligned selected actions")
+    p.add_argument("--reference-depth-root",default=None,
+                   help="Optional offline aligned reference depth rasters; forbidden as network input")
+    p.add_argument("--reference-unit",choices=("m","mm"),default="m"),
     p.add_argument("--label-manifest",default=None,
                    help="Signed per-frame exact-label NPZ index with all physical IDs")
     p.add_argument("--ap-tolerance",type=float,default=1e-6,
@@ -284,6 +355,8 @@ def main():
     a=p.parse_args()
     if not a.label_manifest and not a.allow_relabel:
         p.error("Require signed label reuse or explicit --allow-relabel")
+    if a.reference_depth_root and not a.capture_pred_geometry:
+        p.error("Reference geometry requires matching predicted geometry capture")
     if not 0<a.ap_tolerance<=1e-6:
         p.error("Do not loosen existing official AP parity tolerance")
     collect(a)
