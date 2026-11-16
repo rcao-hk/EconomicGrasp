@@ -15,11 +15,11 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from diagnostics.decision_supervision.core import BASE_SHA
+from diagnostics.decision_supervision.core import BASE_SHA, physical_ids
 from diagnostics.decision_supervision.runtime import make_runtime
 from diagnostics.evidence_decodability.capture import GVARCapture
 from diagnostics.evidence_decodability.infer import load_probe
-from diagnostics.evidence_decodability.p0_match import load_manifest
+from diagnostics.evidence_decodability.p0_match import load_manifest, read_bank
 from .contract import SCHEMA, METHODS, sha256, save_json
 
 
@@ -38,8 +38,10 @@ def _validation_records(cache_manifest,domain):
 def replay(a):
     mf,records=_validation_records(a.cache_manifest,a.domain)
     rt,identity=make_runtime(a)
-    if rt.config_digest!=mf["contract"]["runtime"]["config_digest"] if False else False:
-        raise RuntimeError("Unreachable: runtime config")
+    if identity!=mf["contract"]["runtime"]:
+        raise RuntimeError("Frozen runtime factory and bound-config source hashes differ from accepted evidence cache")
+    if int(a.snapshot_seed)!=int(mf["contract"]["snapshot_seed"]):
+        raise ValueError("Validation replay must use identical accepted frozen snapshot seed")
     model={}
     for mode in ("score64","all"):
         path=getattr(a,"weights_"+mode)
@@ -65,6 +67,13 @@ def replay(a):
         if bank.shape!=(1024,4,17):
             raise RuntimeError("Different frozen 1024x4x17 executed bank")
         depth=bank[...,0].argmax(1)
+        saved=read_bank(rec)
+        qi=np.asarray(saved["query_id"],dtype=np.int64)
+        di=np.asarray(saved["depth_id"],dtype=np.int64)
+        if (not np.array_equal(physical_ids(bank[qi,di]), saved["physical_id"].astype(str))
+                or np.max(np.abs(np.asarray(snap["features"])[qi,di]-saved["score64"]))>1e-6
+                or np.max(np.abs(np.asarray(snap["base_logit"])[qi,di]-saved["base_logit"]))>1e-6):
+            raise RuntimeError("Full validation replay does not match accepted cached executed actions/features")
         q=np.arange(1024,dtype=np.int64)
         evidence=cap.chosen(snap,q,depth)
         original=bank[q,depth].copy()
