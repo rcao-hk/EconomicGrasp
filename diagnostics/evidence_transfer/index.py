@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from diagnostics.decision_supervision.core import BASE_SHA
-from .contract import SCHEMA, digest, load_frame, save_json, sha256
+from .contract import SCHEMA, digest, load_manifest, load_frame, save_json, sha256
 from .holdout import PROV_SCHEMA, scene_key
 
 
@@ -125,6 +125,37 @@ def label_index(a):
     print(f"[label-index] {len(records)} exact signed frame-label bundles")
 
 
+def merge(a):
+    """Combine multiple complete labeled matched-action manifests by source SHA."""
+    if len(a.manifest)<2:
+        raise ValueError("Need at least two separately signed original manifests")
+    merged=[]
+    seen=set()
+    originals={}
+    for path in a.manifest:
+        src=load_manifest(path,complete=True)
+        originals[str(Path(path).resolve())]=sha256(path)
+        for rec in src["frames"]:
+            key=(rec["dataset"],rec["split"],str(rec["scene"]),int(rec["anno"]))
+            if key in seen:
+                raise ValueError(f"Overlapping validation/test frame in merge: {key}")
+            seen.add(key)
+            # Verify every raw action-label NPZ, not just parent hashes.
+            load_frame(rec)
+            merged.append(rec)
+    merged.sort(key=lambda r:(str(r["dataset"]),str(r["split"]),
+                               str(r["scene"]),int(r["anno"])))
+    result=dict(schema=SCHEMA,base_checkpoint_sha256=BASE_SHA,
+                complete=True,frames=merged,
+                provenance=dict(origin="validated_manifest_merge",
+                                source_manifest_sha256=originals,
+                                prior_development_use=True,
+                                test_labels_for_analysis_only=True))
+    result["manifest_sha256"]=digest(result)
+    save_json(a.output,result)
+    print(f"[merge] {len(merged)} verified same-action labeled frames")
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     sub=p.add_subparsers(dest="command",required=True)
@@ -141,12 +172,15 @@ def main():
     e.add_argument("--evaluator-name",required=True)
     e.add_argument("--prior-use",choices=("never","used"),required=True)
     e.add_argument("--output",required=True)
+    m=sub.add_parser("merge")
+    m.add_argument("--manifest",action="append",required=True)
+    m.add_argument("--output",required=True)
     labels=sub.add_parser("labels")
     labels.add_argument("--label-files",required=True,
                         help="JSON list of already computed exact CAD label frame files with SHA")
     labels.add_argument("--output",required=True)
     a=p.parse_args()
-    {"ledger":ledger,"external":external,"labels":label_index}[a.command](a)
+    {"ledger":ledger,"external":external,"labels":label_index,"merge":merge}[a.command](a)
 
 
 if __name__=="__main__":
