@@ -59,7 +59,7 @@ p0-original|p0-gntrans|p0-gc6d)
   else
     out="$RUN_ROOT/p0_$domain"
   fi
-  python -m diagnostics.depth_followup.p0_collect "\${args[@]}" --output "$out"
+  python -m diagnostics.depth_followup.p0_collect "${args[@]}" --output "$out"
   ;;
 p0-analyze)
   python -m diagnostics.depth_followup.p0_analyze \
