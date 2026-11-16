@@ -106,6 +106,10 @@ def _reuse_labels(index, key, chosen):
 def _eval_labels(evaluator,scene,anno,grasps):
     if not len(grasps):
         raise ValueError("No compiled NMS survivors to label")
+    if getattr(evaluator,"_evidence_transfer_scene",None)!=scene:
+        if hasattr(evaluator,"scene_cache"):
+            evaluator.scene_cache.clear()
+        evaluator._evidence_transfer_scene=scene
     answer=evaluator.evaluate(scene,anno,np.asarray(grasps,dtype=np.float64))
     fields={k:np.asarray(getattr(answer,k)) for k in
             ("assigned_obj","pure_collision","empty","friction")}
