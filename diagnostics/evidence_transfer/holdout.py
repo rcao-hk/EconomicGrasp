@@ -127,6 +127,8 @@ def metrics_for_frame(x):
         top=np.asarray(x[f"top10_{method}"],dtype=bool)
         result.update({
             f"{method}_mse":float(np.mean((p-q)**2)),
+            f"{method}_top10_slots":int(top.sum()),
+            f"{method}_top10_quality_padded":float(q[top].sum()/10),
             f"{method}_top10_quality":_mean(q,top),
             f"{method}_top10_q0":_mean((q==0).astype(float),top),
             f"{method}_top10_strong":_mean((q>=5/6-1e-8).astype(float),top),
@@ -134,7 +136,7 @@ def metrics_for_frame(x):
             f"{method}_top10_empty":_mean((cause==2).astype(float),top),
             f"{method}_q0_score":_mean(p,cause!=0),
         })
-    for target in ("mse","top10_quality","top10_q0",
+    for target in ("mse","top10_quality","top10_quality_padded","top10_q0",
                    "top10_strong","top10_collision","top10_empty","q0_score"):
         if result[f"all_{target}"] is not None and result[f"score64_{target}"] is not None:
             result[f"delta_all_score64_{target}"]=(
