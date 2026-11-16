@@ -119,6 +119,7 @@ def _frame_meta(domain,scene,img_id,anno,raw_rgb,raw_depth,raw_seg,
         crop_area_fraction=float((x1-x0)*(y1-y0)/(w*h)),
         crop_hw=(y1-y0,x1-x0),raw_hw=(h,w),
         reference_source=reference_source,
+        depth_factor_divisor=float(depth_factor),
         source_paths={k:str(Path(v).resolve()) for k,v in input_paths.items()},
         source_sha256={k:sha256(v) for k,v in input_paths.items()},
         **(dict(depth_raw_m=z_raw,seg_raw=np.asarray(raw_seg,dtype=np.int32))
