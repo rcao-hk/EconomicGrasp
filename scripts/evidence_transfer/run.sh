@@ -2,7 +2,7 @@
 # Same-branch physical-evidence transfer: strict, non-training P0/P1.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-STAGE="${1:?Usage: run.sh check|validation-replay|index-labels|collect|p0|stress|make-ledger|index-external|holdout}"
+STAGE="${1:?Usage: run.sh check|validation-replay|index-labels|collect|merge-manifests|p0|stress|make-ledger|index-external|holdout}"
 : "${RUN_ROOT:?Use a NEW evidence-transfer output root, not prior accepted results}"
 DEVICE="${DEVICE:-cuda:0}"
 mkdir -p "$RUN_ROOT"
@@ -61,6 +61,16 @@ collect)
   python -m diagnostics.evidence_transfer.collect \
     --runs "$ACCEPTED_RUNS_JSON" --dataset GraspNet --split "$SPLIT" \
     --dataset-root "$DATASET_ROOT" --output "$OUTPUT" "${extra[@]}"
+  ;;
+merge-manifests)
+  : "${MERGE_MANIFESTS:?Whitespace-separated accepted validation/Novel manifest paths}"
+  paths=()
+  for f in $MERGE_MANIFESTS; do
+    [[ -f "$f" ]] || { echo "Missing manifest: $f" >&2; exit 2; }
+    paths+=(--manifest "$f")
+  done
+  python -m diagnostics.evidence_transfer.index merge "${paths[@]}" \
+    --output "${MERGED_MANIFEST_OUT:-$RUN_ROOT/merged_matched_manifest.json}"
   ;;
 p0)
   : "${ACTION_MANIFEST:?Complete common-action manifest.json for one/more datasets}"
