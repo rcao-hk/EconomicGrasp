@@ -237,6 +237,14 @@ def run(a):
             rgb_sha256=_sha_array(image.numpy()),
             native_K_sha256=_sha_array(K),
             reference_sensor_sha256=_sha_array(ref),
+            reference_rendered_sha256=_sha_array(gt),
+            foreground_mask_sha256=_sha_array(mask),
+            rgb_source_sha256=sha256(ds.colorpath[idx]),
+            sensor_depth_source_sha256=sha256(ds.depthpath[idx]),
+            segmentation_source_sha256=sha256(ds.labelpath[idx]),
+            rendered_depth_source_sha256=sha256(ds.gtdepthpath[idx]),
+            scene_camera_sha256=sha256(
+                Path(a.dataset_root)/"scenes"/f"{scene_info['scene']:06d}"/"scene_camera.json"),
             factor_depth=factor)
         base_row=dict(**identity,intervention="identity",
             image_warped=False,pose_swapped=False,
@@ -324,6 +332,8 @@ def run(a):
                     rendered_reference=gt.astype(np.float16),
                     foreground=mask.astype(np.uint8),K=K,
                     pose=pose,crop=np.asarray(box,dtype=np.int64))
+                base_row["map_file"]=str(dump.relative_to(root))
+                base_row["map_sha256"]=sha256(dump)
         if count%26==0 or count==len(selected):
             print(f"[GC6D frozen depth] {count}/{len(selected)}, scene={scene_info['scene']}, "
                   f"image={scene_info['img_id']}",flush=True)
