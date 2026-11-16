@@ -92,17 +92,13 @@ def inverse_grid(A,hw=HW,device="cpu"):
     h,w=map(int,hw)
     if h<2 or w<2:raise ValueError("Invalid output grid")
     inv=np.linalg.inv(np.asarray(A,dtype=np.float64))
-    yy,xx=torch.meshgrid(torch.arange(h,device=device,dtype=torch.float32),
-                         torch.arange(w,device=device,dtype=torch.float32),
+    yy,xx=torch.meshgrid(torch.arange(h,device=device,dtype=torch.float64),
+                         torch.arange(w,device=device,dtype=torch.float64),
                          indexing="ij")
-    u=(xx-float(A[0,2]))/float(A[0,0])
-    v=(yy-float(A[1,2]))/float(A[1,1])
-    u2=float(inv[0,0])*xx+float(inv[0,1])*yy+float(inv[0,2])
-    v2=float(inv[1,0])*xx+float(inv[1,1])*yy+float(inv[1,2])
-    if not torch.allclose(u,u2,rtol=0,atol=5e-5) or not torch.allclose(v,v2,rtol=0,atol=5e-5):
-        raise RuntimeError("Affine inverse grid algebra mismatch")
+    u=float(inv[0,0])*xx+float(inv[0,1])*yy+float(inv[0,2])
+    v=float(inv[1,0])*xx+float(inv[1,1])*yy+float(inv[1,2])
     valid=(u>=0)&(u<=w-1)&(v>=0)&(v<=h-1)
-    grid=torch.stack((u*2/(w-1)-1,v*2/(h-1)-1),-1)[None]
+    grid=torch.stack((u*2/(w-1)-1,v*2/(h-1)-1),-1)[None].float()
     return grid,valid
 
 
