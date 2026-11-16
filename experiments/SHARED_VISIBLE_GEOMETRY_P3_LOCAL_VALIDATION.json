@@ -1,0 +1,41 @@
+{
+  "study": "P3-0 action-relative geometry and decision-flip diagnosis",
+  "date": "2026-11-16",
+  "repository": "rcao-hk/EconomicGrasp",
+  "target_branch": "exp/shared-visible-geometry-multibatch",
+  "changed_files": [
+    "shared_geometry/p3_action_geometry_diagnostics.py",
+    "tests/test_shared_geometry_p3.py",
+    "scripts/shared_geometry/run_p3.sh",
+    "experiments/SHARED_VISIBLE_GEOMETRY_P3_CODEX.md",
+    "experiments/SHARED_VISIBLE_GEOMETRY_P3_LOCAL_VALIDATION.json"
+  ],
+  "test_results": {
+    "p3_added_cpu_tests": {"run": 8, "passed": 8},
+    "p0_p1_p2_p3_related_tests": {"run": 22, "passed": 22},
+    "all_non_cli_cpu_regressions": {"run": 62, "passed": 62},
+    "legacy_cli_help_aggregated_regression": "not completed: spawning many prior CLI help subprocesses exceeded local tool timeout",
+    "p3_cli_help": "passed",
+    "p3_shell_syntax": "passed",
+    "p3_python_compile": "passed",
+    "synthetic_shared_reader_p2_parity": "passed",
+    "partial_smoke_skips_full_p2_mean_parity": "passed",
+    "separate_p3_root_no_overwrite": "script guarded",
+    "source_geometry": "read-only signed P1 validation cache",
+    "source_weights": "frozen P2 shared reader"
+  },
+  "not_done": [
+    "real 117 checkpoint/cache/CUDA integration",
+    "formal 160-frame P3 analysis",
+    "official GraspNet AP evaluation",
+    "P3-1 depth-restoration training",
+    "P3-2 action-relative geometry supervised training"
+  ],
+  "scientific_guardrails": [
+    "Clean-Visible is privileged offline input, not RGB-only inference",
+    "75 point indices correspond to gripper-relative stencil, not same world coordinates after translating the grasp",
+    "unobserved is not free space or occupied volume",
+    "region replacement is an out-of-distribution intervention, not causal attribution",
+    "fixed-seed scene-bootstrap is exploratory and not confirmation of generalization"
+  ]
+}
