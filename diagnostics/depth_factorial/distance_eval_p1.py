@@ -169,7 +169,7 @@ def main():
     p.add_argument("--arm",choices=("native",*ARMS),required=True)
     p.add_argument("--head-checkpoint",default=None)
     p.add_argument("--head-sha256",default=None)
-    p.add_argument("--train-crop-policy",choices=CROP_POLICIES,default="fixed_roi")
+    p.add_argument("--train-crop-policy",choices=(*CROP_POLICIES,"multi3"),default="fixed_roi")
     p.add_argument("--smoke",action="store_true")
     p.add_argument("--anchor-points",type=int,default=256)
     p.add_argument("--min-shared",type=int,default=32)
