@@ -72,6 +72,9 @@ def read_registered(path, *, require_test=True):
     if split.get("frozen_base_checkpoint_sha256")!=(
         "2c7a4097b6350935640d249aa1c0ef2f2871d454417a6a83b95fb37d7a6d1675"):
         raise ValueError("Wrong frozen metric depth base")
+    review=Path(split["object_overlap_review_file"])
+    if not review.is_file() or sha256(review)!=split["object_overlap_review_sha256"]:
+        raise ValueError("Registered CAD overlap review source changed")
     for r in train+test:
         p=Path(r["manifest"])
         if not p.is_file() or sha256(p)!=r["sha256"]:
