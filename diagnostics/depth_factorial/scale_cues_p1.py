@@ -172,6 +172,8 @@ def _csv(path,rows):
 
 def run(a):
     groups,index_hash=read_inventory(a.index,require_accepted=not a.smoke)
+    if not a.smoke and len(groups)!=4:
+        raise ValueError("Primary P1a must audit exactly four accepted corrected B CAD renders; do not select a favorable subset")
     rows=[];analysis_rows=[]
     for item in groups:
         object_rows=_perframe_predictions(item["source"],item["frozen"],item)
