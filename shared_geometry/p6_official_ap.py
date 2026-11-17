@@ -83,6 +83,15 @@ def register(registry,checkpoint,dataset_root,model_args,repo_root=".",
         if not (root/f).is_file():raise FileNotFoundError(root/f)
     if not ckpt.is_file() or not dataset.is_dir():
         raise ValueError("Deployable checkpoint and GraspNet dataset directory required")
+    # inference_cva.py uses observed sensor clouds for model-free collision
+    # filtering when collision_thresh>0, even if the model itself is RGB-only.
+    collision_threshold=0.
+    if "--collision_thresh" in model_args:
+        i=model_args.index("--collision_thresh")
+        collision_threshold=float(model_args[i+1])
+    if collision_threshold<0:
+        raise ValueError("Invalid negative collision threshold")
+    sensor_depth_postfilter=collision_threshold>0.
     independent=None
     if independent_summary:
         r=load_signed(independent_summary)
@@ -103,6 +112,10 @@ def register(registry,checkpoint,dataset_root,model_args,repo_root=".",
                      for p in relevant_inference_sources(root)},
         independent_summary=independent,
         independent_gate_completed=independent is not None,
+        observed_sensor_depth_used_for_collision_postfilter=sensor_depth_postfilter,
+        perception_input_policy=("RGB-only model with observed-depth collision postfilter" 
+                                 if sensor_depth_postfilter else
+                                 "RGB-only model; no observed-depth postfilter"),
         exact_metric="GraspNet-1B official graspnetAPI, full 256 views x 90 test scenes",
         provenance_note="External holdout attestation is not automatically proven by its metadata.")
     path=Path(registry)
