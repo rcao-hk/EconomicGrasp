@@ -54,6 +54,8 @@ def _load_trained(a,registration,net):
 def run(a):
     from rare_grasp.runtime import Runtime
     reg=read_registered(a.registration)
+    if reg["status"]=="synthetic_smoke" and not a.smoke:
+        raise ValueError("Cannot claim formal P1b evaluation on procedural smoke CAD")
     rt=Runtime(a.bound_config,a.graspnet_root,"",a.device)
     net=check_checkpoint(rt)
     base_head_hash=_state_hash(net.depthnet.depth_head.state_dict())
@@ -128,7 +130,8 @@ def run(a):
     with csv_path.open("w",newline="",encoding="utf-8") as f:
         cols=list(all_rows[0]);w=csv.DictWriter(f,fieldnames=cols)
         w.writeheader();w.writerows(all_rows)
-    result=dict(schema=EVAL_SCHEMA,arm=a.arm,status="complete",
+    result=dict(schema=EVAL_SCHEMA,arm=a.arm,
+        status="smoke" if a.smoke else "complete",
         registration_sha256=sha256(a.registration),
         registration_identity_sha256=reg["registration_sha256"],
         base_checkpoint_sha256=rt.config["checkpoint_sha256"],
@@ -160,6 +163,7 @@ def main():
     p.add_argument("--head-checkpoint",default=None)
     p.add_argument("--head-sha256",default=None)
     p.add_argument("--train-crop-policy",choices=CROP_POLICIES,default="fixed_roi")
+    p.add_argument("--smoke",action="store_true")
     p.add_argument("--anchor-points",type=int,default=256)
     p.add_argument("--min-shared",type=int,default=32)
     p.add_argument("--device",default="cuda:0")
