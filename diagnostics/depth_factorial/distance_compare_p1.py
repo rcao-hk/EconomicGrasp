@@ -51,7 +51,8 @@ def run(a):
     base=reports["native"]
     for arm,obj in reports.items():
         if obj["registration_sha256"]!=base["registration_sha256"] or \
-           obj["base_checkpoint_sha256"]!=base["base_checkpoint_sha256"]:
+           obj["base_checkpoint_sha256"]!=base["base_checkpoint_sha256"] or \
+           obj["base_head_parameter_sha256"]!=base["base_head_parameter_sha256"]:
             raise ValueError("Different CAD split or frozen base across experiments")
     near=reports["near_only"]["train_protocol"]
     wide=reports["near_mid_far"]["train_protocol"]
