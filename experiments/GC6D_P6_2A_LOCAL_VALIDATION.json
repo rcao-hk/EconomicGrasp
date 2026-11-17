@@ -1,0 +1,69 @@
+{
+  "status": "local_cpu_synthetic_pass",
+  "repository": "rcao-hk/EconomicGrasp",
+  "branch": "exp/shared-visible-geometry-multibatch",
+  "base_commit": "5f740fb271912e1b96326ca690558da2d985d7dd",
+  "date": "2026-11-17",
+  "tests": 27,
+  "compileall_passed": true,
+  "bash_syntax_passed": true,
+  "cli_help_stages": [
+    "lineage-template",
+    "plan",
+    "parity-graspnet",
+    "build",
+    "audit",
+    "evaluate"
+  ],
+  "actual_gc6d_data_used": false,
+  "actual_cuda_model_executed": false,
+  "actual_dexnet_labels_verified": false,
+  "server_117_execution": false,
+  "official_ap": false,
+  "baseline_geometry_git_blob": "fef50560951758e288d2f12227b29166261ed01b",
+  "environment": {
+    "python": "3.13.5",
+    "numpy": "2.3.5",
+    "torch": "2.10.0+cpu",
+    "scipy": "1.17.0"
+  },
+  "test_log_sha256": "3decf3732e9e15a65fd76930ce012d80d5e08659e8b5f1da6f7960f92233b44a",
+  "files": [
+    {
+      "path": "shared_geometry/p62_gc6d_contract.py",
+      "sha256": "652381d491b1823d2e96fc1661e07e1f3e5c3b27b031c5afdd03995ce109741e",
+      "git_blob_sha": "0f1261783854f1508bd90cda5668472c099db877",
+      "bytes": 11140
+    },
+    {
+      "path": "shared_geometry/p62_gc6d_runtime.py",
+      "sha256": "fcdd6cf36ad3342c6ccf6ec1738239d8bfc360022c2b9c77fa9857104cb2f579",
+      "git_blob_sha": "e2b2d278760bbea23d85d06b913abf701ff4abb1",
+      "bytes": 19386
+    },
+    {
+      "path": "shared_geometry/p62_gc6d.py",
+      "sha256": "7323d02898eb78c1203ef0c9fad6d87bb1353070e06cd75d0b2c547f6da2cdd1",
+      "git_blob_sha": "b3aaec470fd75735a80ac46972cf08d188460688",
+      "bytes": 28826
+    },
+    {
+      "path": "tests/test_p62_gc6d.py",
+      "sha256": "27155c9135b7ed1d240de7100a47c4159bc3323821bf6cc2e41cbfa433d935db",
+      "git_blob_sha": "dd942899359dc2d5e8c1da8de4d021bf6270b398",
+      "bytes": 16201
+    },
+    {
+      "path": "scripts/shared_geometry/run_p62_gc6d.sh",
+      "sha256": "c8ceb5107fdf12edc6a20eedae646df876d4c38af5a4a8c7e5e57d21bc391e7d",
+      "git_blob_sha": "94f5d7540d74639ff2962edc2622f34a893ed603",
+      "bytes": 4191
+    },
+    {
+      "path": "experiments/GC6D_P6_2A_CODEX.md",
+      "sha256": "53965864f11ca61056dafb102df246f2a71aa2786e0cab015f3e454495f29749",
+      "git_blob_sha": "b7bf058a8f1c55d41b8fa26f9374baea725e2bae",
+      "bytes": 11221
+    }
+  ]
+}
