@@ -23,11 +23,11 @@ from diagnostics.depth_followup.common import check_checkpoint
 from diagnostics.frozen_depth_response.geometry import HW,crop_K_from_raw,paired_depth_metrics
 from rare_grasp.runtime import Runtime
 from .factorial_contract import (
-    CROP_POLICIES,SOURCE_SCHEMA,sha256,digest,write_json,
+    CROP_POLICIES,SOURCE_SCHEMA,INFER_SCHEMA,sha256,digest,write_json,
     verify_fixed_physics,source_image
 )
 
-SCHEMA="physical-distance-by-crop-frozen-pred-v1"
+SCHEMA=INFER_SCHEMA
 
 
 def _boxed(mask,margin=.2):
