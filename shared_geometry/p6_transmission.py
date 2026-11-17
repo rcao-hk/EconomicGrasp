@@ -152,6 +152,16 @@ def analyze(p1_index,p4_summary,p5_summary,output,bootstrap=5000,seed=0,smoke=Fa
                 x.extend(v-v.mean());y.extend(q-q.mean())
             x=np.asarray(x);y=np.asarray(y)
             correlation[k]=float(np.corrcoef(x,y)[0,1]) if len(x)>2 and np.ptp(x)>0 and np.ptp(y)>0 else None
+    # Clustered geometry-effect intervals, not IID query/family uncertainty.
+    geometry_ci={}
+    for region in ("all","opening_core_proxy"):
+        for channel in CHANNELS:
+            for metric in ("total_improvement_mm2","shared_improvement_mm2",
+                           "contrast_improvement_mm2","action_relative_mae_improvement_mm"):
+                key=region+"_"+channel+"_"+metric
+                available=[row for row in result if row[key] is not None]
+                geometry_ci[key]=(scene_bootstrap(available,metric=key,
+                    n_boot=bootstrap,seed=seed) if available else None)
     dest=new_directory(output)
     summary=dict(schema=SCHEMA,partition="development_validation",
         source_p1_fingerprint=pi["fingerprint"],source_p4_sha256=sha256(p4_summary),
@@ -159,6 +169,7 @@ def analyze(p1_index,p4_summary,p5_summary,output,bootstrap=5000,seed=0,smoke=Fa
         strict_all_seven_action_mask=True,unknown_as_zero=False,
         same_stencil_not_same_world_point=True,subgroups=groups,
         within_scene_descriptive_correlations=correlation,
+        clustered_geometry_improvement_ci=geometry_ci,
         frozen_gain_delta_ci=scene_bootstrap(result,metric="delta_gain",n_boot=bootstrap,seed=seed),
         official_ap_not_run=True,
         limitations="One-seed reused dev validation; Clean privileged; unknown sites excluded. These are not physical contact or official AP.")
