@@ -57,8 +57,8 @@ def _load(source_file,pred_file):
 
 def _read_view(src,index,policy,record):
     image,ref,mask=source_image(src["views"][index])
-    with np.load(record["prediction_file"],allow_pickle=False) as error:
-        pred=error["pred_depth"]
+    pred=np.asarray(np.load(record["prediction_file"],allow_pickle=False),
+                    dtype=np.float32)
     if pred.shape!=(448,448) or not np.isfinite(pred).all() or (pred<=0).any():
         raise ValueError("Invalid frozen 448 predicted depth")
     K=np.asarray(src["views"][index]["K"],dtype=np.float32)
