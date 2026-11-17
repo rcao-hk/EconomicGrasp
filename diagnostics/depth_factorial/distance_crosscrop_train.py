@@ -26,7 +26,7 @@ from .distance_train_p1 import (
     SCHEMA,_state_hash,_pred,_sample_pixels,render_sample,
 )
 from .distance_split_p1 import read_registered
-from .factorial_contract import sha256,write_json,verify_fixed_physics
+from .factorial_contract import sha256,digest,write_json,verify_fixed_physics
 
 
 def _train_samples(reg):
@@ -64,6 +64,20 @@ def run(a):
         if a.arm not in ARMS or a.steps<9 or a.pixels_per_step<1:
             raise ValueError("Invalid multi3 smoke")
     reg=read_registered(a.registration)
+    preflight_path=Path(a.preflight) if a.preflight else None
+    if not a.smoke:
+        if preflight_path is None or not preflight_path.is_file():
+            raise ValueError("Formal mixed-crop training requires signed historical ROI preflight")
+        preflight=json.loads(preflight_path.read_text(encoding="utf-8"))
+        signed=preflight.pop("manifest_sha256",None)
+        if signed!=digest(preflight) or preflight.get("schema")!=(
+                "physical-distance-crosscrop-preflight-v1") or not preflight.get("verified"):
+            raise ValueError("Historical ROI training source preflight not verified")
+        if (preflight["source_registration_sha256"]!=sha256(a.registration) or
+            preflight["source_registration_identity_sha256"]!=reg["registration_sha256"]):
+            raise ValueError("Actual registered source changed since historical ROI preflight")
+    else:
+        preflight=None
     if reg["status"]=="synthetic_smoke" and not a.smoke:
         raise ValueError("Procedural CAD smoke cannot stand in for formal CAD training")
     from rare_grasp.runtime import Runtime
@@ -77,6 +91,10 @@ def run(a):
     if {id(p) for p in params}!={id(p) for p in head.parameters()}:
         raise RuntimeError("Only 10,890,305-parameter original DPT depth_head may update")
     init=_state_hash(head.state_dict())
+    if preflight is not None and (
+          preflight["initial_depth_head_sha256"]!=init or
+          preflight["frozen_base_checkpoint_sha256"]!=rt.config["checkpoint_sha256"]):
+        raise ValueError("Historical and mixed-crop DPT initial model / base checkpoint differ")
     frozen_before=_frozen_hash(rt.model,head)
     cached=_train_samples(reg)
     events=schedule(a.steps,a.seed,len(cached),a.arm,"multi3")
@@ -126,6 +144,7 @@ def run(a):
        train_object_sequence=[v["object_sha"] for v in trace],
        distance_schedule=[0,0,0] if a.arm=="near_only" else [0,2,4],
        train_registration_sha256=sha256(a.registration),
+       historical_roi_preflight_sha256=sha256(a.preflight) if a.preflight else None,
        registration_identity_sha256=reg["registration_sha256"],
        base_checkpoint_sha256=rt.config["checkpoint_sha256"],
        frozen_base_config_digest=rt.config_digest,
@@ -174,6 +193,8 @@ def run(a):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--registration",required=True)
+    p.add_argument("--preflight",default=None,
+                   help="Signed actual historical ROI near/wide source and model validation")
     p.add_argument("--bound-config",required=True)
     p.add_argument("--graspnet-root",required=True)
     p.add_argument("--arm",choices=ARMS,required=True)
