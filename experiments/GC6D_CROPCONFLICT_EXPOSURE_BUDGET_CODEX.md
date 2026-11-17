@@ -188,7 +188,7 @@ P1：
 - [ ] CPU unittest/compileall/bash -n真实PASS；数值复核gradient/distance/crop纯函数。
 - [ ] 历史4模型接受的实际last.pt、test推断结果和train registration SHA一致；不能新训练旧头替代。
 - [ ] P0训练对象2/5，不读取test对象8/9进行梯度/模型选择；同一128真实射线3crop抽样，参数从头到尾无更新。
-- [ ] P1两组600step相同物距/对象抽样、监督像素/初始DPT SHA/AdamW；ROI600 600步，Multi600每crop200步，九格每格66–67步。
+- [ ] P1两组600step相同物距/对象抽样、监督像素/初始DPT SHA/AdamW；ROI600 600步，Multi600每crop200步，九格每格66–67步。 **严格前缀复现：第200步head参数与已验收对应200步last.pt逐tensor比较，最大绝对参数差预注册≤1e−4；不因旧模型的测试表现或不同GPU数值而在运行中放宽容差，失败须先核对源码与数值环境。**
 - [ ] 冻结DINO/pose-FiLM/GVAR/grasp在新训练前后SHA相同，且只有DPT head参数更新。
 - [ ] 每个模型测试固定LAST在全部5距离×3crop×同CAD真实3D表面点，按对象聚合，不能用best-epoch/最远单点选择。
 - [ ] 如有新CAD，mesh SHA、类别、材料、渲染源、相机K、RGB质量与来源历史都通过独立注册；排除原CAD2/5/8/9；不假装文件SHA等于类别独立。
