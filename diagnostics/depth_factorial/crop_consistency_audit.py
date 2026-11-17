@@ -150,6 +150,36 @@ def run(a):
                     mean_mae_m=float(np.mean([r["mae"] for r in subset])),
                     mean_bias_m=float(np.mean([r["mean_bias"] for r in subset])),
                     mean_pred_m=float(np.mean([r["median_prediction"] for r in subset]))))
+    if a.baseline_dir:
+        # Audit that adding multi3 models did not alter the underlying
+        # physical pixel set, crop boxes, original native or ROI predictions.
+        past=Path(a.baseline_dir)
+        old=json.loads((past/"summary.json").read_text(encoding="utf-8"))
+        signature=old.pop("manifest_sha256",None)
+        if (signature!=digest(old) or old.get("schema")!=SCHEMA):
+            raise ValueError("P0 prior audit provenance invalid")
+        if old["registered_cad_source_sha256"]!=sha256(a.registration):
+            raise ValueError("Different P0 physical CAD registration")
+        for arm in REQUIRED:
+            if old["eval_sources"].get(arm)!=sha256(Path(paths[arm])/"summary.json"):
+                raise ValueError(f"P0 previously audited {arm} model source changed")
+        with (past/"per_object_distance_crop_arm.csv").open(
+                newline="",encoding="utf-8") as f:
+            baseline=list(csv.DictReader(f))
+        key=lambda r:(r["object_sha"],r["arm"],str(r["distance_id"]),r["crop_policy"])
+        current={key(r):r for r in rows if r["arm"] in REQUIRED}
+        if len(current)!=len(baseline):
+            raise ValueError("Different baseline CAD object×crop×distance coverage")
+        for r in baseline:
+            new=current.get(key(r))
+            if new is None:
+                raise ValueError("Previously evaluated CAD physical point set missing")
+            for field in ("points","mae","mean_bias","median_prediction",
+                          "median_reference","shared_three_crop_std_m",
+                          "shared_three_crop_range_m"):
+                if not np.isclose(float(r[field]),float(new[field]),
+                                  rtol=0,atol=1e-10):
+                    raise RuntimeError(f"Original P0 baseline altered after multi3: {key(r)}/{field}")
     root=Path(a.output)
     if root.exists() and any(root.iterdir()):raise FileExistsError(root)
     root.mkdir(parents=True,exist_ok=True)
@@ -193,6 +223,8 @@ def main():
     p.add_argument("--registration",required=True)
     p.add_argument("--eval-index",required=True,
                    help='JSON {"native":"/abs","roi_near":"/abs","roi_wide":"/abs", optional multi_near/multi_wide}')
+    p.add_argument("--baseline-dir",default=None,
+                   help="Prior 3-arm same-point audit must remain byte-numerically consistent after new training")
     p.add_argument("--points-per-frame",type=int,default=256)
     p.add_argument("--min-points",type=int,default=32)
     p.add_argument("--output",required=True)
