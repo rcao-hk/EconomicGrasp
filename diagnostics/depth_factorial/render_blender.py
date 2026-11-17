@@ -114,7 +114,6 @@ def _setup_scene(bpy,Matrix,Vector,plan,mesh_info):
     scene.render.film_transparent=False
     scene.render.use_border=False
     scene.render.use_crop_to_border=False
-    scene.render.image_settings.color_management="Standard" if False else None
     # Stable color-management parameters across all camera distances.
     scene.view_settings.view_transform="Standard"
     scene.view_settings.look="Medium High Contrast"
@@ -236,7 +235,8 @@ def _raycheck(bpy,Vector,depth,mask,plan,T,object_set,*,n=24):
         direction=R@(ray/np.linalg.norm(ray))
         hit,location,normal,face,obj,mat=bpy.context.scene.ray_cast(
             dag,Vector(C),Vector(direction),distance=4.5)
-        if not hit or obj.original.name not in object_set:
+        hit_name=getattr(getattr(obj,"original",obj),"name",None) if obj is not None else None
+        if not hit or hit_name not in object_set:
             continue
         vec=np.asarray(location,dtype=float)-C
         optical.append(float(np.dot(vec,R[:,2])))
