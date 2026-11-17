@@ -74,9 +74,13 @@ p0-before|p0-after)
     write_index "$stage_index" no
     out="$ROOT/p0_existing_roi"
   fi
+  extra=()
+  if [[ "$STAGE" == p0-after ]];then
+    extra+=(--baseline-dir "$ROOT/p0_existing_roi")
+  fi
   python -m diagnostics.depth_factorial.crop_consistency_audit \
     --registration "$REG" --eval-index "$stage_index" --output "$out" \
-    --points-per-frame 256 --min-points 32
+    --points-per-frame 256 --min-points 32 "${extra[@]}"
   ;;
 train-near-multi|train-wide-multi)
   need_inputs
