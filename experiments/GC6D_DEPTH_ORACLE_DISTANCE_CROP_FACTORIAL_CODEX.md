@@ -185,3 +185,22 @@ bash scripts/depth_factorial/run.sh b-aggregate
 - [ ] 结果需区分：A的oracle形状上限、B的物理物距响应、crop交互与真实GC6D上的最终grasp AP。后三者不可互相替代。
 
 **本工作单当前状态：实现已写入GitHub；实际的CPU/Blender/CUDA测试及新结果仍需在可访问相应软件和数据的执行环境验收。**
+
+## 6. 2026-11-17：Constant / 非负Affine及Near/Far数据支持域验证
+
+前一轮A/B已验收（仅引用修正曝光的`cad_fixed_*`与`b_fixed_aggregate`）：
+
+- A：原始／Scale／Shift／Affine空间留出MAE分别约30.17／9.41／7.29／5.26cm，但Affine 2005/3999折为负斜率、系数中位接近零，暂不能认定局部几何可恢复。
+- B：物理Distance×Crop的固定ROI相对较强，adaptive最弱，但各crop均远离理想β=1；旧过曝几乎全白的数据全部无效。
+
+**新阶段完整Codex工作单：** [GC6D_DEPTH_ORACLE_CONSTANT_AND_DISTANCE_TRAIN_P0_P1_CODEX.md](GC6D_DEPTH_ORACLE_CONSTANT_AND_DISTANCE_TRAIN_P0_P1_CODEX.md)。
+
+**P0**：沿用原A的四折、同像素评价，新添Constant-mean/median、a≥0 Affine，以及真实深度edge/smooth分层与同fold配对Scene CI；不运行新网络。
+
+**P1a**：必须提供修正曝光CAD源/推断/分析/独立验收文件的真实SHA，才运行投影像素尺度与effective K′审计；全白RGB数据按图像质量门禁拒绝。
+
+**P1b**：新增明确CAD对象隔离的near-only/near+far等预算仅深度DPT-head训练（固定基座、DINO/pose-FiLM/GVAR/grasp冻结），前置CAD/相机/渲染源协议及训练/测试签名；评估5距离×3crop相同世界点β、密集深度和DiD。原4 CAD此前已参与开发，不能冒充全新、未见过的独立验证。
+
+入口：`scripts/depth_factorial/followup_p0_p1.sh check|p0-smoke|p0-run|p1-cues|p1-register|p1-train-near|p1-train-wide|p1-eval-native|p1-eval-near|p1-eval-wide|p1-compare`。
+
+本阶段实现已提交，117实际CPU/CUDA/数据验收及新训练结果仍需现场执行；不覆盖原A/B、GC6D或GraspNet AP。
