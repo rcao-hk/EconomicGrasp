@@ -49,6 +49,8 @@ def _read_inventory(path, *, allow_procedural=False):
             q.append(rgb_quality(rgb,mask))
         records.append(dict(manifest=str(p.resolve()),sha256=item["sha256"],
                             object_sha=obj_id,source_plan_sha256=digest(raw["plan"]),
+                            camera_protocol_sha256=digest(raw["plan"]["camera"]),
+                            render_protocol_sha256=digest(raw["plan"]["render"]),
                             rgb_qc_min_std=float(min(v["rgb_std"] for v in q)),
                             rgb_qc_max_white=float(max(v["rgb_white_fraction"] for v in q)),
                             rgb_qc_min_contrast=float(min(v["rgb_fg_bg_contrast"] for v in q))))
@@ -89,6 +91,10 @@ def register(a):
         raise ValueError("Train/eval CAD hashes overlap; never train on same object")
     if len(train)<2 or len(test)<1:
         raise ValueError("Formal near/far budget needs >=2 train and >=1 eval CAD")
+    if len({r["camera_protocol_sha256"] for r in train+test})!=1:
+        raise ValueError("All CAD train/eval objects must share exact physical camera/K/rotation")
+    if len({r["render_protocol_sha256"] for r in train+test})!=1:
+        raise ValueError("All CAD train/eval objects must share Cycles samples and render seed")
     overlap=Path(a.object_overlap_review)
     if not overlap.is_file() or len(overlap.read_text(encoding="utf-8"))<10:
         raise ValueError("Real CAD object lineage/duplicate review file required")
@@ -99,6 +105,8 @@ def register(a):
         object_overlap_review_sha256=sha256(overlap),
         object_overlap_review_file=str(overlap.resolve()),
         fixed_physical_distances_m=SCHEDULE,
+        camera_protocol_sha256=train[0]["camera_protocol_sha256"],
+        render_protocol_sha256=train[0]["render_protocol_sha256"],
         frozen_base_checkpoint_sha256=(
             "2c7a4097b6350935640d249aa1c0ef2f2871d454417a6d1675"),
         crop_policies=["fixed_full","fixed_roi","adaptive_workspace"],
