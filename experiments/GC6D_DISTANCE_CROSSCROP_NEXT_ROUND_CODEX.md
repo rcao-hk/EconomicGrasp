@@ -180,3 +180,13 @@ bash scripts/depth_factorial/crosscrop_next_round.sh compare
 - [ ] 记录旧117代码`842ecda7...`本地执行patch与远端最新HEAD差异，不吞掉数值变更；
 - [ ] 不覆盖任何历史结果，不声称新真实GC6D指标或机器人成功率；
 - [ ] 本轮输出只有服务器真正运行后才可写结果数值；本工作单不包含猜测结果。
+
+## 8. 2026-11-17：根据跨Crop2×2结果继续区分曝光量和梯度冲突
+
+上传的 `gc6d_crosscrop_REPORT_CN.md` 已验收：200步MultiCrop Wide在0.85m下，adaptive MAE由ROI-Wide的48.59cm降至20.95cm、β由0.031增至0.427；但Fixed ROI MAE从14.49cm退化到22.33cm，β从0.716降至0.407。Multi-near的低跨crop range不能代表正确米制深度。**下一步不再直接扩大模型，而是区分监督曝光稀释与梯度目标干扰。**
+
+完整Codex工作单：**[GC6D_CROPCONFLICT_EXPOSURE_BUDGET_CODEX.md](GC6D_CROPCONFLICT_EXPOSURE_BUDGET_CODEX.md)**。
+
+新增`gradient_conflict_p0.py`使用训练CAD2/5的同一物理ray和同一深度标签比较基座、ROI200-Wide和Multi200-Wide三个DPT参数状态下三crop梯度余弦；**不执行optimizer.step**。新增`distance_budget_train.py`从原冻结基座分别训练ROI600与Multi600（各600×256像素，Multi每crop200步、九格66/67次），复用已验收ROI/Multi200构成预算×crop 2×2对照。另有新CAD mesh来源登记及eval扩展，不修改原注册文件；没有实际新CAD源时只运行已观察旧CAD的探索性对照，不声称新的未知类别验证。
+
+主入口：`scripts/depth_factorial/budget_next_round.sh`；真实117 CPU/CUDA/CAD验收还未执行。旧200头及其结果不可重新训练/覆盖，不要根据已查看的两个测试CAD选择600步模型或调新学习率。
