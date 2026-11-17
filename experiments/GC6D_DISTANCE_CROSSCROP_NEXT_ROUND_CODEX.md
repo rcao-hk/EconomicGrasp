@@ -71,10 +71,10 @@ d_t=
 \end{cases}
 \qquad
 c_t=(\mathrm{full},\mathrm{ROI},\mathrm{adaptive})
-[\lfloor t/3\rfloor\bmod3].
+[(\lfloor t/3\rfloor + t\bmod3)\bmod3].
 \]
 
-注意**不能**让物距与crop均按`t%3`轮换，否则只会看到(近,full)、(中,ROI)、(远,adaptive)三个组合，完全混淆距离和裁剪。采用上述正交日程后，wide的三距离×三crop九格约各22–23个step，200步总监督像素51200；near-only也均衡三crop。历史ROI仅固定crop，四组随机CAD对象index仍由`seed+701`生成同一序列；像素抽样由`seed+1701`随机流按每步同样个数执行。
+注意**不能**让物距与crop均按`t%3`轮换，否则只会看到(近,full)、(中,ROI)、(远,adaptive)三个组合，完全混淆距离和裁剪。采用上述9-step Latin-square正交日程后，wide的三距离×三crop九格约各22–23个step，200步总监督像素51200；near-only三crop曝光精确为67/67/66步。历史ROI仅固定crop，四组随机CAD对象index仍由`seed+701`生成同一序列；像素抽样由`seed+1701`随机流按每步同样个数执行。
 
 **额外source约束：**所有训练/测试CAD渲染使用相同物理K、相机旋转、曝光、Cycles设置、深度正向与crop代码；旧几乎全白RGB不得复用；actual source mesh路径、版本、SHA及历史对象重叠审核都必须真实存在。
 
