@@ -86,6 +86,16 @@ def validate_plan(plan,*,allow_procedural=True):
             raise ValueError("Procedural box must specify valid metre dimensions")
     else:
         raise ValueError("Declare verified mesh or explicit procedural box")
+    # Material appearance may vary BETWEEN independently registered CAD
+    # objects, but must be one immutable choice across all distances of
+    # the same object. These are explicit linear Blender BSDF RGB values.
+    appearance=plan.get("appearance",{})
+    if appearance:
+        color=np.asarray(appearance.get("base_color_linear",[]),dtype=float)
+        rough=float(appearance.get("roughness",-1))
+        if (color.shape!=(3,) or not np.isfinite(color).all() or
+            np.any((color<0)|(color>1)) or not 0<=rough<=1):
+            raise ValueError("Explicit rendered material needs linear RGB [0,1]^3 and roughness [0,1]")
     rendering=plan.get("render",{})
     if not 8<=int(rendering.get("samples",0))<=1024 or not isinstance(rendering.get("seed"),int):
         raise ValueError("Render samples and seed must be explicit")
