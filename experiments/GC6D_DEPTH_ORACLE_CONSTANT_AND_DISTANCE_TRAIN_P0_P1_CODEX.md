@@ -92,6 +92,8 @@ bash scripts/depth_factorial/followup_p0_p1.sh p0-run
 - `cad_fixed_*/b_analysis/summary.json`（same-world surface）
 - 原 `reports/B_ACCEPTANCE.json` 或对应只读独立验收证据与实际SHA。
 
+已同步上轮117实际接受的Blender修复到原分支：固定−6EV曝光、Blender 4.2的RGB EXR标量通道、Composite输出链接、对实际保存的RGB做饱和/低对比度拒绝、脚本异常强制非零退出。**新CAD训练源必须使用更新后的渲染器并独立验收相机投影和光轴深度；旧全白render不能复用。**
+
 为这些文件创建 `CORRECTED_B_INDEX`，格式JSON数组：
 
 ```json
