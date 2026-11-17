@@ -119,7 +119,9 @@ def _setup_scene(bpy,Matrix,Vector,plan,mesh_info):
     # Stable color-management parameters across all camera distances.
     scene.view_settings.view_transform="Standard"
     scene.view_settings.look="Medium High Contrast"
-    scene.view_settings.exposure=0.
+    # Corrected, independently accepted B exposure. The earlier 0EV run
+    # produced nearly all-white RGB despite valid geometry; NEVER reuse it.
+    scene.view_settings.exposure=-6.
     scene.view_settings.gamma=1.
     scene.world.color=(.15,.15,.15)
     if scene.world.use_nodes:
@@ -282,11 +284,15 @@ def render(plan_file,output):
     scene.use_nodes=True
     tree=scene.node_tree;tree.nodes.clear()
     render_layers=tree.nodes.new("CompositorNodeRLayers")
+    composite=tree.nodes.new("CompositorNodeComposite")
+    tree.links.new(render_layers.outputs["Image"],composite.inputs["Image"])
     nodes={}
     for name,socket in (("zpass","Depth"),("index","IndexOB")):
         node=tree.nodes.new("CompositorNodeOutputFile")
         node.format.file_format="OPEN_EXR"
-        node.format.color_mode="BW"
+        # Blender 4.2+ may not support BW EXR output. RGB scalar EXR
+        # replicates the pass, and _exr_scalar reads channel 0 explicitly.
+        node.format.color_mode="RGB"
         node.format.color_depth="32"
         node.file_slots[0].path=name+"_"
         tree.links.new(render_layers.outputs[socket],node.inputs[0])
@@ -311,6 +317,25 @@ def render(plan_file,output):
         index=_exr_scalar(bpy,ipath,H,W)
         mask=index>.5
         if not np.any(mask):raise RuntimeError(f"Object disappeared at distance {d}")
+        # Content gate operates on the actual saved RGB PNG, not on camera
+        # raycast/depth arrays. Geometry parity alone did not catch the
+        # superseded almost-white render batch.
+        color_img=bpy.data.images.load(str(folder/"rgb.png"),check_existing=False)
+        try:
+            px=np.asarray(color_img.pixels[:],dtype=np.float32)
+            if px.size!=H*W*4:raise RuntimeError("Unexpected Blender RGB PNG channel layout")
+            rgb=px.reshape(H,W,4)[::-1,:,:3]
+        finally:
+            bpy.data.images.remove(color_img)
+        white=float(np.mean(np.all(rgb>=.98,axis=2)))
+        color_std=float(np.std(rgb))
+        if int(mask.sum())<100 or int((~mask).sum())<100:
+            raise RuntimeError("Object/background too small for RGB source validation")
+        fg_color=rgb[mask].mean(0);bg_color=rgb[~mask].mean(0)
+        contrast=float(np.linalg.norm(fg_color-bg_color)/np.sqrt(3))
+        if white>.96 or color_std<.015 or contrast<.015:
+            raise RuntimeError(f"Render RGB rejected as saturated/low-contrast: "
+                               f"white={white:.4f},std={color_std:.5f},contrast={contrast:.5f}")
         depth=np.where(np.isfinite(raw_depth)&(raw_depth>0)&(raw_depth<5),
                        raw_depth,0.).astype(np.float32)
         kind,n,err_z,err_r=_raycheck(bpy,Vector,depth,mask,plan,T,object_set)
@@ -335,6 +360,9 @@ def render(plan_file,output):
             depth_reference_kind="rendered_object_camera_z_metres",
             projection_max_error_px=projection_err,
             raycast_checks=n,raw_pass_kind=kind,
+            rgb_exposure_ev=-6.,
+            rgb_white_fraction=white,rgb_std=color_std,
+            rgb_object_background_contrast=contrast,
             raycast_z_mae_m=err_z,raycast_range_mae_m=err_r))
         for tmp in (zpath,ipath):tmp.unlink()
         print(f"[Blender B] {i+1}/{len(plan['distances_m'])} dist={d}m "
@@ -360,4 +388,11 @@ def main():
 
 
 if __name__=="__main__":
-    main()
+    # Some headless Blender releases exit 0 after a Python traceback.
+    # Force a nonzero process exit for broken depth/pose/RGB source files.
+    try:
+        main()
+    except Exception:
+        import os,traceback
+        traceback.print_exc()
+        os._exit(1)
