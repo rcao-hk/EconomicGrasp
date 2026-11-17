@@ -173,7 +173,8 @@ def _paired_ci(left,right,metric,n_boot,seed,predicate=None):
     return scene_bootstrap(a,b,metric=metric,n_boot=n_boot,seed=seed)
 
 
-def analyze(summary_path, output, n_boot=5000, seed=0, smoke=False):
+def analyze(summary_path, output, bootstrap=5000, seed=0, smoke=False):
+    n_boot=bootstrap
     if n_boot<1:raise ValueError("Bootstrap budget must be positive")
     s,modes,keys=load_matched(summary_path,smoke=smoke)
     dest=new_directory(output)
