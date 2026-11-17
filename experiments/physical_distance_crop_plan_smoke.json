@@ -1,0 +1,53 @@
+{
+  "schema": "physical-distance-crop-render-plan-v1",
+  "object": {
+    "kind": "procedural_box",
+    "dimensions_m": [
+      0.055,
+      0.045,
+      0.085
+    ]
+  },
+  "target_world": [
+    0,
+    0,
+    0
+  ],
+  "camera": {
+    "width": 640,
+    "height": 480,
+    "fx": 550,
+    "fy": 550,
+    "cx": 320,
+    "cy": 240,
+    "R_c2w": [
+      [
+        1,
+        0,
+        0
+      ],
+      [
+        0,
+        1,
+        0
+      ],
+      [
+        0,
+        0,
+        1
+      ]
+    ]
+  },
+  "distances_m": [
+    0.35,
+    0.45,
+    0.55,
+    0.7,
+    0.85
+  ],
+  "render": {
+    "engine": "CYCLES",
+    "samples": 32,
+    "seed": 20261117
+  }
+}
