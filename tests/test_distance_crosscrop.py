@@ -30,7 +30,9 @@ class OrthogonalFactorialTests(unittest.TestCase):
         self.assertEqual([seq[i]["distance_id"] for i in range(9)],
                          [0,2,4]*3)
         self.assertEqual([seq[i]["crop_policy"] for i in range(9)],
-            [CROPS[0]]*3+[CROPS[1]]*3+[CROPS[2]]*3)
+            [CROPS[0],CROPS[1],CROPS[2],
+             CROPS[1],CROPS[2],CROPS[0],
+             CROPS[2],CROPS[0],CROPS[1]])
 
     def test_near_multi3_has_same_crop_schedule_as_wide_multi3(self):
         near=schedule(200,MAIN_SEED,2,"near_only","multi3")
