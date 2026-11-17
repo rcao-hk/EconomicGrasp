@@ -217,3 +217,18 @@ bash scripts/depth_followup/run.sh p1-analyze
 - [ ] 不用P0 Original/GC6D直接对齐假装同相机/同物体；K/crop统计是描述性证据，不是因果实验；
 - [ ] 本轮**不训练、没有新AP、没有depth scale fitting或camera embedding**；
 - [ ] 原开发GC6D78场景已被反复观察，报告探索性，不宣称独立泛化。
+
+## 8. 2026-11-17：A深度局部形状Oracle与B物距×crop受控实验
+
+上一轮P0训练域与GC6D支持域审计、P1同一3D表面追踪已完成：Original训练域米制深度约0.41m且误差低；GC6D深度严重偏浅，78场景同点响应斜率近0。
+
+继续相同分支，新的两个实验已实现：
+
+- **A**：复用已验收GC6D P1 depth cache，在每帧独立的空间象限用传感器参考拟合scale/shift/affine，严格留出其他象限评价局部几何，不把oracle参数用于部署。
+- **B**：Blender Cycles按预注册真实世界相机平移距离渲染相同CAD，固定相机K/姿态、物体/材质/光源；在同源RGB上交叉比较fixed_full/fixed_roi/adaptive_workspace crop。使用相同CAD世界表面点比较Δz响应和distance×crop差分交互，禁止用数字zoom代替物理相机运动。
+
+详细工作单：**[GC6D_DEPTH_ORACLE_DISTANCE_CROP_FACTORIAL_CODEX.md](GC6D_DEPTH_ORACLE_DISTANCE_CROP_FACTORIAL_CODEX.md)**。
+
+统一入口：`scripts/depth_factorial/run.sh check|a-smoke|a-run|b-render|b-infer|b-analyze|b-aggregate`。
+
+状态：代码与单元测试文件已写入GitHub，真实服务器CPU/Blender/CUDA验收及新数值结果未在此聊天执行；原有AP、P0/P1验收产物不动。
