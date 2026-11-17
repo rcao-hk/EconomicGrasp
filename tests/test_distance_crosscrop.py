@@ -43,6 +43,9 @@ class OrthogonalFactorialTests(unittest.TestCase):
                          [r["crop_policy"] for r in wide])
         self.assertEqual({r["distance_id"] for r in near},{0})
         self.assertEqual({r["distance_id"] for r in wide},{0,2,4})
+        self.assertEqual(Counter(r["crop_policy"] for r in near),
+                         Counter({"fixed_full":67,"fixed_roi":67,
+                                  "adaptive_workspace":66}))
 
     def _protocols(self):
         seq=schedule(200,MAIN_SEED,2,"near_only","roi")
