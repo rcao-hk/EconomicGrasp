@@ -14,6 +14,7 @@ import numpy as np
 
 PLAN_SCHEMA="physical-distance-crop-render-plan-v1"
 SOURCE_SCHEMA="physical-distance-render-source-v1"
+INFER_SCHEMA="physical-distance-by-crop-frozen-pred-v1"
 CROP_POLICIES=("fixed_full","fixed_roi","adaptive_workspace")
 
 
