@@ -223,3 +223,13 @@ bash scripts/depth_factorial/followup_p0_p1.sh p1-compare
 - [ ] 每一测试对象都计算5距离×3crop前景误差和同world surface β，决策不能仅基于单个MAE。
 - [ ] 训练权重只保存在新结果目录，绝不覆盖已验收的MIX50 e15基座、GC6D78场景或Novel AP数据。
 - [ ] 无真实GC6D改动/新grasp AP时，不声称系统抓取性能提升。
+
+## 6. 2026-11-17：已验收P0/P1结果后的最小2×2物距×Crop后续
+
+上一轮在117完成Constant/非负Affine（GC6D 1014帧）及两个DPT深度头的200步固定ROI near-only/near+far对照。已验收结论：Constant MAE5.395cm、非负Affine5.403cm，局部几何仅有小幅正向证据；原物理B测试集两对象中，near+far在fixed ROI 0.85m下β≈0.716，但在adaptive crop下β≈0.031，说明受控距离监督存在很强的裁剪依赖。旧117执行源码本地commit `842ecda7...`未推送，当前远端需在实际运行前核对其修复。
+
+**后续独立Codex工作单：** [GC6D_DISTANCE_CROSSCROP_NEXT_ROUND_CODEX.md](GC6D_DISTANCE_CROSSCROP_NEXT_ROUND_CODEX.md)。
+
+新代码只补充两组训练：near-only×multi3和near+far×multi3，历史两组fixed ROI头及其评估作为固定对照，构成2×2实验。采用9-step Latin-square的距离×crop正交日程，200步下wide九格各22–23步，near-only三crop分别67/67/66步。另有不训练的P0 same-raw-ray跨crop质量审计，必须沿同一原始物理像素和真实CAD来源比较，而不是逐crop前景平均值。强制跑历史ROI源/模型preflight，拒绝篡改旧权重、签名或隐性重训原头。
+
+执行脚本：`scripts/depth_factorial/crosscrop_next_round.sh`。新物理模型训练、CPU/117验收、统计结果仍待实际运行；原GC6D/GraspNet AP不变。
