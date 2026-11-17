@@ -3,8 +3,9 @@
 Reuse previously accepted ROI near/wide last.pt as the other 2x2 cells,
 after strict registration, initialization, step and source checks.
 
-Important: crop=(step//3)%3, distance=(step%3), not step%3 for both:
-all 9 physical distance×crop combinations are seen in the wide arm.
+Important: crop=(step//3+step%3)%3, distance=(step%3).
+This 9-step Latin-square schedule covers all 9 physical combinations
+without confounding, with near-only crop counts 67/67/66 over 200 steps.
 """
 from __future__ import annotations
 
@@ -160,7 +161,7 @@ def run(a):
        trainable_params=sum(p.numel() for p in params),
        training_status="synthetic_smoke" if a.smoke else "preregistered_CAD_holdout",
        source_registration_status=reg["status"],
-       update_step_crop_schedule="CROPS[(step//3)%3]",
+       update_step_crop_schedule="CROPS[(step//3+step%3)%3]",
        update_step_distance_schedule="near=0;wide=(0,2,4)[step%3]",
        source_train_CAD_objects=[r["object_sha"] for r in reg["train"]],
        no_grasp_training=True,
