@@ -1,8 +1,9 @@
 """Pure, CPU-testable preregistered Distance(near/wide) × Crop(ROI/multi3).
 
 The cross factors MUST not be confounded by using step%3 for both.
-For multi3, distance rotates every step and crop every THREE steps:
-all 9 distance×crop combinations occur approximately equally often.
+For multi3, use a 9-step Latin square: crop_index=(step//3+step%3)%3.
+All 9 distance×crop combinations occur, including balanced leftover steps
+for 200 updates (200 is not divisible by 9).
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ def schedule(steps=MAIN_STEPS,seed=MAIN_SEED,objects=2,arm="near_mid_far",
     for step,obj in enumerate(chosen):
         distance=(0 if arm=="near_only" else (0,2,4)[step%3])
         crop=("fixed_roi" if crop_design=="roi"
-              else CROPS[(step//3)%3])
+              else CROPS[(step//3+step%3)%3])
         rows.append(dict(step=step,object_index=int(obj),
                          distance_id=distance,crop_policy=crop))
     if crop_design=="multi3":
