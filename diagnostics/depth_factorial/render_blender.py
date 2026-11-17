@@ -85,7 +85,10 @@ def _load_mesh(bpy,Matrix,Vector,plan):
     for item in objects:
         item.location+=Vector(delta)
         item.pass_index=1
-        mat=_new_material(bpy,"fixed_object_material",(0.63,0.32,0.21))
+        app=plan.get("appearance",{})
+        mat=_new_material(bpy,"fixed_object_material",
+                          app.get("base_color_linear",(0.63,0.32,0.21)),
+                          roughness=float(app.get("roughness",.85)))
         item.data.materials.clear();item.data.materials.append(mat)
     bpy.context.view_layer.update()
     vertices2=[]
