@@ -16,10 +16,9 @@ from pathlib import Path
 import numpy as np
 
 from diagnostics.depth_followup.multiview import match_pair,sample_anchors
-from .factorial_contract import (CROP_POLICIES,SOURCE_SCHEMA,
+from .factorial_contract import (CROP_POLICIES,SOURCE_SCHEMA,INFER_SCHEMA,
                                  sha256,digest,write_json,
                                  source_image,verify_fixed_physics)
-from .factorial_run import SCHEMA as INFER_SCHEMA
 
 SCHEMA="physical-distance-crop-factorial-analysis-v1"
 
