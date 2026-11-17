@@ -103,6 +103,8 @@ def _setup_scene(bpy,Matrix,Vector,plan,mesh_info):
     scene=bpy.context.scene
     scene.render.engine="CYCLES"
     scene.cycles.samples=int(plan["render"]["samples"])
+    scene.cycles.seed=int(plan["render"]["seed"])
+    scene.cycles.use_animated_seed=False
     scene.cycles.use_denoising=False
     scene.render.resolution_x=int(plan["camera"]["width"])
     scene.render.resolution_y=int(plan["camera"]["height"])
@@ -132,7 +134,10 @@ def _setup_scene(bpy,Matrix,Vector,plan,mesh_info):
     R=np.asarray(plan["camera"]["R_c2w"],dtype=float)
     v=R[:,2]
     target=np.asarray(plan["target_world"],dtype=float)
-    max_back=float(np.dot(np.asarray(mesh_info["bounds_world_max"])-target,v))
+    low=np.asarray(mesh_info["bounds_world_min"],dtype=float)
+    high=np.asarray(mesh_info["bounds_world_max"],dtype=float)
+    bbox_back=np.where(v>=0,high,low)
+    max_back=float(np.dot(bbox_back-target,v))
     table_loc=target+(max(.22,max_back+.10))*v
     bpy.ops.mesh.primitive_plane_add(size=3.,location=table_loc)
     plane=bpy.context.object
