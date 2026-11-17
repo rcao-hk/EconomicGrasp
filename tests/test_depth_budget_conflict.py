@@ -51,6 +51,12 @@ class BudgetScheduleTests(unittest.TestCase):
         self.assertEqual(
             [r["object_index"] for r in roi[:200]],
             [r["object_index"] for r in budget_schedule("roi",200,objects=2)])
+        self.assertEqual(
+            [(r["distance_id"],r["crop_policy"]) for r in roi[:200]],
+            [(r["distance_id"],r["crop_policy"]) for r in budget_schedule("roi",200,objects=2)])
+        self.assertEqual(
+            [(r["distance_id"],r["crop_policy"]) for r in multi[:200]],
+            [(r["distance_id"],r["crop_policy"]) for r in budget_schedule("multi3",200,objects=2)])
 
     def test_different_object_sequence_or_distance_is_rejected(self):
         roi=budget_schedule("roi",600,objects=2)
