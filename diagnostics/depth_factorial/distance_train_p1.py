@@ -182,6 +182,8 @@ def run(a):
        learning_rate=a.lr,weight_decay=a.weight_decay,
        smooth_l1_beta=a.beta,gradient_clip=a.grad_clip,
        crop_policy=a.crop_policy,seed=a.seed,
+       source_registration_status=reg["status"],
+       training_status="synthetic_smoke" if a.smoke else "preregistered_CAD_holdout",
        optimizer="AdamW",trainable_module="depth_net.depthnet.depth_head ONLY",
        trainable_params=sum(p.numel() for p in trainable),
        train_scene_source="predeclared physically translated CAD train objects",
