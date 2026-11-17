@@ -56,7 +56,7 @@ def _frozen_hash(model,head):
 
 
 def run(a):
-    if (a.arm not in ARMS or a.seed<0 or a.steps!=MAIN_STEPS or
+    if (a.arm not in ARMS or a.seed!=MAIN_SEED or a.steps!=MAIN_STEPS or
             a.pixels_per_step!=MAIN_PIXELS or a.lr!=2e-5 or
             a.weight_decay!=1e-4 or a.beta!=.03 or a.grad_clip!=1.):
         if not a.smoke:
