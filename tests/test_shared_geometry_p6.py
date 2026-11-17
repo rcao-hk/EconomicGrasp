@@ -152,4 +152,51 @@ class P6EvaluationGuards(unittest.TestCase):
                 validate_model_args(["--multi_modal",flag,"1"])
 
 
+class P6SyntheticPipeline(unittest.TestCase):
+    """Actual P1/P4/P5 synthetic flow through both P6 read-only stages."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.test_shared_geometry_p5 import P5SyntheticE2E
+        from shared_geometry.p5_reader_adaptation import fit,compare
+        from types import SimpleNamespace as A
+        cls.parent=P5SyntheticE2E
+        cls.parent.setUpClass()
+        cls.root=cls.parent.root
+        for arm in ("predicted","corrected"):
+            fit(A(arm=arm,
+                train_index=str(cls.root/"p5_cache/train/index.json"),
+                val_index=str(cls.root/"p5_cache/validation/index.json"),
+                output=str(cls.root/("p6_reader_"+arm)),device="cpu",
+                epochs=2,batch_size=2,accumulate=1,val_batch_size=2,
+                hidden=8,seed=11,lr=1e-3,weight_decay=1e-4,cpu_threads=1,
+                resume=False,smoke=True))
+        compare(A(index=str(cls.root/"p5_cache/validation/index.json"),
+            p1_index=str(cls.root/"p1/validation/index.json"),
+            predicted_weight=str(cls.root/"p6_reader_predicted/best.pt"),
+            corrected_weight=str(cls.root/"p6_reader_corrected/best.pt"),
+            shared_weight=str(cls.root/"reader/best.pt"),
+            expected_p4=str(cls.root/"p4eval/summary.json"),
+            output=str(cls.root/"p6_compare"),device="cpu",
+            batch_size=2,bootstrap=20,seed=0,smoke=True))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.parent.tearDownClass()
+
+    def test_p60_and_p61_end_to_end_replay(self):
+        from shared_geometry.p6_transmission import analyze as p61
+        result=p60(self.root/"p6_compare/summary.json",
+                   self.root/"p6_opportunities",bootstrap=20,smoke=True)
+        self.assertEqual(result["n_families"],4)
+        res=p61(self.root/"p1/validation/index.json",
+                self.root/"p4eval/summary.json",
+                self.root/"p6_compare/summary.json",
+                self.root/"p6_transmission",bootstrap=20,smoke=True)
+        self.assertEqual(res["n_frames"],2)
+        self.assertEqual(res["n_families"],4)
+        self.assertIn("all_udf_shared_improvement_mm2",res["clustered_geometry_improvement_ci"])
+        self.assertTrue(res["official_ap_not_run"])
+
+
 if __name__=="__main__":unittest.main()
