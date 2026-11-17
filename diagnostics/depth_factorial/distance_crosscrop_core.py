@@ -67,7 +67,8 @@ def verify_four_arm_protocols(protocols,registration_sha):
             raise ValueError(f"Incorrect distance arm: {name}")
         ctype="multi3" if name.startswith("multi") else "roi"
         expected=schedule(int(p["steps"]),int(p["seed"]),
-                          objects=2,arm=target_arm,crop_design=ctype)
+                          objects=len(set(master["train_object_sequence"])),
+                          arm=target_arm,crop_design=ctype)
         # The object index sequence is random from the actual original list,
         # so only compare object SHAs directly; not assumed integers.
         distances=[r["distance_id"] for r in expected]
