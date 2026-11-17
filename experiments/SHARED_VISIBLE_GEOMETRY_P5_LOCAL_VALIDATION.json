@@ -1,0 +1,55 @@
+{
+  "experiment": "P5-0/P5-1",
+  "status": "local_cpu_pass",
+  "repository": "rcao-hk/EconomicGrasp",
+  "branch": "exp/shared-visible-geometry-multibatch",
+  "parent_commit": "f389c48470b569edaadcb3a74f08adb6f08a5813",
+  "date": "2026-11-17",
+  "test_groups": [
+    {
+      "log": "p5_final_regression_a.log",
+      "tests": 52,
+      "passed": true
+    },
+    {
+      "log": "p5_final_regression_b.log",
+      "tests": 37,
+      "passed": true
+    }
+  ],
+  "files": [
+    {
+      "path": "shared_geometry/p5_geometry_diagnostics.py",
+      "sha256": "813b62cd944979da9c0989315d11fa98dcacbc432acc9c5f06e09f3874add9ae",
+      "bytes": 18812
+    },
+    {
+      "path": "shared_geometry/p5_reader_adaptation.py",
+      "sha256": "04f718964b4929f7e61eadfc910e788a95f5e29a54cfbdcdb728bbf397e4c414",
+      "bytes": 25247
+    },
+    {
+      "path": "scripts/shared_geometry/run_p5.sh",
+      "sha256": "642f2bc97aefbd9cf4d12f5bbc56299065f93cbc0f019bc1e33e26ae501da485",
+      "bytes": 3898
+    },
+    {
+      "path": "tests/test_shared_geometry_p5.py",
+      "sha256": "c766aa8c812276c35e2e17147446df29cf0a2dfaf339c9904716ac0213d65ae5",
+      "bytes": 11388
+    },
+    {
+      "path": "experiments/SHARED_VISIBLE_GEOMETRY_P5_CODEX.md",
+      "sha256": "91e3189d60cc3464bb6b7304285b734388017e8960cbdacd4842b79a19806c48",
+      "bytes": 10366
+    }
+  ],
+  "formal_server_runs_performed": false,
+  "official_ap_measured": false,
+  "scope": "P5-0 streamed offline geometry diagnostic; P5-1 matched predicted/corrected reader re-training and fixed-P2 comparisons",
+  "limits": [
+    "Historical full CLI/inference collection timed out in local container; 89 selected non-CLI regressions passed.",
+    "No actual 117 server CUDA/large-data training or scientific performance claims.",
+    "Single-seed historical P4 validation repeatedly used; later CIs exploratory."
+  ]
+}
