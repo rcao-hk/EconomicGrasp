@@ -1,0 +1,27 @@
+{
+  "parent_commit": "beaf89d33a9a9d56857d1f8466cf4522ceb388d2",
+  "branch": "exp/gc6d-camera-crop-plane",
+  "test_command": "python -m unittest discover -s tests -p test_camera_geometry.py -v",
+  "cpu_tests": 43,
+  "cpu_tests_status": "PASS",
+  "compileall": "PASS",
+  "shell_syntax": "PASS",
+  "scope": "CPU synthetic geometry contracts and tiny model workflows; no production weights",
+  "production_DINO_DPT_forward": "NOT_RUN",
+  "real_checkpoint_strict_load": "NOT_RUN",
+  "CUDA": "NOT_RUN",
+  "117_formal_training": "NOT_RUN",
+  "official_AP": "NOT_RUN",
+  "robot": "NOT_RUN",
+  "test_log_sha256": "1a1254b5df501667e0d1051ad5cfa29485498f1089032d367dbfff1710b3afb9",
+  "source_sha256": {
+    "camera_geometry/__init__.py": "3c67fe335286527213b6621dbf7c8a4285dea3818d656604459e8a62f4896a30",
+    "camera_geometry/data.py": "6acee88112b6da72e5db1df5e2adbfd5a0b72becf489391dd2868dcb6dc44545",
+    "camera_geometry/evaluate.py": "6f1e29b168cfebd649ade390eab0525cddd13c885333d1775b956742103dfa12",
+    "camera_geometry/geometry.py": "9299682ec6461862c0b8c1005eecb15583b4193b2b2641ab24f2a89ff973c1b9",
+    "camera_geometry/model.py": "f03f84a93ea5ad48e15b04d812bfe820788d411b3f3db1b9df25e6ae43580f13",
+    "camera_geometry/render.py": "fb8aa70e4b92c9997e7575c59a991fcfdf9a9d6cd427db1671fa478ec8d64a97",
+    "camera_geometry/run.py": "941afe36db9b7963db9b7337afe737c4694e3f8f095724df8ad039f2a4e260ba",
+    "tests/test_camera_geometry.py": "29a0b767e19c78b9eb4dbb7bc43a79e01f554c672f81ff7396f5d9c03ee60d18"
+  }
+}

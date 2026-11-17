@@ -1,0 +1,20 @@
+{
+  "raw_hw": [480, 640],
+  "focal_px": 600.0,
+  "reference_distance_m": 0.45,
+  "train_distances_m": [0.35, 0.45, 0.55],
+  "eval_distances_m": [0.35, 0.45, 0.55, 0.70, 0.85],
+  "tilts_deg": [0, 35],
+  "focal_modes": ["fixed", "matched_table_projection"],
+  "fixed_roi_fraction": [0.1, 0.1, 0.9, 0.9],
+  "workspace_margin_px": 24,
+  "track_count": 256,
+  "min_foreground_pixels": 512,
+  "max_faces": 200000,
+  "objects": [
+    {"id": "train_A", "mesh": "/ABS/REGISTERED/train_A.ply", "scale_to_m": 0.001, "partition": "train", "previously_used": true},
+    {"id": "train_B", "mesh": "/ABS/REGISTERED/train_B.ply", "scale_to_m": 0.001, "partition": "train", "previously_used": true},
+    {"id": "dev_A", "mesh": "/ABS/REGISTERED/dev_A.ply", "scale_to_m": 0.001, "partition": "dev", "previously_used": true},
+    {"id": "holdout_A", "mesh": "/ABS/REGISTERED/independent_A.ply", "scale_to_m": 0.001, "partition": "holdout", "previously_used": false}
+  ]
+}
