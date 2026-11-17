@@ -38,6 +38,18 @@ ARGUMENTS_FLAG=("--multi_modal","--use_cdf","--enable_point_rayrope",
 ALLOWED=set(ARGUMENTS_WITH_VALUE+ARGUMENTS_FLAG)
 
 
+def relevant_inference_sources(root):
+    """Freeze all Python modules imported by the deployed inference/evaluator."""
+    names=("inference_cva.py","eval.py")
+    folders=("models","dataset","utils","rayrope_gvar","libs")
+    files=[root/p for p in names]
+    for folder in folders:
+        directory=root/folder
+        if directory.is_dir():
+            files.extend(sorted(directory.rglob("*.py")))
+    return sorted(set(files))
+
+
 def validate_model_args(tokens):
     if not isinstance(tokens,list) or not tokens:
         raise ValueError("A locked list of model inference CLI arguments is required")
@@ -87,8 +99,8 @@ def register(registry,checkpoint,dataset_root,model_args,repo_root=".",
         dataset_root=str(dataset),camera="realsense",sample_interval=1.0,
         split_order=list(SPLITS),repo_root=str(root),
         inference_args=model_args,
-        code_hashes={p:sha256(root/p) for p in
-                     ("inference_cva.py","eval.py","utils/arguments.py")},
+        code_hashes={str(p.relative_to(root)):sha256(p)
+                     for p in relevant_inference_sources(root)},
         independent_summary=independent,
         independent_gate_completed=independent is not None,
         exact_metric="GraspNet-1B official graspnetAPI, full 256 views x 90 test scenes",
