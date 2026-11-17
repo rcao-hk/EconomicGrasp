@@ -79,6 +79,16 @@ def run(a):
     _validate_600(reports["roi600"]["train_protocol"],"roi",pre,a.registration)
     _validate_600(reports["multi600"]["train_protocol"],"multi3",pre,a.registration)
     cads=[r["object_sha"] for r in reports["roi200"]["object_analysis"]]
+    if a.external_holdout:
+        sources={report.get("new_cad_holdout_manifest_sha256")
+                 for report in reports.values()}
+        statuses={report.get("new_cad_holdout_status")
+                  for report in reports.values()}
+        if len(sources)!=1 or None in sources or len(statuses)!=1:
+            raise ValueError("Four arms did not use identical signed NEW CAD eval source")
+        if len(cads)<1 or set(cads)&{
+                r["object_sha"] for r in reg["train"]+reg["eval"]}:
+            raise ValueError("New-CAD eval overlaps existing training or inspected test CAD")
     if set(cads)!={r["object_sha"] for r in reg["eval"]} and not a.external_holdout:
         raise ValueError("Original 2-CAD exploratory evaluator identities changed")
     if any([x["object_sha"] for x in report["object_analysis"]]!=cads
