@@ -32,20 +32,27 @@ def _load_trained(a,registration,net):
             raise ValueError("Native baseline must not load a fitted head")
         return None
     p=Path(a.head_checkpoint or "")
-    if not p.is_file():raise ValueError(f"Missing fixed-last depth head {p}")
+    if not p.is_file() or p.name!="last.pt":
+        raise ValueError(f"Only existing fixed last.pt accepted: {p}")
     if sha256(p)!=a.head_sha256:
         raise RuntimeError("Trained head checkpoint hash differs from preregistration")
     ck=torch.load(p,map_location="cpu",weights_only=False)
     if ck.get("schema")!=SCHEMA or ck.get("kind")!="DPT_head_only":
         raise ValueError("Wrong DPT head-only checkpoint contract")
     protocol=ck["protocol"]
-    if protocol["arm"]!=a.arm or protocol["train_registration_sha256"]!=sha256(a.registration):
+    if (protocol["arm"]!=a.arm or
+            protocol["train_registration_sha256"]!=sha256(a.registration) or
+            protocol["registration_identity_sha256"]!=registration["registration_sha256"]):
         raise ValueError("Head trained on different source CAD split/arm")
+    if protocol["initial_depth_head_sha256"]!=_state_hash(net.depthnet.depth_head.state_dict()):
+        raise ValueError("Train/eval started from different frozen DPT-head parameters")
     if protocol["base_checkpoint_sha256"]!=(
           "2c7a4097b6350935640d249aa1c0ef2f2871d454417a6a83b95fb37d7a6d1675"):
         raise ValueError("Head initialization not historical MIX50")
     if ck["protocol"]["crop_policy"]!=a.train_crop_policy:
         raise ValueError("Head trained with different declared crop policy")
+    if protocol.get("training_status")=="synthetic_smoke" and not a.smoke:
+        raise ValueError("Cannot evaluate procedural-smoke depth head formally")
     net.depthnet.depth_head.load_state_dict(ck["state"],strict=True)
     return protocol
 
