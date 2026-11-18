@@ -1033,6 +1033,15 @@ def compute_depth_reg_loss(
 
     # valid mask from GT range
     valid = (gt > 0) & (gt >= depth_min) & (gt <= depth_max)  # bool (B,1,H,W)
+    # Invalid near-parallel rays cannot be decoded from height; do not
+    # secretly supervise them as if the support-plane inverse were defined.
+    if "height_ray_valid_mask" in end_points:
+        ray_valid = end_points["height_ray_valid_mask"].bool()
+        if ray_valid.shape != valid.shape:
+            raise ValueError(f"Height ray mask shape mismatch: {ray_valid.shape} vs {valid.shape}")
+        valid = valid & ray_valid
+    if not valid.any():
+        raise ValueError("No eligible GT rays for calibrated-height regression.")
     m = valid.to(dtype=pred.dtype)
 
     # huber on full map

@@ -142,12 +142,19 @@ parser.add_argument(
     "--pose_depth_mode",
     type=str,
     default="none",
-    choices=("none", "global_film", "ray_gravity_film"),
+    choices=("none", "global_film", "ray_gravity_film", "height_analytic"),
     help=(
         "Camera-pose conditioning used only by the RGB metric-depth DPT: "
-        "none, global channel-wise FiLM, or dense ray-gravity FiLM."
+        "none, global FiLM, ray-gravity FiLM, or calibrated height analytic (no FiLM)."
     ),
 )
+
+parser.add_argument("--height_min_m", type=float, default=-0.05,
+                    help="Height decoder lower bound in metres (height_analytic only).")
+parser.add_argument("--height_max_m", type=float, default=0.35,
+                    help="Height decoder upper bound in metres (height_analytic only).")
+parser.add_argument("--height_min_downward_dot", type=float, default=0.1,
+                    help="Reject near-parallel upward/horizon rays (height_analytic only).")
 
 parser.add_argument("--use_top4_view_infer", action='store_true')
 parser.add_argument("--enable_eval", action='store_true')

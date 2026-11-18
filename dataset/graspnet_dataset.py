@@ -532,6 +532,22 @@ class GraspNetMultiDataset(Dataset):
         )
         return camera_gravity_vec
 
+    def build_camera_plane_metadata(self, scene, anno_idx):
+        """Calibrated support plane (n_cam[3], b_m) from official scene poses.
+
+        Uses exactly the same camera-to-table transform as workspace masking:
+        T_table_from_cam = cam0_wrt_table @ camera_poses[anno].
+        This is EXTRINSIC metadata, not depth/segmentation-derived target leakage.
+        The table z=0 assumption must be checked on the real dataset by preflight.
+        """
+        from height_analytic_geometry import plane_from_camera_to_table
+        poses, cam0_wrt_table = self._load_camera_geometry(scene)
+        anno_idx = int(anno_idx)
+        if not 0 <= anno_idx < poses.shape[0]:
+            raise IndexError(f"Bad camera frame {anno_idx} for {scene}.")
+        T = cam0_wrt_table @ poses[anno_idx]
+        return plane_from_camera_to_table(T)
+
     def augment_data(self, point_clouds, object_poses_list):
         if np.random.random() > 0.5:
             flip_mat = np.array([[-1, 0, 0],
@@ -876,6 +892,7 @@ class GraspNetMultiDataset(Dataset):
             'sensor_depth_m': sensor_depth_m_resized.astype(np.float32),# (448,448), debug
             'camera_pose_vec': camera_pose_vec,
             'camera_gravity_vec': camera_gravity_vec,
+            'camera_plane': self.build_camera_plane_metadata(scene, anno_idx),
             'camera_tilt_deg': camera_tilt_deg,
             'scene_idx': np.int64(scene_idx),
             'anno_idx': np.int64(anno_idx),
@@ -1318,6 +1335,7 @@ class GraspNetMultiDataset(Dataset):
             
             'camera_pose_vec': camera_pose_vec,
             'camera_gravity_vec': camera_gravity_vec,
+            'camera_plane': self.build_camera_plane_metadata(scene, anno_idx),
             'camera_tilt_deg': camera_tilt_deg,
             'scene_idx': np.int64(scene_idx),
             'anno_idx': np.int64(anno_idx),

@@ -306,6 +306,16 @@ class GNTransMixedTrainer(base.Trainer):
             "use_cdf": bool(self.use_cdf),
             "pose_depth_mode": str(getattr(cfgs, "pose_depth_mode", "none")),
             "use_fuse_depth": bool(getattr(cfgs, "use_fuse_depth", False)),
+            "height_analytic_protocol": (
+                {"version": 1, "mode": "height_analytic",
+                 "height_min_m": float(cfgs.height_min_m),
+                 "height_max_m": float(cfgs.height_max_m),
+                 "height_min_downward_dot": float(cfgs.height_min_downward_dot),
+                 "plane_source": "GraspNet camera_poses + cam0_wrt_table, table z=0",
+                 "no_pose_ray_plane_film": True}
+                if str(getattr(cfgs, "pose_depth_mode", "none")) == "height_analytic"
+                else None
+            ),
         }
         if save_interval:
             torch.save(

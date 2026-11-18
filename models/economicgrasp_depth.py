@@ -397,6 +397,8 @@ class DINOv2DepthRegressionNet(nn.Module):
       - ``global_film``: channel-wise FiLM from ``camera_pose_vec``;
       - ``ray_gravity_film``: dense FiLM from crop-aware ``K`` and
         ``camera_gravity_vec`` (table normal/world-up in camera frame).
+      - ``height_analytic``: NO FiLM; predict height above a calibrated
+        support plane and recover metric z by analytic ray/plane geometry.
 
     The raw frozen-DINO features returned through ``return_feats`` are never
     conditioned, so proposal/objectness/graspness branches remain unchanged.
@@ -413,6 +415,9 @@ class DINOv2DepthRegressionNet(nn.Module):
         pose_hidden_dim=64,
         ray_gravity_hidden_dim=64,
         ray_gravity_mid_dim=32,
+        height_min_m=-0.05,
+        height_max_m=0.35,
+        height_min_downward_dot=0.1,
     ):
         super().__init__()
         assert stride in [1, 2, 4]
@@ -421,6 +426,21 @@ class DINOv2DepthRegressionNet(nn.Module):
         self.max_depth = float(max_depth)
         self.freeze_backbone_flag = bool(freeze_backbone)
         self.pose_depth_mode = pose_depth_mode
+        self.height_min_m = float(height_min_m)
+        self.height_max_m = float(height_max_m)
+        self.height_min_downward_dot = float(height_min_downward_dot)
+        if self.pose_depth_mode == "height_analytic":
+            if not (-3.0 < self.height_min_m < self.height_max_m < 3.0):
+                raise ValueError("Invalid metre height range.")
+            if not 0 < self.height_min_downward_dot < 1:
+                raise ValueError("height_min_downward_dot must be in (0,1).")
+            # Persistent signature makes a no-FiLM depth checkpoint unable to
+            # masquerade as a height-decoder checkpoint under strict loading.
+            self.register_buffer(
+                "height_analytic_signature",
+                torch.tensor([self.height_min_m, self.height_max_m,
+                              self.height_min_downward_dot], dtype=torch.float32),
+            )
 
         model_configs = {
             "vits": {
@@ -488,6 +508,14 @@ class DINOv2DepthRegressionNet(nn.Module):
             strict=False,
         )
 
+        if self.pose_depth_mode == "height_analytic":
+            if self.pose_aware_adapter is not None:
+                raise RuntimeError("Height analytic must instantiate no FiLM.")
+            # Same zero-logit initialization as the controlled T2 study: h midpoint.
+            final = self.depthnet.depth_head.scratch.output_conv2[-1]
+            nn.init.zeros_(final.weight)
+            nn.init.zeros_(final.bias)
+
         if self.freeze_backbone_flag:
             self._freeze_backbone()
 
@@ -534,6 +562,7 @@ class DINOv2DepthRegressionNet(nn.Module):
         camera_pose_vec: torch.Tensor = None,
         camera_gravity_vec: torch.Tensor = None,
         camera_K: torch.Tensor = None,
+        camera_plane: torch.Tensor = None,
         return_feats: bool = False,
         return_raw: bool = False,
         return_pose_aux: bool = False,
@@ -577,7 +606,22 @@ class DINOv2DepthRegressionNet(nn.Module):
         )
 
         # RGB-only metric depth. This preserves the existing regression head.
-        depth_448 = F.sigmoid(raw_448) * self.max_depth
+        if self.pose_depth_mode == "height_analytic":
+            if camera_plane is None or camera_K is None:
+                raise KeyError("Height analytic needs crop-adjusted K and calibrated camera_plane.")
+            if camera_pose_vec is not None or camera_gravity_vec is not None:
+                raise RuntimeError("Height analytic must not consume pose/gravity FiLM inputs.")
+            from height_analytic_geometry import height_to_depth
+            depth_448, height_448, eligible = height_to_depth(
+                raw_448, camera_K, camera_plane,
+                height_min_m=self.height_min_m,
+                height_max_m=self.height_max_m,
+                min_downward_dot=self.height_min_downward_dot,
+            )
+            pose_aux = {"height_map_pred": height_448,
+                        "height_ray_valid_mask": eligible}
+        else:
+            depth_448 = F.sigmoid(raw_448) * self.max_depth
 
         if self.stride > 1:
             depth_tok = F.interpolate(

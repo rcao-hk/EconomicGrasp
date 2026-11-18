@@ -55,6 +55,11 @@ done
 [[ "${ENABLE_GVAR:-0}" == 0 ]] || TOP4_VIEW_ARGS+=(--enable_gvar)
 TOP4_VIEW_ARGS+=(--rayrope_group_chunk "${RAYROPE_GROUP_CHUNK:-32}" --gvar_action_chunk "${GVAR_ACTION_CHUNK:-256}")
 TOP4_VIEW_ARGS+=(--rayrope_checkpoint_chunks "${RAYROPE_CHECKPOINT_CHUNKS:-1}" --gvar_activation_checkpoint "${GVAR_ACTIVATION_CHECKPOINT:-1}")
+if [[ "${POSE_DEPTH_MODE}" == "height_analytic" ]]; then
+  TOP4_VIEW_ARGS+=(--height_min_m "${HEIGHT_MIN_M:--0.05}"
+                  --height_max_m "${HEIGHT_MAX_M:-0.35}"
+                  --height_min_downward_dot "${HEIGHT_MIN_DOWNWARD_DOT:-0.1}")
+fi
 if [[ "${USE_TOP4_VIEW_INFER}" == "1" ]]; then
   TOP4_VIEW_ARGS+=(--use_top4_view_infer)
 fi

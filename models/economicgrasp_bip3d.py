@@ -6389,6 +6389,9 @@ class economicgrasp_dpt(nn.Module):
         pose_hidden_dim: int = 64,
         ray_gravity_hidden_dim: int = 64,
         ray_gravity_mid_dim: int = 32,
+        height_min_m: float = -0.05,
+        height_max_m: float = 0.35,
+        height_min_downward_dot: float = 0.1,
         use_depth_comp: bool = False,
         use_cdf: bool = False,
         vis_dir: Optional[str] = 'vis_dpt',
@@ -6431,6 +6434,9 @@ class economicgrasp_dpt(nn.Module):
         self.pose_hidden_dim = int(pose_hidden_dim)
         self.ray_gravity_hidden_dim = int(ray_gravity_hidden_dim)
         self.ray_gravity_mid_dim = int(ray_gravity_mid_dim)
+        self.height_min_m = float(height_min_m)
+        self.height_max_m = float(height_max_m)
+        self.height_min_downward_dot = float(height_min_downward_dot)
         if self.pose_depth_mode != "none" and self.use_obs_depth:
             raise ValueError(
                 f"pose_depth_mode={self.pose_depth_mode!r} is an RGB-only "
@@ -6486,6 +6492,9 @@ class economicgrasp_dpt(nn.Module):
             pose_hidden_dim=self.pose_hidden_dim,
             ray_gravity_hidden_dim=self.ray_gravity_hidden_dim,
             ray_gravity_mid_dim=self.ray_gravity_mid_dim,
+            height_min_m=self.height_min_m,
+            height_max_m=self.height_max_m,
+            height_min_downward_dot=self.height_min_downward_dot,
         )
         if self.geometry_depth_source == "gt":
             # Keep the module/state-dict structure checkpoint-compatible, but the
@@ -7872,6 +7881,8 @@ class economicgrasp_dpt(nn.Module):
                 camera_pose_vec=camera_pose_vec,
                 camera_gravity_vec=camera_gravity_vec,
                 camera_K=K,
+                camera_plane=(end_points["camera_plane"]
+                              if self.pose_depth_mode == "height_analytic" else None),
                 return_feats=True,
                 return_raw=True,
                 return_pose_aux=True,
@@ -7992,7 +8003,16 @@ class economicgrasp_dpt(nn.Module):
             end_points["depth_net_pred"] = depth_net_pred_448
             end_points["depth_head_raw_pred"] = depth_head_raw_448
 
-        if self.pose_depth_mode != "none":
+        if self.pose_depth_mode == "height_analytic":
+            if self.depth_net.pose_aware_adapter is not None:
+                raise RuntimeError("Height-only path must have no pose, ray or plane FiLM.")
+            end_points["height_map_pred"] = pose_depth_aux["height_map_pred"]
+            end_points["height_ray_valid_mask"] = pose_depth_aux["height_ray_valid_mask"]
+            end_points["D: Height ray eligible fraction"] = (
+                pose_depth_aux["height_ray_valid_mask"].float().mean().reshape(())
+            )
+
+        if self.pose_depth_mode in ("global_film", "ray_gravity_film"):
             # Common mode-independent diagnostics.
             for key in (
                 "pose_depth_gamma_abs_mean",

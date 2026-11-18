@@ -64,6 +64,20 @@ def _load_checkpoint_strict(model, checkpoint_path: str) -> None:
         )
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     validate_checkpoint_design(model, checkpoint)
+    if model.pose_depth_mode == "height_analytic":
+        protocol = checkpoint.get("height_analytic_protocol") if isinstance(checkpoint, dict) else None
+        expected = {
+            "height_min_m": model.height_min_m,
+            "height_max_m": model.height_max_m,
+            "height_min_downward_dot": model.height_min_downward_dot,
+        }
+        if (not isinstance(protocol, dict)
+                or protocol.get("mode") != "height_analytic"
+                or protocol.get("version") != 1
+                or protocol.get("no_pose_ray_plane_film") is not True
+                or any(abs(float(protocol.get(k, float("nan")))-v) > 1e-6
+                       for k,v in expected.items())):
+            raise ValueError(f"Height analytic checkpoint protocol mismatch: {protocol} vs {expected}")
     state = (
         checkpoint["model_state_dict"]
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint
@@ -142,6 +156,9 @@ def inference() -> None:
         is_training=False,
         use_obs_depth=bool(getattr(cfgs, "use_obs_depth", False)),
         pose_depth_mode=pose_depth_mode,
+        height_min_m=getattr(cfgs, "height_min_m", -0.05),
+        height_max_m=getattr(cfgs, "height_max_m", 0.35),
+        height_min_downward_dot=getattr(cfgs, "height_min_downward_dot", 0.1),
         camera_pose_key=str(
             getattr(cfgs, "camera_pose_key", "camera_pose_vec")
         ),

@@ -673,6 +673,20 @@ class Trainer:
         if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
             checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu')
             validate_checkpoint_design(self.unwrap_model(), checkpoint)
+            if self.unwrap_model().pose_depth_mode == "height_analytic":
+                protocol = checkpoint.get("height_analytic_protocol") if isinstance(checkpoint, dict) else None
+                expected = {
+                    "height_min_m": self.unwrap_model().height_min_m,
+                    "height_max_m": self.unwrap_model().height_max_m,
+                    "height_min_downward_dot": self.unwrap_model().height_min_downward_dot,
+                }
+                if (not isinstance(protocol, dict)
+                        or protocol.get("mode") != "height_analytic"
+                        or protocol.get("version") != 1
+                        or protocol.get("no_pose_ray_plane_film") is not True
+                        or any(abs(float(protocol.get(k, float("nan"))) - v) > 1e-6
+                               for k,v in expected.items())):
+                    raise ValueError(f"Height-only resume/init protocol mismatch: {protocol}")
             state_dict = (
                 checkpoint['model_state_dict']
                 if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint
