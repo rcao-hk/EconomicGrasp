@@ -1,0 +1,15 @@
+{
+  "expected_epochs": [4, 8, 12, 16],
+  "checkpoints": [
+    {
+      "family": "height_analytic",
+      "epoch": 16,
+      "path": "/ABS/height_analytic_mix50_rendergn_lr3e4_wd1e3_seed0_20261119/train/checkpoint_15.tar"
+    },
+    {
+      "family": "global_film",
+      "epoch": 16,
+      "path": "/ABS/point_gvar36_50pct_20261016/train/checkpoint_latest.pt"
+    }
+  ]
+}
