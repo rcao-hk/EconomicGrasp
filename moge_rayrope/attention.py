@@ -8,6 +8,7 @@ This is NOT E[softmax(attention)] and NOT Gaussian positional encoding.
 from __future__ import annotations
 import math
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint

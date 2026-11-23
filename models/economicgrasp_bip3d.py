@@ -6402,7 +6402,6 @@ class economicgrasp_dpt(nn.Module):
         gvar_action_chunk: int = 256,
         rayrope_checkpoint_chunks: bool = True,
         gvar_activation_checkpoint: bool = True,
-        rayrope_position_type: str = "ray",
     ):
         super().__init__()
         self.enable_point_rayrope = bool(enable_point_rayrope)
@@ -6787,7 +6786,6 @@ class economicgrasp_dpt(nn.Module):
             gvar_action_chunk=gvar_action_chunk,
             rayrope_checkpoint_chunks=rayrope_checkpoint_chunks,
             gvar_activation_checkpoint=gvar_activation_checkpoint,
-            rayrope_position_type=rayrope_position_type,
         )
 
         # Geometry diagnostics are independent of the prediction-head choice
@@ -8000,9 +7998,8 @@ class economicgrasp_dpt(nn.Module):
             if center_z_source == "gt_ray_shift" and str(diag_geometry_override.get("action_source", "pred")) != "pred":
                 raise ValueError("gt_ray_shift is defined only with predicted local action geometry")
 
-        if diag_geometry_override is not None:
-            end_points["depth_map_evidence"] = evidence_depth_448
-            end_points["depth_map_action"] = action_depth_448
+        end_points["depth_map_evidence"] = evidence_depth_448
+        end_points["depth_map_action"] = action_depth_448
 
         if self.stride > 1:
             depth_tok = F.interpolate(
