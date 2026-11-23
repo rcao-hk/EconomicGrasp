@@ -7945,6 +7945,7 @@ class economicgrasp_dpt(nn.Module):
             diag_geometry_override = {
                 "evidence_source": "override",
                 "action_source": "override",
+                "local_source": "override",
                 "depth_override": depth_override_tensor,
             }
         if diag_geometry_override is not None:
