@@ -413,6 +413,7 @@ class DINOv2DepthRegressionNet(nn.Module):
         pose_hidden_dim=64,
         ray_gravity_hidden_dim=64,
         ray_gravity_mid_dim=32,
+        load_pretrained_backbone: bool = True,
     ):
         super().__init__()
         assert stride in [1, 2, 4]
@@ -479,14 +480,18 @@ class DINOv2DepthRegressionNet(nn.Module):
         else:
             self.pose_aware_adapter = None
 
-        checkpoint = torch.load(
-            "checkpoints/depth_anything_v2_{}.pth".format(encoder),
-            map_location="cpu",
-        )
-        self.depthnet.load_state_dict(
-            {k: v for k, v in checkpoint.items() if "pretrained" in k},
-            strict=False,
-        )
+        # Full EconomicGrasp checkpoints already contain the complete DINOv2/DPT
+        # state. Inference can skip this external initialization file and load the
+        # checkpoint strictly afterwards; training keeps the original default.
+        if load_pretrained_backbone:
+            checkpoint = torch.load(
+                "checkpoints/depth_anything_v2_{}.pth".format(encoder),
+                map_location="cpu",
+            )
+            self.depthnet.load_state_dict(
+                {k: v for k, v in checkpoint.items() if "pretrained" in k},
+                strict=False,
+            )
 
         if self.freeze_backbone_flag:
             self._freeze_backbone()

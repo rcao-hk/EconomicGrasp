@@ -6402,6 +6402,7 @@ class economicgrasp_dpt(nn.Module):
         gvar_action_chunk: int = 256,
         rayrope_checkpoint_chunks: bool = True,
         gvar_activation_checkpoint: bool = True,
+        load_pretrained_depth_backbone: bool = True,
     ):
         super().__init__()
         self.enable_point_rayrope = bool(enable_point_rayrope)
@@ -6483,6 +6484,7 @@ class economicgrasp_dpt(nn.Module):
             max_depth=self.max_depth,
             freeze_backbone=freeze_backbone,
             pose_depth_mode=self.pose_depth_mode,
+            load_pretrained_backbone=bool(load_pretrained_depth_backbone),
             pose_hidden_dim=self.pose_hidden_dim,
             ray_gravity_hidden_dim=self.ray_gravity_hidden_dim,
             ray_gravity_mid_dim=self.ray_gravity_mid_dim,
