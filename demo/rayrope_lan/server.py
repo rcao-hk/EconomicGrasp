@@ -50,9 +50,7 @@ def _torch_load(path: str):
 
 def camera_pose_vec_from_transform(T_table_from_camera: np.ndarray) -> np.ndarray:
     """Match GraspNetMultiDataset.build_camera_orientation_metadata exactly."""
-    transform = np.asarray(T_table_from_camera, dtype=np.float32)
-    if transform.shape != (4, 4) or not np.isfinite(transform).all():
-        raise ValueError("T_table_from_camera must be a finite 4x4 matrix.")
+    transform = _validate_transform(T_table_from_camera, "T_table_from_camera")
     vector = -transform[:3, :3][:, 2]
     norm = float(np.linalg.norm(vector))
     if norm < 1e-8:
