@@ -19,6 +19,8 @@ def _parse_flags():
     p.add_argument("--export_dataset_module",default="")
     p.add_argument("--export_dataset_class",default="")
     p.add_argument("--export_dataset_kwargs_json",default="{}")
+    p.add_argument("--export_collate_module",default="dataset.graspnet_dataset")
+    p.add_argument("--export_collate_name",default="collate_fn")
     p.add_argument("--export_dataset_name",default="")
     p.add_argument("--export_max_samples",type=int,default=0)
     p.add_argument("--export_seed",type=int,default=20261123)
@@ -29,7 +31,6 @@ A=_parse_flags()
 from utils.arguments import cfgs
 from models.grasp_designs import design_options,validate_checkpoint_design
 from models.economicgrasp_bip3d import economicgrasp_dpt
-from dataset.graspnet_dataset import collate_fn
 
 
 def _dataset():
@@ -59,6 +60,13 @@ def _dataset():
       elif param.default is inspect.Parameter.empty: missing.append(param.name)
     if missing: raise TypeError(f"Missing dataset constructor args {missing}; signature={sig}; use export_dataset_kwargs_json")
     return cls(**kwargs)
+
+
+def _get_collate_fn():
+    module=importlib.import_module(A.export_collate_module)
+    if not hasattr(module,A.export_collate_name):
+      raise AttributeError(f"Collate function {A.export_collate_module}.{A.export_collate_name} not found")
+    return getattr(module,A.export_collate_name)
 
 
 def _sample_meta(ds,index,sample):
@@ -116,6 +124,7 @@ def main():
     model.load_state_dict(state,strict=True); model.eval()
     cksha=hashlib.sha256(Path(cfgs.checkpoint_path).read_bytes()).hexdigest()
     ds=_dataset()
+    collate=_get_collate_fn()
     frac=float(getattr(cfgs,"sample_interval",1.0)); stride=1 if frac>=1 else max(1,int(round(1./frac)))
     indices=[]
     for start in range(0,len(ds),256): indices.extend(range(start,min(start+256,len(ds)),stride))
@@ -125,7 +134,7 @@ def main():
     rows=[]
     for n,index in enumerate(indices):
       np.random.seed(A.export_seed+int(index)); torch.manual_seed(A.export_seed+int(index))
-      sample=ds[int(index)]; batch=collate_fn([sample])
+      sample=ds[int(index)]; batch=collate([sample])
       for k,v in batch.items():
         if isinstance(v,(list,tuple)): raise TypeError(f"Unexpected list-valued key {k}")
         if torch.is_tensor(v): batch[k]=v.to(device)
