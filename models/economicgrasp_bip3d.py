@@ -7938,6 +7938,15 @@ class economicgrasp_dpt(nn.Module):
         action_depth_448 = depth_448
         center_z_source = "action"
         diag_geometry_override = end_points.pop("cva_geometry_override", None)
+        depth_override_tensor = end_points.pop("cva_depth_override", None)
+        if depth_override_tensor is not None:
+            if diag_geometry_override is not None:
+                raise ValueError("Use either cva_depth_override or cva_geometry_override, not both")
+            diag_geometry_override = {
+                "evidence_source": "override",
+                "action_source": "override",
+                "depth_override": depth_override_tensor,
+            }
         if diag_geometry_override is not None:
             if not isinstance(diag_geometry_override, dict):
                 raise TypeError("cva_geometry_override must be a dictionary")
