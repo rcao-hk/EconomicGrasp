@@ -22,6 +22,7 @@ def _parse_flags():
     p.add_argument("--export_dataset_name",default="")
     p.add_argument("--export_max_samples",type=int,default=0)
     p.add_argument("--export_seed",type=int,default=20261123)
+    p.add_argument("--allow_valid_depth_mask_fallback",action="store_true")
     a,remaining=p.parse_known_args(); sys.argv=[sys.argv[0],*remaining]
     return a
 A=_parse_flags()
@@ -78,7 +79,7 @@ def _sample_meta(ds,index,sample):
     return scene,int(digits[-4:]),int(anno)
 
 
-def _segmentation_mask(sample,batch,hw,valid):
+def _segmentation_mask(sample,batch,hw,valid,allow_fallback=False):
     h,w=hw
     for source in (sample,batch):
       for key in ("seg_map","segmentation_map","label_map","segmentation","seg","mask"):
@@ -90,6 +91,8 @@ def _segmentation_mask(sample,batch,hw,valid):
         if arr.ndim==3 and arr.shape[-1] in (1,3): arr=arr[...,0]
         if arr.shape==(h,w):
           return (arr>0)&valid,f"segmentation:{key}"
+    if not allow_fallback:
+        raise RuntimeError("No full-resolution segmentation mask found. Supply one in the dataset sample or pass --allow_valid_depth_mask_fallback explicitly.")
     return valid.copy(),"fallback:valid_gt_depth"
 
 
@@ -136,7 +139,8 @@ def main():
       if pred.shape!=gt.shape: raise ValueError(f"pred/GT depth shapes differ: {pred.shape}/{gt.shape}")
       K=batch["K"][0].detach().cpu().numpy().astype(np.float64)
       valid=np.isfinite(gt)&(gt>=cfgs.min_depth)&(gt<=cfgs.max_depth)
-      fg,mask_source=_segmentation_mask(sample,batch,pred.shape,valid)
+      fg,mask_source=_segmentation_mask(sample,batch,pred.shape,valid,
+                                               allow_fallback=A.allow_valid_depth_mask_fallback)
       bg=valid&(~fg)
       scene,scene_id,anno=_sample_meta(ds,index,sample)
       ddir=depth_root/A.export_dataset_type/cfgs.test_mode
