@@ -74,12 +74,14 @@ def main():
         target=aligned_root/name/ds/split; target.mkdir(parents=True,exist_ok=True)
         path=target/f"scene{scene:04d}_anno{anno:04d}.npy"; np.save(path,depth.astype(np.float32))
         record={"dataset":ds,"split":split,"scene_id":scene,"anno_id":anno,
+          "dataset_idx":int(row["dataset_idx"]) if row.get("dataset_idx","").strip() else "",
           "variant":name,"alignment_method":method,"scale_alpha":float(scale),
           "oracle":bool(oracle),
           "oracle_note":"uses GT depth or GT-fitted support plane" if oracle else "uses externally calibrated support plane",
           **metrics,**{f"plane_{k}":v for k,v in plane_stats.items()}}
         rows_out.append(record)
         override_rows.append({"dataset":ds,"split":split,"scene_id":scene,"anno_id":anno,
+          "dataset_idx":int(row["dataset_idx"]) if row.get("dataset_idx","").strip() else "",
           "variant":name,"depth_path":str(path.resolve()),"oracle":bool(oracle),
           "alignment_method":method,"scale_alpha":float(scale)})
     def write_csv(path,records):
