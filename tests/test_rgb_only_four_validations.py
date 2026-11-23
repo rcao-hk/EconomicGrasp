@@ -43,3 +43,11 @@ def test_role_masks_and_fixed_bank_contract():
     assert_fixed_action_bank_identity(ref,cand)
     cand[0,13]=.01
     with pytest.raises(AssertionError): assert_fixed_action_bank_identity(ref,cand)
+
+
+def test_rayrope_position_type_validation():
+    from moge_rayrope.config import ModelConfig
+    for mode in ("ray","pixel2d","point3d"):
+        ModelConfig(position_type=mode)
+    with pytest.raises(ValueError):
+        ModelConfig(position_type="camera_xyz")
