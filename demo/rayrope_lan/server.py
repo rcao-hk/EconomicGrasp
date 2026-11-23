@@ -28,10 +28,6 @@ from .protocol import decode_npz, encode_npz, recv_frame, send_frame
 
 
 LOGGER = logging.getLogger("economicgrasp.rayrope_lan")
-HISTORICAL_CHECKPOINT = (
-    "/data/robotarm/result/grasp/rgbgrasp/"
-    "triple_mix_20261024/point_rayrope/train/checkpoint.tar"
-)
 IMAGE_SIZE = (448, 448)
 
 
@@ -278,10 +274,10 @@ class RayRoPEInferenceService:
 
         if not args.checkpoint:
             raise ValueError(
-                "Set --checkpoint or ECONOMICGRASP_RAYROPE_CKPT to the restored "
-                "50% GraspNet + 50% GN-Trans Point RayRoPE checkpoint. Its "
-                f"historical location was {HISTORICAL_CHECKPOINT}; that result "
-                "directory may have been cleaned after the run."
+                "Set --checkpoint or ECONOMICGRASP_RAYROPE_CKPT to the intended "
+                "two-source 50% GraspNet + 50% GN-Trans Point RayRoPE checkpoint. "
+                "The exact checkpoint path is not recorded in the available "
+                "experiment notes, so no path is guessed here."
             )
         if not os.path.isfile(args.checkpoint):
             raise FileNotFoundError(
