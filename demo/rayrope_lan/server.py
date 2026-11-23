@@ -274,8 +274,8 @@ class RayRoPEInferenceService:
             raise ValueError(
                 "Set --checkpoint or ECONOMICGRASP_RAYROPE_CKPT to the intended "
                 "two-source 50% GraspNet + 50% GN-Trans Point RayRoPE checkpoint. "
-                "The exact checkpoint path is not recorded in the available "
-                "experiment notes, so no path is guessed here."
+                "Checkpoint files are external to this repository, so no "
+                "machine-specific path is guessed here."
             )
         if not os.path.isfile(args.checkpoint):
             raise FileNotFoundError(
