@@ -46,7 +46,6 @@ CUDA_VISIBLE_DEVICES=0 python -m demo.rayrope_lan.server \
   --port 8765 \
   --device cuda:0 \
   --checkpoint /path/to/two_source_rs50_gntrans50_point_rayrope/checkpoint.tar \
-  --expected-checkpoint-sha256 64b465aad689f077ed3914cf65178e025df04ab66e19ba14971ae025df5ae8b3 \
   --top-k 10 \
   --collision-thresh 0.05 \
   --collision-voxel-size 0.01 \
