@@ -14,12 +14,13 @@ import socket
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
 
 from .protocol import decode_npz, encode_npz, recv_frame, send_frame
 
 
 def _load_rgb(path: str) -> np.ndarray:
+    from PIL import Image
+
     with Image.open(path) as image:
         return np.asarray(image.convert("RGB"), dtype=np.uint8)
 
@@ -29,6 +30,8 @@ def _load_depth(path: str) -> np.ndarray:
     if file_path.suffix.lower() == ".npy":
         depth = np.load(file_path, allow_pickle=False)
     else:
+        from PIL import Image
+
         with Image.open(file_path) as image:
             depth = np.asarray(image)
     if depth.ndim == 3 and depth.shape[-1] == 1:
