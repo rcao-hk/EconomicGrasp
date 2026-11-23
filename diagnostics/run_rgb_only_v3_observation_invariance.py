@@ -136,10 +136,13 @@ def _transform_batch(batch,kind,value):
             out[key]=batch[key]@torch.as_tensor(Rz,device=img.device,dtype=batch[key].dtype)
     return out,H,Rz,Knew
 
-def _sample_features(feat,uv):
-    c,h,w=feat.shape[1:]
+def _sample_features(feat,uv,image_hw):
+    image_h,image_w=map(int,image_hw)
     uv=torch.as_tensor(uv,device=feat.device,dtype=feat.dtype)
-    grid=torch.stack((2.*uv[:,0]/max(w-1,1)-1.,2.*uv[:,1]/max(h-1,1)-1.),dim=-1)
+    # grid_sample coordinates are normalized in the input-image frame; this
+    # remains correct even when the feature map is downsampled.
+    grid=torch.stack((2.*uv[:,0]/max(image_w-1,1)-1.,
+                      2.*uv[:,1]/max(image_h-1,1)-1.),dim=-1)
     grid=grid.reshape(1,1,-1,2)
     sampled=F.grid_sample(feat,grid,mode="bilinear",padding_mode="zeros",align_corners=True)
     return sampled[0,:,0,:].transpose(0,1)
@@ -205,7 +208,7 @@ def main():
             ep0=model(dict(batch)); pred0=_decode(ep0)
         _save_pred(root,"identity",scene,cfgs.camera,anno,pred0)
         uv,xyz,K,(h,w)=_probe_points(batch,V.v3_probe_count,V.v3_seed+int(index),cfgs.min_depth,cfgs.max_depth)
-        feat0=_sample_features(ep0["img_feat_dpt"],uv)
+        feat0=_sample_features(ep0["img_feat_dpt"],uv,(h,w))
         for kind,value in _transform_specs():
             transformed,H,Rz,Knew=_transform_batch(batch,kind,value)
             with torch.inference_mode():
@@ -214,7 +217,7 @@ def main():
             inside=(uv1[:,0]>=0)&(uv1[:,0]<w-1)&(uv1[:,1]>=0)&(uv1[:,1]<h-1)
             if inside.sum()<8: raise RuntimeError(f"{kind} leaves too few corresponding physical probes")
             f0=feat0[torch.as_tensor(inside,device=device)]
-            f1=_sample_features(ep1["img_feat_dpt"],uv1[inside])
+            f1=_sample_features(ep1["img_feat_dpt"],uv1[inside],(h,w))
             cos=F.cosine_similarity(f0,f1,dim=-1).detach().cpu().numpy()
             pred1_common=_unroll_predictions(pred1,Rz,kind)
             consistency=match_topk_actions(pred0,pred1_common,topk=V.v3_topk)
