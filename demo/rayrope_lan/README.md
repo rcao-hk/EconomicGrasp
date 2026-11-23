@@ -125,9 +125,10 @@ transform from the current robot pose and the calibrated hand-eye transform.
 If the table frame equals the robot base frame, the same transform may also
 be supplied as `T_base_from_camera`.
 
-`T_base_from_camera` is optional. When supplied, the response includes both
-camera-frame and base-frame grasp poses. Without it, results are returned in
-the camera optical frame.
+`T_base_from_camera` is optional and must map camera-frame coordinates to
+base-frame coordinates (`p_base = T_base_from_camera p_camera`). When supplied,
+the response includes both camera-frame and base-frame grasp poses. Without it,
+results are returned in the camera optical frame.
 
 ### Crop and depth conventions
 
