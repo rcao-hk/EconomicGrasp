@@ -76,6 +76,7 @@ def main():
         record={"dataset":ds,"split":split,"scene_id":scene,"anno_id":anno,
           "dataset_idx":int(row["dataset_idx"]) if row.get("dataset_idx","").strip() else "",
           "variant":name,"alignment_method":method,"scale_alpha":float(scale),
+          "mask_source":row.get("mask_source","provided"),
           "oracle":bool(oracle),
           "oracle_note":"uses GT depth or GT-fitted support plane" if oracle else "uses externally calibrated support plane",
           **metrics,**{f"plane_{k}":v for k,v in plane_stats.items()}}
