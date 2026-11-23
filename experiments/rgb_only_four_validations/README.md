@@ -136,3 +136,29 @@ from depth metrics.
 
 These tests are synthetic CPU geometry/contract tests. They do not replace
 real checkpoint inference or GraspNet/GC6D evaluation.
+
+
+## Geometry intervention semantics (important)
+
+The model exposes three distinct depth roles:
+
+- evidence depth: conditions the image feature enhancement / visual representation;
+- action depth: back-projects selected seed pixels to grasp action anchors;
+- local geometry depth: supplies the local depth geometry to CVA/GVAR readers.
+
+The V1 override dictionary therefore also accepts local_source = pred, gt or
+override. The refined conditions are:
+
+| Condition | Evidence depth | Action anchor | Local geometry depth |
+|---|---|---|---|
+| Baseline | Pred | Pred | Pred |
+| A | GT | Pred | Pred |
+| B1 | Pred | Pred, then GT z-shift on the same ray | Pred |
+| B2 | Pred | GT | GT |
+| Oracle | GT | GT | GT |
+
+This distinction matters: replacing only the action anchor does not replace
+local finger/closing-region geometry. B2 now replaces both the anchor and
+local depth geometry while retaining predicted RGB-evidence conditioning.
+The tensor shortcut cva_depth_override used by V4 applies the same override to
+all three roles.
