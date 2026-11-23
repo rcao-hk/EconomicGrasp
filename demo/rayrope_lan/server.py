@@ -552,7 +552,6 @@ class RayRoPEInferenceService:
         response_metadata = {
             "status": "ok",
             "request_id": request_id,
-            "checkpoint": self.args.checkpoint,
             "checkpoint_sha256": self.checkpoint_sha256,
             "coordinate_frame": str(metadata.get("camera_frame_id", "camera_optical_frame")),
             "base_frame_id": (
