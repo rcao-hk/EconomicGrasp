@@ -55,6 +55,14 @@ def decode_response_metadata(response: dict[str, np.ndarray]) -> dict:
     return _decode_metadata(response)
 
 
+def _json_default(value):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable.")
+
+
 def send_rgbd_request(
     server_ip: str,
     port: int,
@@ -82,7 +90,7 @@ def send_rgbd_request(
     if auth_token:
         request_metadata["auth_token"] = auth_token
     metadata_bytes = json.dumps(
-        request_metadata, separators=(",", ":"), allow_nan=False
+        request_metadata, separators=(",", ":"), allow_nan=False, default=_json_default
     ).encode("utf-8")
     request_payload = encode_npz({
         "rgb": rgb,
