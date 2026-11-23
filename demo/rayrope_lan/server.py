@@ -338,17 +338,20 @@ class RayRoPEInferenceService:
             "--rayrope_checkpoint_chunks",
             str(int(bool(rayrope_cfg.get("checkpoint_chunks", True)))),
         ]
+        original_argv = sys.argv
         sys.argv = model_argv
-
-        # Import after replacing argv because utils.arguments parses CLI options
-        # at import time in the training/evaluation codebase.
-        from utils.arguments import cfgs
-        from models.grasp_designs import design_options, validate_checkpoint_design
-        from models.economicgrasp_bip3d import (
-            economicgrasp_dpt,
-            pred_decode_center_view_angle,
-        )
-        from utils.collision_detector import ModelFreeCollisionDetectorTorch
+        try:
+            # Import after replacing argv because utils.arguments parses CLI
+            # options at import time in the training/evaluation codebase.
+            from utils.arguments import cfgs
+            from models.grasp_designs import design_options, validate_checkpoint_design
+            from models.economicgrasp_bip3d import (
+                economicgrasp_dpt,
+                pred_decode_center_view_angle,
+            )
+            from utils.collision_detector import ModelFreeCollisionDetectorTorch
+        finally:
+            sys.argv = original_argv
 
         self._decode = pred_decode_center_view_angle
         self._collision_detector_cls = ModelFreeCollisionDetectorTorch
