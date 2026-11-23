@@ -125,9 +125,12 @@ def _transform_batch(batch,kind,value):
             if batch[key].shape[-2:]==(h,w): out[key]=_warp_depth_tensor(batch[key],H,"nearest")
     out["K"]=torch.as_tensor(Knew,device=img.device,dtype=batch["K"].dtype).unsqueeze(0)
     if kind=="roll":
-        for key in ("camera_pose_vec","camera_gravity_vec"):
-            if key in batch and torch.is_tensor(batch[key]) and batch[key].shape[-1]==3:
-                out[key]=batch[key]@torch.as_tensor(Rz,device=img.device,dtype=batch[key].dtype)
+        # camera_pose_vec stores the optical-axis direction in the table
+        # frame; a roll about that axis leaves it unchanged. Gravity is in the
+        # camera frame and must be re-expressed in the rolled camera frame.
+        key="camera_gravity_vec"
+        if key in batch and torch.is_tensor(batch[key]) and batch[key].shape[-1]==3:
+            out[key]=batch[key]@torch.as_tensor(Rz,device=img.device,dtype=batch[key].dtype)
         for key in ("point_clouds","coordinates_for_voxel"):
             if key in batch and torch.is_tensor(batch[key]) and batch[key].shape[-1]==3:
                 out[key]=batch[key]@torch.as_tensor(Rz,device=img.device,dtype=batch[key].dtype)
