@@ -192,16 +192,49 @@ def _run_v1(model,ds,indices,device,root,ckpt_sha):
     print(f"[V1 DONE] samples={len(indices)} output={root}")
 
 
+def _cdf_utility(ep):
+    cdf=ep["grasp_cdf_pred_angle_depth"][0]
+    centers=ep["xyz_graspable"][0]
+    Q=int(centers.shape[0])
+    A=int(getattr(cfgs,"num_angle",12))
+    D=int(getattr(cfgs,"num_depth",4))
+    if cdf.ndim!=4:
+        raise RuntimeError(f"Expected 4D per-batch CDF tensor, got {tuple(cdf.shape)}")
+    if tuple(cdf.shape[-2:])==(A,D):
+        if cdf.shape[1]==Q:       # [T,Q,A,D]
+            utility=torch.sigmoid(cdf).mean(dim=0)
+        elif cdf.shape[0]==Q:     # [Q,T,A,D]
+            utility=torch.sigmoid(cdf).mean(dim=1)
+        else:
+            raise RuntimeError(f"Cannot identify CDF query axis in {tuple(cdf.shape)} for Q={Q}")
+    elif tuple(cdf.shape[1:3])==(A,D) and cdf.shape[0]==Q:  # [Q,A,D,T]
+        utility=torch.sigmoid(cdf).mean(dim=-1)
+    else:
+        raise RuntimeError(f"Unsupported CDF layout {tuple(cdf.shape)} for A={A}, D={D}, Q={Q}")
+    if tuple(utility.shape)!=(Q,A,D):
+        raise RuntimeError(f"CDF utility shape {tuple(utility.shape)} != {(Q,A,D)}")
+    return utility
+
+
+def _select_width(width,depth_idx,q,angle_idx,Q,A,D):
+    if tuple(width.shape)==(D,Q,A):
+        return width[depth_idx,q,angle_idx]
+    if tuple(width.shape)==(Q,A,D):
+        return width[q,angle_idx,depth_idx]
+    if tuple(width.shape)==(Q,D,A):
+        return width[q,depth_idx,angle_idx]
+    raise RuntimeError(f"Unsupported grasp width layout {tuple(width.shape)}")
+
+
 def _build_fixed_action_bank(ep,device):
-    cdf=ep["grasp_cdf_pred_angle_depth"][0]  # [T,Q,A,D]
-    width=ep["grasp_width_pred_angle_depth"][0]  # [D,Q,A]
-    utility=torch.sigmoid(cdf).mean(dim=0)  # [Q,A,D]
+    utility=_cdf_utility(ep)
+    width=ep["grasp_width_pred_angle_depth"][0]
     Q,A,D=utility.shape
     q=torch.arange(Q,device=device)
     flat=utility.reshape(Q,A*D).argmax(dim=-1)
     angle_idx=torch.div(flat,D,rounding_mode="floor")
     depth_idx=flat%D
-    width_pred=width[depth_idx,q,angle_idx]
+    width_pred=_select_width(width,depth_idx,q,angle_idx,Q,A,D)
     width_m=(1.2*width_pred/10.0).clamp(0.0,float(cfgs.grasp_max_width))
     insertion=(depth_idx.to(width_pred.dtype)+1.0)*0.01
     centers=ep["xyz_graspable"][0]
@@ -215,23 +248,15 @@ def _build_fixed_action_bank(ep,device):
                     width_m[:,None],height[:,None],insertion[:,None],
                     rotations.reshape(Q,9),centers,obj_id[:,None]),dim=1)
     return {
-      "pred":pred,
-      "candidate_id":q,
-      "angle_idx":angle_idx,
-      "depth_idx":depth_idx,
-      "centers":centers,
-      "view_xyz":view_xyz,
-      "rotations":rotations,
-      "width_m":width_m,
-      "insertion_depth_m":insertion,
-      "token_sel_idx":ep["token_sel_idx"][0],
-      "shape":(Q,A,D),
+      "pred":pred,"candidate_id":q,"angle_idx":angle_idx,"depth_idx":depth_idx,
+      "centers":centers,"view_xyz":view_xyz,"rotations":rotations,
+      "width_m":width_m,"insertion_depth_m":insertion,
+      "token_sel_idx":ep["token_sel_idx"][0],"shape":(Q,A,D),
     }
 
 
 def _make_fixed_bank_prediction(ep,bank):
-    cdf=ep["grasp_cdf_pred_angle_depth"][0]
-    utility=torch.sigmoid(cdf).mean(dim=0)
+    utility=_cdf_utility(ep)
     q=bank["candidate_id"].long()
     a=bank["angle_idx"].long()
     d=bank["depth_idx"].long()
