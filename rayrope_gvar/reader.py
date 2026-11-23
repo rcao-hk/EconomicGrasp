@@ -194,6 +194,19 @@ class GripperVolumeReader(nn.Module):
         self.norm = nn.LayerNorm(C)
         self.out_projection = nn.Linear(C, hidden_dim)
         self.last_debug = {}
+        self.role_mask = None  # runtime-only; no checkpoint parameters
+
+    def set_role_mask(self, mask) -> None:
+        """Set an inference-only six-role mask without changing model weights."""
+        if self.training:
+            raise RuntimeError("GVAR role masks are inference-only")
+        if mask is None:
+            self.role_mask = None
+            return
+        value = torch.as_tensor(mask, dtype=torch.bool).reshape(-1)
+        if value.numel() != 6 or not bool(value.any()):
+            raise ValueError("GVAR role mask must contain six booleans and keep at least one role")
+        self.role_mask = tuple(bool(x) for x in value.tolist())
 
     def set_counterfactual(self, mode: str) -> None:
         if mode not in COUNTERFACTUAL_SOURCES:
@@ -204,7 +217,7 @@ class GripperVolumeReader(nn.Module):
             raise RuntimeError("Counterfactual probing is inference-only")
         self.counterfactual_mode = mode
 
-    def _read_chunk(self, queries, fmap, depth, centers, rotations, K, depths, image_hw):
+    def _read_chunk(self, queries, fmap, depth, centers, rotations, K, depths, role_mask, image_hw):
         cfg = self.cfg
         # RGB samples and geometric residuals are distinct evidence streams.
         # In the hybrid only: RGB uses fixed d_ref; geometry uses executed d.
@@ -231,7 +244,8 @@ class GripperVolumeReader(nn.Module):
                                              centers, rotations, K, geom_valid, cfg.geometry_scale_m)
         else:
             geom = patch.new_zeros((*patch.shape[:2], 6))
-        mask_valid = valid
+        role_keep = role_mask.to(device=valid.device, dtype=torch.bool)[roles]
+        mask_valid = valid & role_keep[None]
         if self.counterfactual_mode != "r0":
             if self.training or cfg.variant != "volume_rel":
                 raise RuntimeError("Counterfactuals only apply to frozen volume_rel")
@@ -245,7 +259,7 @@ class GripperVolumeReader(nn.Module):
                     depths[:, None, None].expand(-1, 36, 1) / cfg.geometry_scale_m,
                     valid_fixed[..., None].to(fixed.dtype)), -1).to(patch.dtype)
             if mask_src == "fixed":
-                mask_valid = valid_fixed
+                mask_valid = valid_fixed & role_keep[None]
         tokens = patch + self.role_embedding(roles)[None] + self.metadata_projection(meta)
         tokens = tokens + self.geometry_projection(geom.to(tokens.dtype))
         # Attention masking follows the chosen RGB projection; geometry keeps
@@ -276,6 +290,15 @@ class GripperVolumeReader(nn.Module):
         K = context["K"].detach()
         depth = context["depth"].detach()
         image_hw = context["image_hw"]
+        role_mask = context.get("role_mask", None)
+        if role_mask is None:
+            role_mask = self.role_mask
+        if role_mask is None:
+            role_mask = torch.ones(6, device=queries.device, dtype=torch.bool)
+        else:
+            role_mask = torch.as_tensor(role_mask, device=queries.device, dtype=torch.bool).reshape(-1)
+            if role_mask.numel() != 6 or not bool(role_mask.any()):
+                raise ValueError("GVAR context role_mask must keep at least one of six roles")
         fmap = self.feature_projection(pregeom)  # project before upsampling (bounded channels)
         if tuple(fmap.shape[-2:]) != tuple(image_hw):
             fmap = F.interpolate(fmap, size=image_hw, mode="bilinear", align_corners=False)
@@ -291,7 +314,8 @@ class GripperVolumeReader(nn.Module):
                 ids = torch.arange(start, end, device=queries.device)
                 parent, depth_id = ids // D, ids % D
                 inputs = (flat[b, start:end], fmap[b:b+1], depth[b:b+1],
-                          centers[b, parent], rotations[b, parent], K[b], insertion[depth_id])
+                          centers[b, parent], rotations[b, parent], K[b], insertion[depth_id],
+                          role_mask)
                 def run(*args):
                     return self._read_chunk(*args, image_hw=image_hw)
                 if self.training and self.cfg.activation_checkpoint and torch.is_grad_enabled():

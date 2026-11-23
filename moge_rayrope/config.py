@@ -12,6 +12,7 @@ class ModelConfig:
     use_moge: bool = False
     use_rayrope: bool = False
     ray_encoding: str = "expected"  # none: same attention without RoPE
+    position_type: str = "ray"      # ray / pixel2d / point3d positional coordinates
     uncertainty: str = "fixed"      # point/none do not execute a sigma head
     uncertainty_loss: str = "interval"  # interval / laplace_decoupled / laplace_joint
     fixed_halfwidth: float = 0.02
@@ -43,6 +44,8 @@ class ModelConfig:
             raise ValueError("This controlled experiment supports none/global_film")
         if self.ray_encoding not in ("none", "point", "expected"):
             raise ValueError("ray_encoding must be none/point/expected")
+        if self.position_type not in ("ray", "pixel2d", "point3d"):
+            raise ValueError("position_type must be ray/pixel2d/point3d")
         if self.uncertainty not in ("fixed", "learned"):
             raise ValueError("uncertainty must be fixed/learned")
         if self.uncertainty_loss not in ("interval", "laplace_decoupled", "laplace_joint"):

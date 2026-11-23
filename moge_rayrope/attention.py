@@ -8,6 +8,7 @@ This is NOT E[softmax(attention)] and NOT Gaussian positional encoding.
 from __future__ import annotations
 import math
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
@@ -107,8 +108,29 @@ class GraspRayRoPEGrouping(nn.Module):
         if self.cfg.ray_encoding!='expected': hw=torch.zeros_like(hw)
         lo=rays*(mu-hw).clamp_min(.001)[...,None]
         hi=rays*(mu+hw).clamp_min(.001)[...,None]
-        query,lower,upper,infront=ray_coordinates_in_grasp_frame(center,R,lo,hi,
-                                        self.cfg.virtual_standoff,self.cfg.ray_length_unit)
+        if self.cfg.position_type == "ray":
+            query,lower,upper,infront=ray_coordinates_in_grasp_frame(center,R,lo,hi,
+                                            self.cfg.virtual_standoff,self.cfg.ray_length_unit)
+        elif self.cfg.position_type == "pixel2d":
+            # Conventional image-plane 2D RoPE using normalized query/support pixels.
+            qxy = torch.stack((2.0*uv[...,0]/max(W-1,1)-1.0,
+                               2.0*uv[...,1]/max(H-1,1)-1.0), -1)
+            kxy = torch.stack((2.0*pix[...,0]/max(W-1,1)-1.0,
+                               2.0*pix[...,1]/max(H-1,1)-1.0), -1)
+            query = F.pad(qxy, (0, 4))
+            lower = upper = F.pad(kxy, (0, 4))
+            infront = torch.isfinite(mu) & (mu > 0)
+        elif self.cfg.position_type == "point3d":
+            # Metric 3D point RoPE in the candidate grasp frame.
+            points = rays * mu[...,None]
+            relative = torch.einsum('bmlc,bmcd->bmld', points-center[:,:,None], R)
+            relative = relative / float(self.cfg.ray_length_unit)
+            zeros = torch.zeros_like(relative)
+            query = torch.zeros((B,M,6), device=seed.device, dtype=seed.dtype)
+            lower = upper = torch.cat((relative, zeros), -1)
+            infront = torch.isfinite(points).all(-1) & torch.isfinite(relative).all(-1) & (mu > 0)
+        else:
+            raise ValueError(f"Unknown RayRoPE position_type={self.cfg.position_type!r}")
         valid=valid&infront&torch.isfinite(mu)&(mu>0)
         if self.cfg.use_shape_tokens:
             p=sample_map(shape.float(),pix,image_hw)

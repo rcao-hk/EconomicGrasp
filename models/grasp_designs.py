@@ -16,6 +16,7 @@ def design_options(args):
         gvar_action_chunk=int(getattr(args, "gvar_action_chunk", 256)),
         rayrope_checkpoint_chunks=bool(getattr(args, "rayrope_checkpoint_chunks", True)),
         gvar_activation_checkpoint=bool(getattr(args, "gvar_activation_checkpoint", True)),
+        rayrope_position_type=str(getattr(args, "rayrope_position_type", "ray")),
     )
 
 
@@ -32,12 +33,14 @@ def supply_gvar_context(module, args, kwargs):
         K=kwargs["camera_K"].detach(),
         depth=kwargs["depth_map"].detach(),
         image_hw=tuple(kwargs["depth_map"].shape[-2:]),
+        role_mask=ep.pop("cva_gvar_role_mask", None),
     )
 
 
 def install_grasp_designs(model, *, enable_point_rayrope=False, enable_gvar=False,
                           rayrope_group_chunk=32, gvar_action_chunk=256,
-                          rayrope_checkpoint_chunks=True, gvar_activation_checkpoint=True):
+                          rayrope_checkpoint_chunks=True, gvar_activation_checkpoint=True,
+                          rayrope_position_type="ray"):
     """No module construction/RNG consumption when both designs are disabled."""
     model.grasp_design = dict(enable_point_rayrope=bool(enable_point_rayrope),
                              enable_gvar=bool(enable_gvar))
@@ -62,6 +65,7 @@ def install_grasp_designs(model, *, enable_point_rayrope=False, enable_gvar=Fals
                     self.geometry_context = None
 
         cfg = ModelConfig(use_rayrope=True, ray_encoding="point",
+                          position_type=rayrope_position_type,
                           group_chunk=rayrope_group_chunk,
                           checkpoint_chunks=rayrope_checkpoint_chunks)
         group_module.group = PointGrouping(cfg, model.seed_feature_dim,

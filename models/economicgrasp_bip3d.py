@@ -7930,6 +7930,77 @@ class economicgrasp_dpt(nn.Module):
         if not self.use_obs_depth:
             depth_refined_correction_448 = torch.zeros_like(depth_448)
 
+        # Diagnostic-only geometry interventions. These keys are absent from
+        # ordinary training/inference, so the default path remains unchanged.
+        # Split the geometry used for evidence sampling from the geometry used
+        # to place the physical action anchor.
+        evidence_depth_448 = depth_448
+        action_depth_448 = depth_448
+        center_z_source = "action"
+        diag_geometry_override = end_points.pop("cva_geometry_override", None)
+        if diag_geometry_override is not None:
+            if not isinstance(diag_geometry_override, dict):
+                raise TypeError("cva_geometry_override must be a dictionary")
+
+            def _as_depth_map(value, name):
+                if not torch.is_tensor(value):
+                    value = torch.as_tensor(value, device=img.device)
+                value = value.to(device=img.device, dtype=depth_448.dtype)
+                if value.dim() == 3:
+                    value = value.unsqueeze(1)
+                elif value.dim() == 4:
+                    value = value[:, :1]
+                else:
+                    raise ValueError(f"{name} must be [B,H,W] or [B,1,H,W], got {tuple(value.shape)}")
+                if value.shape[0] != B:
+                    raise ValueError(f"{name} batch mismatch: {value.shape[0]} != {B}")
+                if value.shape[-2:] != (H, W):
+                    value = F.interpolate(value, size=(H, W), mode="nearest")
+                if not torch.isfinite(value).all():
+                    raise FloatingPointError(f"{name} contains non-finite values")
+                return value
+
+            gt_depth_for_diag = end_points.get("gt_depth_m", None)
+            if gt_depth_for_diag is not None:
+                gt_depth_for_diag = _as_depth_map(gt_depth_for_diag, "gt_depth_m")
+
+            def _source_depth(source, fallback, name):
+                if source == "pred":
+                    return fallback
+                if source == "gt":
+                    if gt_depth_for_diag is None:
+                        raise KeyError(f"{name}=gt requires end_points['gt_depth_m']")
+                    return gt_depth_for_diag
+                if source == "override":
+                    value = diag_geometry_override.get(f"{name}_depth")
+                    if value is None:
+                        value = diag_geometry_override.get("depth_override")
+                    if value is None:
+                        raise KeyError(f"{name}=override requires {name}_depth or depth_override")
+                    return _as_depth_map(value, f"{name}_depth_override")
+                raise ValueError(f"Unsupported {name} geometry source: {source!r}")
+
+            evidence_depth_448 = _source_depth(
+                str(diag_geometry_override.get("evidence_source", "pred")),
+                depth_448,
+                "evidence",
+            )
+            action_depth_448 = _source_depth(
+                str(diag_geometry_override.get("action_source", "pred")),
+                depth_448,
+                "action",
+            )
+            center_z_source = str(diag_geometry_override.get("center_z_source", "action"))
+            if center_z_source not in ("action", "gt_ray_shift"):
+                raise ValueError(f"Unsupported center_z_source={center_z_source!r}")
+            if center_z_source == "gt_ray_shift" and gt_depth_for_diag is None:
+                raise KeyError("center_z_source='gt_ray_shift' requires gt_depth_m")
+            if center_z_source == "gt_ray_shift" and str(diag_geometry_override.get("action_source", "pred")) != "pred":
+                raise ValueError("gt_ray_shift is defined only with predicted local action geometry")
+
+        end_points["depth_map_evidence"] = evidence_depth_448
+        end_points["depth_map_action"] = action_depth_448
+
         if self.stride > 1:
             depth_tok = F.interpolate(
                 depth_448,
@@ -7958,7 +8029,7 @@ class economicgrasp_dpt(nn.Module):
         proposal_path1_enh, spatial_aux = self.spatial_enhancer(
             feat_2d=proposal_path1,
             depth_prob=None,
-            depth_map=depth_448,     # final depth: RGB direct or observed + residual
+            depth_map=evidence_depth_448,  # diagnostic split: evidence geometry
             K=K,
             image_hw=(H, W),
             return_maps=False,
@@ -7977,7 +8048,7 @@ class economicgrasp_dpt(nn.Module):
         # ``depth_map_pred`` is retained as the historical geometry/loss key.
         # For the privileged teacher it is the clean GT input, not a prediction.
         end_points["depth_map_pred"] = depth_448
-        end_points["depth_map_used_for_geometry"] = depth_448
+        end_points["depth_map_used_for_geometry"] = action_depth_448
         end_points["depth_tok_pred"] = depth_tok
         end_points["D: Geometry depth source GT"] = depth_448.new_tensor(
             float(self.geometry_depth_source == "gt")
@@ -8102,9 +8173,9 @@ class economicgrasp_dpt(nn.Module):
             valid_tok = torch.ones((B, Ntok), device=img.device, dtype=torch.bool)
 
         depth_valid_tok = (
-            torch.isfinite(depth_448)
-            & (depth_448 > self.min_depth)
-            & (depth_448 < self.max_depth)
+            torch.isfinite(action_depth_448)
+            & (action_depth_448 > self.min_depth)
+            & (action_depth_448 < self.max_depth)
         ).view(B, -1)
 
         valid_tok = valid_tok & depth_valid_tok
@@ -8128,22 +8199,97 @@ class economicgrasp_dpt(nn.Module):
         end_points['D: GraspSel mean'] = grasp_sel.mean().reshape(())
 
         graspable_mask = mask_thr_pred
-        (
-            seed_features_graspable,
-            seed_xyz_graspable,
-            token_sel_idx,
-            xyz_all_pred,
-            uv_all,
-            graspable_num_batch,
-        ) = self._select_graspable_seed_queries(
-            feat_grid=feat_grid,
-            depth_map=depth_448,
-            camera_K=K,
-            graspable_mask=graspable_mask,
-            valid_tok=valid_tok,
-            grasp_score=grasp_sel,
-            end_points=end_points,
-        )
+        fixed_token_sel_idx = end_points.pop("cva_fixed_token_sel_idx", None)
+        if fixed_token_sel_idx is not None:
+            fixed_token_sel_idx = torch.as_tensor(
+                fixed_token_sel_idx, device=img.device, dtype=torch.long
+            )
+            if fixed_token_sel_idx.dim() == 1:
+                fixed_token_sel_idx = fixed_token_sel_idx.unsqueeze(0).expand(B, -1)
+            if fixed_token_sel_idx.dim() != 2 or fixed_token_sel_idx.shape[0] != B:
+                raise ValueError(
+                    "cva_fixed_token_sel_idx must be [Q] or [B,Q], got "
+                    f"{tuple(fixed_token_sel_idx.shape)}"
+                )
+            if fixed_token_sel_idx.numel() == 0 or (
+                (fixed_token_sel_idx < 0) | (fixed_token_sel_idx >= Ntok)
+            ).any():
+                raise ValueError("cva_fixed_token_sel_idx is empty or out of image bounds")
+            flat_action_depth = action_depth_448[:, 0].reshape(B, -1)
+            fixed_z = flat_action_depth.gather(1, fixed_token_sel_idx)
+            fixed_valid = (
+                torch.isfinite(fixed_z)
+                & (fixed_z > self.min_depth)
+                & (fixed_z < self.max_depth)
+            )
+            if not bool(fixed_valid.all()):
+                raise RuntimeError(
+                    "Fixed seed bank contains invalid action-depth pixels; "
+                    "construct the bank on the common valid-depth intersection."
+                )
+            seed_features_graspable = feat_grid.reshape(B, feat_grid.shape[1], -1).gather(
+                2, fixed_token_sel_idx[:, None, :].expand(-1, feat_grid.shape[1], -1)
+            ).contiguous()
+            uv_fixed = torch.stack(
+                (
+                    (fixed_token_sel_idx % W).to(depth_448.dtype),
+                    torch.div(fixed_token_sel_idx, W, rounding_mode="floor").to(depth_448.dtype),
+                ),
+                dim=-1,
+            )
+            seed_xyz_graspable = self._backproject_uvz(
+                uv_fixed, fixed_z.unsqueeze(-1), K
+            )
+            token_sel_idx = fixed_token_sel_idx
+            xyz_all_pred = None
+            uv_all = None
+            graspable_num_batch = int(fixed_token_sel_idx.shape[1])
+        else:
+            (
+                seed_features_graspable,
+                seed_xyz_graspable,
+                token_sel_idx,
+                xyz_all_pred,
+                uv_all,
+                graspable_num_batch,
+            ) = self._select_graspable_seed_queries(
+                feat_grid=feat_grid,
+                depth_map=action_depth_448,
+                camera_K=K,
+                graspable_mask=graspable_mask,
+                valid_tok=valid_tok,
+                grasp_score=grasp_sel,
+                end_points=end_points,
+            )
+
+        if center_z_source == "gt_ray_shift":
+            gt_depth_for_center = end_points.get("gt_depth_m", None)
+            if gt_depth_for_center is None:
+                raise KeyError("gt_ray_shift requires gt_depth_m")
+            if gt_depth_for_center.dim() == 3:
+                gt_depth_for_center = gt_depth_for_center.unsqueeze(1)
+            elif gt_depth_for_center.dim() == 4:
+                gt_depth_for_center = gt_depth_for_center[:, :1]
+            gt_depth_for_center = gt_depth_for_center.to(
+                device=img.device, dtype=seed_xyz_graspable.dtype
+            )
+            if gt_depth_for_center.shape[-2:] != (H, W):
+                gt_depth_for_center = F.interpolate(
+                    gt_depth_for_center, size=(H, W), mode="nearest"
+                )
+            gt_z = gt_depth_for_center[:, 0].reshape(B, -1).gather(1, token_sel_idx)
+            if not bool((torch.isfinite(gt_z) & (gt_z > self.min_depth) & (gt_z < self.max_depth)).all()):
+                raise RuntimeError("Ray-shift center bank contains invalid GT depth")
+            uv_center = torch.stack(
+                (
+                    (token_sel_idx % W).to(seed_xyz_graspable.dtype),
+                    torch.div(token_sel_idx, W, rounding_mode="floor").to(seed_xyz_graspable.dtype),
+                ),
+                dim=-1,
+            )
+            seed_xyz_graspable = self._backproject_uvz(
+                uv_center, gt_z.unsqueeze(-1), K
+            )
 
         end_points['xyz_graspable'] = seed_xyz_graspable
         end_points['token_sel_idx'] = token_sel_idx
@@ -8351,7 +8497,7 @@ class economicgrasp_dpt(nn.Module):
             seed_xyz=seed_xyz_graspable,
             token_sel_idx=token_sel_idx,
             feat_map=feat_grid,
-            depth_map=(depth_448.detach() if (self.enable_point_rayrope or self.enable_gvar) else depth_448),
+            depth_map=(evidence_depth_448.detach() if (self.enable_point_rayrope or self.enable_gvar) else evidence_depth_448),
             camera_K=K,
             end_points=end_points,
             is_training=self.is_training,
