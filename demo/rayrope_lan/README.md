@@ -15,11 +15,10 @@ Point RayRoPE run, with the pose-aware DAV2/DPT metric-depth path using
 `global_film`. This is distinct from the GC6D-inclusive three-source
 experiment; **do not use the GraspNet+GN-Trans+GC6D checkpoint** for this demo.
 
-The exact checkpoint path and SHA256 for the requested two-source checkpoint
-are not present in the retrieved experiment records. Therefore the server
-requires an explicit `--checkpoint` path (or
-`ECONOMICGRASP_RAYROPE_CKPT`) and does not guess a similarly named checkpoint.
-If you have the checkpoint's SHA256, pass it with
+The checkpoint artifact is external to this repository and its path is
+machine-specific. The server therefore requires an explicit `--checkpoint`
+path (or `ECONOMICGRASP_RAYROPE_CKPT`) and does not guess a similarly named
+checkpoint. If you have the checkpoint's SHA256, pass it with
 `--expected-checkpoint-sha256`.
 
 The server checks the checkpoint's `grasp_design` metadata for Point RayRoPE
