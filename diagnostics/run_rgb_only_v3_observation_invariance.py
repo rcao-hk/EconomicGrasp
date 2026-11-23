@@ -131,9 +131,9 @@ def _transform_batch(batch,kind,value):
         key="camera_gravity_vec"
         if key in batch and torch.is_tensor(batch[key]) and batch[key].shape[-1]==3:
             out[key]=batch[key]@torch.as_tensor(Rz,device=img.device,dtype=batch[key].dtype)
-        for key in ("point_clouds","coordinates_for_voxel"):
-            if key in batch and torch.is_tensor(batch[key]) and batch[key].shape[-1]==3:
-                out[key]=batch[key]@torch.as_tensor(Rz,device=img.device,dtype=batch[key].dtype)
+        key="point_clouds"
+        if key in batch and torch.is_tensor(batch[key]) and batch[key].shape[-1]==3:
+            out[key]=batch[key]@torch.as_tensor(Rz,device=img.device,dtype=batch[key].dtype)
     return out,H,Rz,Knew
 
 def _sample_features(feat,uv):
