@@ -150,11 +150,11 @@ def _decode(ep):
 
 def _run_v1(model,ds,indices,device,root,ckpt_sha):
     conditions=[
-      ("baseline_pred_pred",{"evidence_source":"pred","action_source":"pred","center_z_source":"action"},False),
-      ("A_gt_evidence_pred_action",{"evidence_source":"gt","action_source":"pred","center_z_source":"action"},True),
-      ("B1_pred_evidence_gt_ray_center",{"evidence_source":"pred","action_source":"pred","center_z_source":"gt_ray_shift"},True),
-      ("B2_pred_evidence_gt_full_action",{"evidence_source":"pred","action_source":"gt","center_z_source":"action"},True),
-      ("oracle_gt_evidence_gt_action",{"evidence_source":"gt","action_source":"gt","center_z_source":"action"},True),
+      ("baseline_pred_all",{"evidence_source":"pred","action_source":"pred","local_source":"pred","center_z_source":"action"},False),
+      ("A_gt_evidence_pred_action",{"evidence_source":"gt","action_source":"pred","local_source":"pred","center_z_source":"action"},True),
+      ("B1_pred_evidence_gt_ray_center",{"evidence_source":"pred","action_source":"pred","local_source":"pred","center_z_source":"gt_ray_shift"},True),
+      ("B2_pred_evidence_gt_action_local",{"evidence_source":"pred","action_source":"gt","local_source":"gt","center_z_source":"action"},True),
+      ("oracle_gt_all",{"evidence_source":"gt","action_source":"gt","local_source":"gt","center_z_source":"action"},True),
     ]
     records=[]
     for n,index in enumerate(indices):
@@ -181,6 +181,7 @@ def _run_v1(model,ds,indices,device,root,ckpt_sha):
                  "variant":np.asarray(variant),"oracle":np.asarray(oracle),
                  "evidence_source":np.asarray(override["evidence_source"]),
                  "action_source":np.asarray(override["action_source"]),
+                 "local_source":np.asarray(override.get("local_source","pred")),
                  "center_z_source":np.asarray(override["center_z_source"])},
             )
             records.append({"split":cfgs.test_mode,"scene_id":scene_id,"anno_id":anno,
