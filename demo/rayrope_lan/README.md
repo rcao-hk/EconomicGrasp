@@ -10,25 +10,28 @@ score sorting and grasp NMS.
 
 ## Model and checkpoint
 
-The intended checkpoint is the verified 50% GraspNet + 50% GN-Trans
-Point RayRoPE run:
+The intended model is the **two-source** 50% GraspNet-1Billion + 50% GN-Trans
+Point RayRoPE run, with the pose-aware DAV2/DPT metric-depth path using
+`global_film`. The experiment record identifies 12,800 GraspNet frames and
+12,800 GN-Trans frames, with a fixed final e19 checkpoint. This is distinct
+from the GC6D-inclusive three-source experiment; **do not use the
+GraspNet+GN-Trans+GC6D checkpoint** for this demo.
 
-- Original path: `/data/robotarm/result/grasp/rgbgrasp/triple_mix_20261024/point_rayrope/train/checkpoint.tar`
-- Epoch: 20 (final e19)
-- SHA256: `64b465aad689f077ed3914cf65178e025df04ab66e19ba14971ae025df5ae8b3`
-- Design: Point RayRoPE enabled, GVAR disabled, CDF head, pose-aware DPT
-  using `global_film`.
+The exact checkpoint path and SHA256 for the requested two-source checkpoint
+are not present in the retrieved experiment records. Therefore the server
+requires an explicit `--checkpoint` path (or
+`ECONOMICGRASP_RAYROPE_CKPT`) and does not guess a similarly named checkpoint.
+If you have the checkpoint's SHA256, pass it with
+`--expected-checkpoint-sha256`.
 
-The original result directory was later cleaned, so the server does not assume
-that historical path still exists. Restore the checkpoint from your backup and
-pass its current location with `--checkpoint` or
-`ECONOMICGRASP_RAYROPE_CKPT`. Use `--expected-checkpoint-sha256` to verify
-that the restored file is the intended checkpoint.
+The server checks the checkpoint's `grasp_design` metadata for Point RayRoPE
+and rejects GVAR-enabled checkpoints. It also loads the state dict strictly
+and reads RayRoPE grouping chunk/checkpoint settings from the checkpoint
+metadata. These checks validate architecture compatibility; they do not
+independently prove the training-data mixture if the checkpoint does not store
+that provenance.
 
-The server checks the checkpoint's `grasp_design` metadata and loads the
-state dict strictly. It reads the RayRoPE grouping chunk/checkpoint settings
-from the checkpoint metadata rather than silently substituting defaults.
-The complete checkpoint already contains the DINOv2/DPT weights, so the server
+The complete checkpoint should contain the DINOv2/DPT weights, so the server
 uses the inference-only `load_pretrained_depth_backbone=False` path and does
 not require a separate `checkpoints/depth_anything_v2_vitb.pth` file.
 
@@ -42,7 +45,7 @@ CUDA_VISIBLE_DEVICES=0 python -m demo.rayrope_lan.server \
   --host 0.0.0.0 \
   --port 8765 \
   --device cuda:0 \
-  --checkpoint /data/robotarm/result/grasp/rgbgrasp/triple_mix_20261024/point_rayrope/train/checkpoint.tar \
+  --checkpoint /path/to/two_source_rs50_gntrans50_point_rayrope/checkpoint.tar \
   --expected-checkpoint-sha256 64b465aad689f077ed3914cf65178e025df04ab66e19ba14971ae025df5ae8b3 \
   --top-k 10 \
   --collision-thresh 0.05 \
