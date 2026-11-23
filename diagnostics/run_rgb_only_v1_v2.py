@@ -35,7 +35,7 @@ from utils.arguments import cfgs
 from models.grasp_designs import design_options,validate_checkpoint_design
 from dataset.graspnet_dataset import GraspNetMultiDataset,collate_fn
 from models.economicgrasp_bip3d import economicgrasp_dpt,pred_decode_center_view_angle
-from utils.label_generation import batch_viewpoint_params_to_matrix
+from utils.loss_utils import batch_viewpoint_params_to_matrix
 from diagnostics.rgb_only_validation_geometry import ROLE_MASKS,normalize_role_mask,assert_fixed_action_bank_identity
 
 
