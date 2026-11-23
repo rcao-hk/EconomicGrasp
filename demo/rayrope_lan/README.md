@@ -12,10 +12,8 @@ score sorting and grasp NMS.
 
 The intended model is the **two-source** 50% GraspNet-1Billion + 50% GN-Trans
 Point RayRoPE run, with the pose-aware DAV2/DPT metric-depth path using
-`global_film`. The experiment record identifies 12,800 GraspNet frames and
-12,800 GN-Trans frames, with a fixed final e19 checkpoint. This is distinct
-from the GC6D-inclusive three-source experiment; **do not use the
-GraspNet+GN-Trans+GC6D checkpoint** for this demo.
+`global_film`. This is distinct from the GC6D-inclusive three-source
+experiment; **do not use the GraspNet+GN-Trans+GC6D checkpoint** for this demo.
 
 The exact checkpoint path and SHA256 for the requested two-source checkpoint
 are not present in the retrieved experiment records. Therefore the server
