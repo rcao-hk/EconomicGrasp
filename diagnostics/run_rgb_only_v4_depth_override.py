@@ -20,6 +20,8 @@ def _parse_flags():
     p.add_argument("--v4_dataset_module",default="")
     p.add_argument("--v4_dataset_class",default="")
     p.add_argument("--v4_dataset_kwargs_json",default="{}")
+    p.add_argument("--v4_collate_module",default="dataset.graspnet_dataset")
+    p.add_argument("--v4_collate_name",default="collate_fn")
     p.add_argument("--v4_dataset_name",default="")
     p.add_argument("--v4_variants",nargs="*",default=None)
     p.add_argument("--v4_max_samples",type=int,default=0)
@@ -30,7 +32,6 @@ V=_parse_flags()
 from utils.arguments import cfgs
 from models.grasp_designs import design_options,validate_checkpoint_design
 from models.economicgrasp_bip3d import economicgrasp_dpt,pred_decode_center_view_angle
-from dataset.graspnet_dataset import collate_fn
 
 
 def _load_model(device):
@@ -110,6 +111,13 @@ def _instantiate_dataset():
     if accepts_kwargs:
         for k,v in extra.items(): kwargs[k]=v
     return cls(**kwargs)
+
+
+def _get_collate_fn():
+    module=importlib.import_module(V.v4_collate_module)
+    if not hasattr(module,V.v4_collate_name):
+        raise AttributeError(f"Collate function {V.v4_collate_module}.{V.v4_collate_name} not found")
+    return getattr(module,V.v4_collate_name)
 
 
 def _dataset_indices(ds):
@@ -208,13 +216,14 @@ def main():
     if cfgs.collision_thresh>0: raise RuntimeError("V4 saves unfiltered candidates; set collision_thresh=0")
     device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model,ckpt_sha=_load_model(device); ds=_instantiate_dataset(); indices=_dataset_indices(ds)
+    collate=_get_collate_fn()
     variants,mapping=_load_manifest()
     root=Path(V.v4_output_root); root.mkdir(parents=True,exist_ok=True)
     records=[]
     for n,index in enumerate(indices):
         np.random.seed(V.v4_seed+int(index)); torch.manual_seed(V.v4_seed+int(index))
         sample=ds[int(index)]; scene,scene_id,anno,dataset_idx=_sample_meta(ds,index,sample)
-        batch=_move(collate_fn([sample]),device)
+        batch=_move(collate([sample]),device)
         rows={}
         for variant in variants:
             row=_find_row(mapping,variant,cfgs.test_mode,scene_id,anno,dataset_idx)
